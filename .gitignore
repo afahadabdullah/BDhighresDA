@@ -1,0 +1,25 @@
+# data is large and, for BMD gauges, not redistributable
+data/
+!data/.gitkeep
+runs/
+results/
+logs/
+*.zarr/
+*.nc
+*.nc4
+*.npz
+*.pt
+*.ckpt
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+.DS_Store
+*.pdf

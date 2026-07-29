@@ -1,0 +1,34 @@
+# Single H100 (80 GB) -- bigger batch, bf16 autocast selected automatically.
+data:
+  zarr: data/processed/bd_wide.zarr
+  stats: data/processed/stats.json
+  crop: 128
+  seasonal_encoding: true
+  years:
+    train: [2001, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 32]
+  dropout: 0.1
+  num_heads: 4
+
+train:
+  out_dir: runs/stageB_h100
+  epochs: 600
+  batch_size: 32
+  lr: 1.5e-4
+  weight_decay: 0.01
+  warmup_steps: 1500
+  grad_clip: 1.0
+  ema_decay: 0.9995
+  cond_dropout: 0.10
+  logit_normal_t: true
+  num_workers: 8
+  seed: 0
+  log_every: 50
+  ckpt_every: 5

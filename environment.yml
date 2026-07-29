@@ -1,0 +1,38 @@
+name: bdhires
+channels: [conda-forge]
+dependencies:
+  - python=3.11
+  - pip
+  # scientific stack
+  - numpy
+  - scipy
+  - pandas
+  - xarray
+  - netcdf4
+  - h5netcdf
+  - dask
+  - zarr
+  - numcodecs
+  - bottleneck
+  # regridding (conservative regridding of precipitation)
+  - xesmf
+  - esmpy
+  # geo / plotting
+  - rioxarray
+  - rasterio
+  - cartopy
+  - matplotlib
+  # verification
+  - pysteps
+  # tooling
+  - pyyaml
+  - tqdm
+  - jupyterlab
+  - pytest
+  - ruff
+  - pip:
+      # install torch matching your cluster CUDA, e.g.
+      #   pip install torch --index-url https://download.pytorch.org/whl/cu121
+      - torch
+      - cdsapi
+      - tensorboard

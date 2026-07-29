@@ -1,0 +1,35 @@
+# Stage B training on 2 x V100 (32 GB).  torchrun --nproc_per_node=2 scripts/train.py --config configs/train_v100.yaml
+# V100 is sm_70: no bf16 tensor cores, so utils/dist.amp_dtype falls back to fp16 + GradScaler.
+data:
+  zarr: data/processed/bd_wide.zarr
+  stats: data/processed/stats.json
+  crop: 128                 # random 128x128 crops of the 256x256 wide domain
+  seasonal_encoding: true
+  years:
+    train: [2001, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.1
+  num_heads: 4
+
+train:
+  out_dir: runs/stageB
+  epochs: 400
+  batch_size: 8             # per GPU -> global 16
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 1000
+  grad_clip: 1.0
+  ema_decay: 0.999
+  cond_dropout: 0.10        # gives an unconditional prior "for free" (SDA mode)
+  logit_normal_t: true
+  num_workers: 4
+  seed: 0
+  log_every: 50
+  ckpt_every: 5
