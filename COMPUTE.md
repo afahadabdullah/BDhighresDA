@@ -38,13 +38,13 @@ directory. Do not load Miniforge, Anaconda, or CUDA modules, and do not source
 
 ## Download CHIRPS
 
-The CHIRPS download is a CPU-only Slurm array. Each task downloads one yearly
-global NetCDF file, immediately crops it to the repository's `wide` training
-domain, writes `data/raw/chirps/chirps_wide_YEAR.nc`, and removes the global
-temporary file. Interrupted downloads resume from `.part` files.
+The CHIRPS download is a CPU-only Slurm array submitted to Prism's
+`grace-cpuonly` partition by default. Each task downloads one yearly global
+NetCDF file, immediately crops it to the repository's `wide` training domain,
+writes `data/raw/chirps/chirps_wide_YEAR.nc`, and removes the global temporary
+file. Interrupted downloads resume from `.part` files.
 
-Activate a Python environment containing `xarray` and a NetCDF backend, then
-submit from any directory:
+Submit from any directory:
 
 ```bash
 /path/to/BDhighresDA/slurm/submit_download_chirps.sh
@@ -58,17 +58,19 @@ or partition through environment variables:
 
 ```bash
 CHIRPS_START=1981 CHIRPS_END=2025 CHIRPS_MAX_PARALLEL=2 \
-CHIRPS_PARTITION=compute slurm/submit_download_chirps.sh
+slurm/submit_download_chirps.sh
 ```
 
 To test one year first:
 
 ```bash
 CHIRPS_START=1981 CHIRPS_END=1981 \
-CHIRPS_PARTITION=compute slurm/submit_download_chirps.sh
+slurm/submit_download_chirps.sh
 ```
 
-If the desired Python is not first on `PATH`, set its absolute path with
+On Prism's ARM CPU nodes, the job automatically uses the project's
+`bdda-gh200` ARM-native Python environment. To override the partition or
+interpreter, set `CHIRPS_PARTITION` or
 `CHIRPS_PYTHON=/path/to/environment/bin/python`. Set `CHIRPS_OUT` to override
 the repository-relative output directory.
 

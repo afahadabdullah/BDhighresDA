@@ -70,8 +70,8 @@ python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
 python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
        --zarr data/processed/bd_wide.zarr --out data/stations
 
-# On a Slurm cluster, submit resumable CHIRPS downloads as a two-job array:
-CHIRPS_PARTITION=compute slurm/submit_download_chirps.sh
+# On Prism, submit resumable CHIRPS downloads to CPU-only nodes:
+slurm/submit_download_chirps.sh
 
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior

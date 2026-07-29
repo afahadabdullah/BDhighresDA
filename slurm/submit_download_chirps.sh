@@ -7,7 +7,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 START="${CHIRPS_START:-1981}"
 END="${CHIRPS_END:-2025}"
 MAX_PARALLEL="${CHIRPS_MAX_PARALLEL:-2}"
-PARTITION="${CHIRPS_PARTITION:-}"
+PARTITION="${CHIRPS_PARTITION:-grace-cpuonly}"
 
 [[ "$START" =~ ^[0-9]{4}$ ]] || {
     echo "ERROR: CHIRPS_START must be a four-digit year."
@@ -43,10 +43,8 @@ fi
 SBATCH_ARGS=(
     "--array=${ARRAY_SPEC}"
     "--export=ALL,CHIRPS_START_YEAR=${START}"
+    "--partition=${PARTITION}"
 )
-if [[ -n "$PARTITION" ]]; then
-    SBATCH_ARGS+=("--partition=$PARTITION")
-fi
 
-echo "Submitting CHIRPS years ${START}-${END} as array ${ARRAY_SPEC}"
+echo "Submitting CHIRPS years ${START}-${END} as array ${ARRAY_SPEC} on ${PARTITION}"
 exec sbatch "${SBATCH_ARGS[@]}" slurm/download_chirps.sbatch

@@ -20,7 +20,33 @@ START_YEAR="${CHIRPS_START_YEAR:?Use slurm/submit_download_chirps.sh to submit t
 ARRAY_INDEX="${SLURM_ARRAY_TASK_ID:?Submit this file as a Slurm array job.}"
 YEAR="$((START_YEAR + ARRAY_INDEX))"
 OUT_DIR="${CHIRPS_OUT:-data/raw/chirps}"
-PYTHON_BIN="${CHIRPS_PYTHON:-python}"
+
+export PYTHONNOUSERSITE=1
+unset PYTHONHOME
+unset PYTHONPATH
+
+if [[ -n "${CHIRPS_PYTHON:-}" ]]; then
+    PYTHON_BIN="$CHIRPS_PYTHON"
+elif [[ "$(uname -m)" == "aarch64" ]]; then
+    PYTHON_BIN=""
+    ARM_PYTHON_CANDIDATES=(
+        "$SLURM_SUBMIT_DIR/../envs/bdda-gh200/bin/python"
+        "/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python"
+    )
+    for candidate in "${ARM_PYTHON_CANDIDATES[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            PYTHON_BIN="$candidate"
+            break
+        fi
+    done
+    [[ -n "$PYTHON_BIN" ]] || {
+        echo "ERROR: ARM-native project Python was not found."
+        echo "Set CHIRPS_PYTHON=/absolute/path/to/ARM/python and resubmit."
+        exit 1
+    }
+else
+    PYTHON_BIN="$(command -v python || command -v python3 || true)"
+fi
 
 command -v wget >/dev/null || {
     echo "ERROR: wget is not available on the compute node."
@@ -41,6 +67,7 @@ PY
 mkdir -p "$OUT_DIR"
 
 echo "Repository: $SLURM_SUBMIT_DIR"
+echo "Architecture: $(uname -m)"
 echo "Array index: $ARRAY_INDEX"
 echo "Year: $YEAR"
 echo "Output: $OUT_DIR"
