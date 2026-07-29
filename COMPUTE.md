@@ -74,6 +74,40 @@ interpreter, set `CHIRPS_PARTITION` or
 `CHIRPS_PYTHON=/path/to/environment/bin/python`. Set `CHIRPS_OUT` to override
 the repository-relative output directory.
 
+## Download ERA5
+
+ERA5 is requested from the official Copernicus Climate Data Store (CDS). The
+request is cropped server-side to 83.0–97.8°E, 15.0–29.8°N: the `wide`
+training domain plus a 1° interpolation halo. Only the five core single-level
+predictors are downloaded by default. Monthly hourly NetCDF files are retained
+so total precipitation can later be aligned as 01:00(D) through 00:00(D+1)
+before daily aggregation.
+
+Before submitting, log in to the CDS, accept the ERA5 single-level dataset
+licence, and save the two lines shown on the CDS profile page as
+`$HOME/.cdsapirc`. The ARM project environment must contain `cdsapi`, `xarray`,
+and a NetCDF backend.
+
+Test one year first:
+
+```bash
+ERA5_START=1981 ERA5_END=1981 slurm/submit_download_era5.sh
+```
+
+After the test succeeds, submit 1981–2025 with at most two simultaneous yearly
+tasks:
+
+```bash
+ERA5_START=1981 ERA5_END=2025 ERA5_MAX_PARALLEL=2 \
+slurm/submit_download_era5.sh
+```
+
+The default partition is `grace-cpuonly`. Override the output directory,
+partition, or interpreter with `ERA5_OUT`, `ERA5_PARTITION`, or
+`ERA5_PYTHON`. Set `ERA5_EXTENDED=1` or `ERA5_ENSEMBLE=1` only for the
+optional ablation and uncertainty experiments; neither is part of the default
+five-channel training workflow.
+
 ## Submit training
 
 Use the wrapper from any directory. It resolves the repository root and

@@ -73,6 +73,9 @@ python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
 # On Prism, submit resumable CHIRPS downloads to CPU-only nodes:
 slurm/submit_download_chirps.sh
 
+# ERA5: official CDS, five variables, regional subset, CPU-only nodes:
+slurm/submit_download_era5.sh
+
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 

@@ -23,6 +23,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import xarray as xr
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.grids import WIDE  # noqa: E402
 
@@ -81,6 +83,40 @@ def area():
     return [ha + PAD, lo - PAD, la - PAD, hi + PAD]  # N, W, S, E
 
 
+def validate_era5(path: Path) -> None:
+    """Raise if *path* is not a readable regional ERA5 NetCDF file."""
+    with xr.open_dataset(path) as ds:
+        names = set(ds.coords) | set(ds.dims)
+        if not ({"time", "valid_time"} & names):
+            raise ValueError(f"{path} has no time coordinate")
+        if not ({"latitude", "lat"} & names):
+            raise ValueError(f"{path} has no latitude coordinate")
+        if not ({"longitude", "lon"} & names):
+            raise ValueError(f"{path} has no longitude coordinate")
+        if not ds.data_vars:
+            raise ValueError(f"{path} contains no ERA5 variables")
+
+
+def retrieve_atomic(client, dataset: str, request: dict, target: Path) -> None:
+    """Retrieve and validate one CDS request before publishing *target*."""
+    if target.exists():
+        try:
+            validate_era5(target)
+            print("already complete", target, flush=True)
+            return
+        except (OSError, ValueError) as exc:
+            print(f"removing invalid ERA5 file {target}: {exc}", flush=True)
+            target.unlink()
+
+    partial = target.with_suffix(target.suffix + ".part")
+    partial.unlink(missing_ok=True)
+    print("requesting", target, flush=True)
+    client.retrieve(dataset, request, str(partial))
+    validate_era5(partial)
+    partial.replace(target)
+    print("wrote", target, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", type=int, default=1981)
@@ -123,45 +159,67 @@ def main():
             hours = [f"{h:02d}:00" for h in range(24)]
 
             f1 = out / f"era5_sfc_{tag}.nc"
-            if not f1.exists():
-                c.retrieve(
-                    "reanalysis-era5-single-levels",
-                    dict(product_type="reanalysis", variable=single, year=str(year),
-                         month=f"{month:02d}", day=days, time=hours, area=area(),
-                         data_format="netcdf"),
-                    str(f1),
-                )
-                print("wrote", f1, flush=True)
+            retrieve_atomic(
+                c,
+                "reanalysis-era5-single-levels",
+                dict(
+                    product_type="reanalysis",
+                    variable=single,
+                    year=str(year),
+                    month=f"{month:02d}",
+                    day=days,
+                    time=hours,
+                    area=area(),
+                    data_format="netcdf",
+                    download_format="unarchived",
+                ),
+                f1,
+            )
 
             if args.ensemble:
                 f3 = out / f"era5_eda_{tag}.nc"
-                if not f3.exists():
-                    c.retrieve(
-                        "reanalysis-era5-single-levels",
-                        dict(product_type="ensemble_members",
-                             variable=["total_column_water_vapour", "mean_sea_level_pressure",
-                                       "2m_temperature", "total_precipitation"],
-                             year=str(year), month=f"{month:02d}", day=days,
-                             time=[f"{h:02d}:00" for h in range(0, 24, 3)],
-                             area=area(), data_format="netcdf"),
-                        str(f3),
-                    )
-                    print("wrote", f3, flush=True)
+                retrieve_atomic(
+                    c,
+                    "reanalysis-era5-single-levels",
+                    dict(
+                        product_type="ensemble_members",
+                        variable=[
+                            "total_column_water_vapour",
+                            "mean_sea_level_pressure",
+                            "2m_temperature",
+                            "total_precipitation",
+                        ],
+                        year=str(year),
+                        month=f"{month:02d}",
+                        day=days,
+                        time=[f"{h:02d}:00" for h in range(0, 24, 3)],
+                        area=area(),
+                        data_format="netcdf",
+                        download_format="unarchived",
+                    ),
+                    f3,
+                )
 
             if not args.extended:
                 continue
 
             f2 = out / f"era5_pl_{tag}.nc"
-            if not f2.exists():
-                c.retrieve(
-                    "reanalysis-era5-pressure-levels",
-                    dict(product_type="reanalysis", **EXTENDED_PRESSURE, year=str(year),
-                         month=f"{month:02d}", day=days,
-                         time=[f"{h:02d}:00" for h in (0, 6, 12, 18)],
-                         area=area(), data_format="netcdf"),
-                    str(f2),
-                )
-                print("wrote", f2, flush=True)
+            retrieve_atomic(
+                c,
+                "reanalysis-era5-pressure-levels",
+                dict(
+                    product_type="reanalysis",
+                    **EXTENDED_PRESSURE,
+                    year=str(year),
+                    month=f"{month:02d}",
+                    day=days,
+                    time=[f"{h:02d}:00" for h in (0, 6, 12, 18)],
+                    area=area(),
+                    data_format="netcdf",
+                    download_format="unarchived",
+                ),
+                f2,
+            )
 
 
 if __name__ == "__main__":
