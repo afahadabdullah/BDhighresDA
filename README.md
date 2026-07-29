@@ -31,7 +31,7 @@ the data plan, and the experiment/ablation list.
 
 ## Pipeline at a glance
 
-![BDhighresDA pipeline](docs/figures/pipeline.svg)
+![BDhighresDA pipeline](docs/figures/pipeline.png)
 
 | Step | Script |
 |---|---|
@@ -46,6 +46,7 @@ the data plan, and the experiment/ablation list.
 | 8. Train the prior | `scripts/train.py` |
 | 9. Assimilate → product | `scripts/assimilate.py` |
 | 10. Verify | `scripts/evaluate.py` |
+| — | `scripts/make_pipeline_figure.py` regenerates the pipeline figure |
 
 ## Quick start
 

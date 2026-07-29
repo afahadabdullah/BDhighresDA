@@ -68,7 +68,7 @@ def main():
         elev = np.zeros(grid.shape, np.float32)
 
     elev_s = np.sqrt(np.clip(elev, 0, None))
-    elev_s = (elev_s - elev_s.min()) / (elev_s.ptp() + 1e-6)
+    elev_s = (elev_s - elev_s.min()) / (np.ptp(elev_s) + 1e-6)
     gy, gx = np.gradient(elev)
     slope = np.hypot(gy, gx)
     slope = (slope - slope.mean()) / (slope.std() + 1e-6)

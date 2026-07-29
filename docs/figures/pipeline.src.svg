@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 748" width="1480" height="748" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <!-- SOURCE FILE.  Do not reference this from markdown.
+       Run  python scripts/make_pipeline_figure.py  to produce the portable
+       pipeline.svg (inline styles, explicit texture cells) and pipeline.png.
+
+       Two authoring rules learned the hard way:
+       1. No <tspan dy="..."> subscripts.  Rasterisers handle baseline shifts
+          inconsistently and the equations come out garbled.  Write x_t, x_0,
+          x_1, u_theta in plain text instead.
+       2. Nothing may be drawn where a thumbnail or arrow will land on it. -->
+  <defs>
+    <style>
+      .band     { stroke-width:1.4; stroke-dasharray:7 5; }
+      .bandlab  { font-size:13px; font-weight:700; fill:#FFFFFF; }
+      .card     { stroke-width:1.2; }
+      .ctitle   { font-size:12.5px; font-weight:700; fill:#1F2A37; }
+      .csub     { font-size:10px; fill:#6B7785; }
+      .body     { font-size:10.5px; fill:#3D4A5A; }
+      .small    { font-size:9.5px; fill:#6B7785; }
+      .eq       { font-size:11.5px; fill:#1F2A37; }
+      .lab      { font-size:9px; fill:#8A94A0; }
+      .flow     { stroke:#5F7183; stroke-width:2.2; fill:none; marker-end:url(#ah); }
+      .flowd    { stroke:#9AA7B4; stroke-width:1.7; fill:none; stroke-dasharray:5 4; marker-end:url(#ahd); }
+      .flowobs  { stroke:#C0566B; stroke-width:2.2; fill:none; marker-end:url(#ahr); }
+    </style>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5F7183"/></marker>
+    <marker id="ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9AA7B4"/></marker>
+    <marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0566B"/></marker>
+    <filter id="fCoarse"><feTurbulence baseFrequency="0.02"/></filter>
+    <filter id="fMid"><feTurbulence baseFrequency="0.05"/></filter>
+    <filter id="fFine"><feTurbulence baseFrequency="0.11"/></filter>
+    <filter id="fNoise"><feTurbulence baseFrequency="0.85"/></filter>
+    <filter id="fTerrain"><feTurbulence baseFrequency="0.09"/></filter>
+  </defs>
+
+  <rect x="0" y="0" width="1480" height="748" fill="#FFFFFF"/>
+
+  <!-- ==================== PHASE 1 : TRAINING ==================== -->
+  <rect class="band" x="20" y="46" width="1440" height="250" rx="16" fill="#F7FAFC" stroke="#B6C6D4"/>
+  <rect x="20" y="20" width="352" height="28" rx="14" fill="#33556E"/>
+  <text class="bandlab" x="42" y="39">PHASE 1 · TRAINING — offline, once</text>
+  <text x="388" y="39" font-size="10.5" fill="#33556E">learn the downscaler  p( 5 km rainfall | ERA5 )</text>
+
+  <!-- ERA5 conditioning -->
+  <rect class="card" x="44" y="72" width="212" height="200" rx="10" fill="#EAF1F8" stroke="#A9C2DA"/>
+  <text class="ctitle" x="56" y="92">Background: ERA5</text>
+  <text class="csub"   x="56" y="106">0.25° (~28 km) daily, 1981–2018</text>
+  <rect x="56" y="114" width="76" height="76" rx="4" fill="#F7FAFD" stroke="#C9D8E6"/>
+  <rect x="56" y="114" width="76" height="76" filter="url(#fCoarse)"/>
+  <rect x="56" y="114" width="76" height="76" rx="4" fill="none" stroke="#8FAAC4"/>
+  <text class="lab" x="94" y="203" text-anchor="middle">28 km cells</text>
+  <text class="body" x="144" y="130">tp</text><text class="small" x="174" y="130">model rain</text>
+  <text class="body" x="144" y="147">tcwv</text><text class="small" x="186" y="147">moisture</text>
+  <text class="body" x="144" y="164">ivte</text><text class="small" x="182" y="164">transport</text>
+  <text class="body" x="144" y="181">ivtn</text><text class="small" x="182" y="181">direction</text>
+  <text class="body" x="144" y="198">cape</text><text class="small" x="188" y="198">instability</text>
+  <text class="small" x="56" y="224" font-weight="700" fill="#33556E">5 channels — all single-level</text>
+  <text class="small" x="56" y="244" font-size="8.8">+ statics: elevation, slope,</text>
+  <text class="small" x="56" y="257" font-size="8.8">land mask, lat/lon, day-of-year</text>
+  <rect x="200" y="228" width="44" height="36" rx="4" fill="#F9FBF8" stroke="#A5BC99"/>
+  <rect x="200" y="228" width="44" height="36" filter="url(#fTerrain)"/>
+  <rect x="200" y="228" width="44" height="36" rx="4" fill="none" stroke="#A5BC99"/>
+
+  <path class="flow" d="M256,172 H302"/>
+  <text class="lab" x="279" y="164" text-anchor="middle">c</text>
+
+  <!-- U-Net -->
+  <rect class="card" x="306" y="72" width="392" height="200" rx="10" fill="#EDF3FC" stroke="#AFC7E6"/>
+  <text class="ctitle" x="318" y="92">Flow-matching U-Net</text>
+  <text class="eq" x="502" y="118" text-anchor="middle">u_theta( x_t , t , c )  —  velocity field, ~30 M params</text>
+  <g stroke="#9BB6DC" stroke-width="1.3" fill="none" stroke-dasharray="4 3">
+    <path d="M373,142 C412,124 590,124 629,142"/><path d="M405,158 C438,140 564,140 597,158"/><path d="M437,172 C462,162 540,162 565,172"/>
+  </g>
+  <g fill="#8FB3E0" stroke="#5D89C4" stroke-width="1">
+    <rect x="351" y="142" width="22" height="82" rx="3"/><rect x="383" y="158" width="22" height="50" rx="3"/><rect x="415" y="172" width="22" height="24" rx="3"/>
+    <rect x="565" y="172" width="22" height="24" rx="3"/><rect x="597" y="158" width="22" height="50" rx="3"/><rect x="629" y="142" width="22" height="82" rx="3"/>
+  </g>
+  <circle cx="501" cy="184" r="16" fill="#7C6BC4" stroke="#5B4CA0"/>
+  <text x="501" y="188" text-anchor="middle" font-size="8" fill="#FFFFFF" font-weight="700">attn</text>
+  <text class="eq" x="502" y="241" text-anchor="middle" font-size="11">x_t = t·x_1 + (1−t)·x_0</text>
+  <text class="eq" x="502" y="255" text-anchor="middle" font-size="11">L = E ‖ u_theta − (x_1 − x_0) ‖²</text>
+  <text class="lab" x="502" y="268" text-anchor="middle">random 128×128 crops · conditioning dropout 10%</text>
+
+  <path class="flow" d="M698,172 H744"/>
+
+  <!-- CHIRPS target -->
+  <rect class="card" x="748" y="72" width="212" height="200" rx="10" fill="#EEF7F1" stroke="#A9CDB4"/>
+  <text class="ctitle" x="760" y="92" fill="#2E6B47">Target: CHIRPS</text>
+  <text class="csub"   x="760" y="106">0.05° (~5 km) daily, 1981–2018</text>
+  <rect x="794" y="116" width="120" height="120" rx="5" fill="#FAFCFB" stroke="#9DC4AE"/>
+  <rect x="794" y="116" width="120" height="120" filter="url(#fFine)"/>
+  <rect x="794" y="116" width="120" height="120" rx="5" fill="none" stroke="#7FA98F"/>
+  <text class="lab" x="854" y="252" text-anchor="middle">5 km, land only</text>
+  <path class="flowd" d="M748,226 C700,262 606,286 506,278"/>
+  <text class="lab" x="640" y="292" text-anchor="middle">flow-matching loss</text>
+
+  <!-- the key message -->
+  <rect class="card" x="988" y="72" width="448" height="200" rx="10" fill="#FFF6E3" stroke="#DFBE7E"/>
+  <text class="ctitle" x="1010" y="100" font-size="14" fill="#8A5A1E">No observation enters training.</text>
+  <text class="body" x="1010" y="126">Gauges and satellite rainfall are used <tspan font-weight="700">nowhere</tspan> in Phase 1.</text>
+  <text class="body" x="1010" y="146">The network only ever learns the map</text>
+  <text class="eq" x="1010" y="172" font-size="13" font-weight="700">ERA5 0.25°  ⟶  p( rainfall | ERA5 ) at 0.05°</text>
+  <text class="body" x="1010" y="200">So the observing network can change — new gauges, IMERG</text>
+  <text class="body" x="1010" y="217">V07 → V08, Early instead of Final, radar later — and</text>
+  <text class="body" x="1010" y="234"><tspan font-weight="700">nothing needs retraining.</tspan> That is the whole reason for</text>
+  <text class="body" x="1010" y="251">putting the background in the prior and the observations in</text>
+  <text class="body" x="1010" y="265">the likelihood, rather than feeding everything to the network.</text>
+
+  <!-- frozen weights handoff -->
+  <path class="flowd" d="M300,296 C300,320 268,322 268,354"/>
+  <text class="lab" x="314" y="324">frozen weights θ</text>
+
+  <!-- ==================== PHASE 2 : INFERENCE ==================== -->
+  <rect class="band" x="20" y="362" width="1440" height="360" rx="16" fill="#FCF8F9" stroke="#D5B6BE"/>
+  <rect x="20" y="336" width="428" height="28" rx="14" fill="#8E3B4E"/>
+  <text class="bandlab" x="42" y="355">PHASE 2 · INFERENCE — every day, no retraining</text>
+  <text x="464" y="355" font-size="10.5" fill="#8E3B4E">sample the prior, then assimilate observations while sampling</text>
+
+  <!-- inputs -->
+  <rect class="card" x="44" y="392" width="192" height="126" rx="10" fill="#EAF1F8" stroke="#A9C2DA"/>
+  <text class="ctitle" x="56" y="412" font-size="11.5">ERA5 for day D</text>
+  <rect x="56" y="422" width="64" height="64" rx="4" fill="#F7FAFD" stroke="#C9D8E6"/>
+  <rect x="56" y="422" width="64" height="64" filter="url(#fCoarse)"/>
+  <rect x="56" y="422" width="64" height="64" rx="4" fill="none" stroke="#8FAAC4"/>
+  <text class="small" x="132" y="442">same 5</text>
+  <text class="small" x="132" y="456">channels</text>
+  <text class="small" x="132" y="470">+ statics</text>
+  <text class="lab" x="56" y="504">conditioning  c</text>
+
+  <rect class="card" x="44" y="536" width="192" height="126" rx="10" fill="#F5F5F7" stroke="#C6CBD3"/>
+  <text class="ctitle" x="56" y="556" font-size="11.5">Noise draw</text>
+  <rect x="56" y="566" width="64" height="64" rx="4" fill="#FAFAFB" stroke="#CBCFD6"/>
+  <rect x="56" y="566" width="64" height="64" filter="url(#fNoise)"/>
+  <rect x="56" y="566" width="64" height="64" rx="4" fill="none" stroke="#B7BDC6"/>
+  <text class="eq" x="132" y="592" font-size="10">x_0 ~ N(0, I)</text>
+  <text class="small" x="132" y="608">one per member</text>
+  <text class="lab" x="56" y="648">16 members</text>
+
+  <path class="flow" d="M236,455 C266,455 266,512 292,512"/>
+  <path class="flow" d="M236,598 C266,598 266,534 292,534"/>
+
+  <!-- sampler -->
+  <rect class="card" x="296" y="392" width="404" height="270" rx="10" fill="#FFF8EC" stroke="#E3C692"/>
+  <text class="ctitle" x="308" y="412">Guided sampling — 50 steps, t : 0 → 1</text>
+  <rect x="310" y="422" width="376" height="126" rx="6" fill="#FFFDF8" stroke="#E8D6B4"/>
+  <g stroke="#EADFC8" stroke-width="0.8"><path d="M310,453 H686 M310,485 H686 M310,517 H686"/></g>
+  <g fill="none" stroke-width="1.6" opacity="0.92">
+    <path d="M322,436 C420,450 540,462 674,464" stroke="#C0392B"/>
+    <path d="M322,461 C420,468 540,474 674,476" stroke="#C08A2E"/>
+    <path d="M322,486 C420,486 540,486 674,486" stroke="#3F8F6E"/>
+    <path d="M322,511 C420,504 540,498 674,496" stroke="#7C6BC4"/>
+    <path d="M322,536 C420,522 540,510 674,508" stroke="#5D89C4"/>
+  </g>
+  <g stroke="#C58A96" stroke-width="1.1" stroke-dasharray="3 3"><path d="M400,422 V548"/><path d="M480,422 V548"/><path d="M560,422 V548"/><path d="M640,422 V548"/></g>
+  <text class="lab" x="316" y="562">t = 0 · noise</text>
+  <text class="lab" x="680" y="562" text-anchor="end">t = 1 · 5 km field</text>
+  <text class="eq" x="308" y="586" font-size="11">every step:  dx = ( u_theta(x_t, t, c)  +  <tspan fill="#9C3B4C" font-weight="700">Delta_u_obs</tspan> ) dt</text>
+  <rect x="308" y="596" width="380" height="56" rx="6" fill="#FDF3E0" stroke="#E3C692"/>
+  <text class="small" x="318" y="612" font-size="9">Observations off  →  <tspan font-weight="700">BACKGROUND</tspan>  (first guess, ERA5 alone)</text>
+  <text class="small" x="318" y="627" font-size="9">Observations on   →  <tspan font-weight="700" fill="#9C3B4C">ANALYSIS</tspan>  (the product)</text>
+  <text class="small" x="318" y="644" font-size="9">Spread: x_0 draw × prior temperature T · EDA member · perturbed y</text>
+
+  <!-- observations -->
+  <rect class="card" x="724" y="392" width="330" height="270" rx="10" fill="#FDEFF1" stroke="#E3A9B4"/>
+  <text class="ctitle" x="736" y="412" fill="#8E3B4E">Observations  y  — inference only</text>
+  <rect x="736" y="424" width="74" height="74" rx="4" fill="#FBFCFD" stroke="#D6C3C8"/>
+  <path d="M744,490 C751,468 757,484 766,458 C775,438 784,452 795,440 L802,434" fill="none" stroke="#C9D6E2" stroke-width="1.2"/>
+  <g fill="#C0392B">
+    <circle cx="750" cy="442" r="2.5"/><circle cx="770" cy="452" r="2.5"/><circle cx="792" cy="444" r="2.5"/>
+    <circle cx="746" cy="466" r="2.5"/><circle cx="768" cy="476" r="2.5"/><circle cx="790" cy="470" r="2.5"/>
+    <circle cx="756" cy="488" r="2.5"/><circle cx="780" cy="490" r="2.5"/>
+  </g>
+  <rect x="736" y="424" width="74" height="74" rx="4" fill="none" stroke="#C79AA3"/>
+  <text class="lab" x="773" y="511" text-anchor="middle">~35 BMD gauges</text>
+  <text class="small" x="773" y="524" text-anchor="middle" font-size="8.5">H = bilinear</text>
+  <rect x="828" y="424" width="74" height="74" rx="4" fill="#FDF9FA" stroke="#D6C3C8"/>
+  <rect x="828" y="424" width="74" height="74" filter="url(#fMid)"/>
+  <rect x="828" y="424" width="74" height="74" rx="4" fill="none" stroke="#C79AA3"/>
+  <text class="lab" x="865" y="511" text-anchor="middle">~3.5k IMERG 0.1°</text>
+  <text class="small" x="865" y="524" text-anchor="middle" font-size="8.5">H = exact 2×2 mean</text>
+  <text class="small" x="914" y="446" font-size="9">sigma_IMERG ≈</text>
+  <text class="small" x="914" y="459" font-size="9">3–5× sigma_gauge</text>
+  <text class="small" x="914" y="477" font-size="9">satellite fixes the</text>
+  <text class="small" x="914" y="490" font-size="9">pattern, gauges fix</text>
+  <text class="small" x="914" y="503" font-size="9">the amplitude</text>
+  <text class="eq" x="889" y="548" text-anchor="middle" font-size="10.5">p(y | x_t) = N( y | H(x1),  R + Gamma·(1−t)²/t² )</text>
+  <text class="lab" x="889" y="562" text-anchor="middle">x1 = x_t + (1−t)·u_theta  (denoised estimate)</text>
+  <text class="eq" x="889" y="582" text-anchor="middle" font-size="11" font-weight="700" fill="#9C3B4C">Delta_u_obs = ((1−t)/t) · grad_x log p(y | x_t)</text>
+  <rect x="736" y="592" width="306" height="60" rx="6" fill="#FBE6E9" stroke="#E3A9B4"/>
+  <text class="small" x="746" y="608" font-size="8.8" fill="#9C3B4C">IMERG is quantile-mapped to CHIRPS first — a Gaussian</text>
+  <text class="small" x="746" y="621" font-size="8.8" fill="#9C3B4C">likelihood assumes an unbiased observation.</text>
+  <text class="small" x="746" y="639" font-size="8.8" fill="#9C3B4C">Each member assimilates its own draw  y_r = y + eps_r</text>
+
+  <path class="flowobs" d="M724,486 H700"/>
+  <text class="lab" x="712" y="478" text-anchor="middle" fill="#C0566B">Δu</text>
+
+  <!-- output -->
+  <rect class="card" x="1078" y="392" width="358" height="270" rx="10" fill="#EEF7F1" stroke="#A9CDB4"/>
+  <text class="ctitle" x="1090" y="412" fill="#2E6B47">Analysis — 5 km daily ensemble</text>
+  <rect x="1120" y="430" width="100" height="100" rx="5" fill="#F4F9F6" stroke="#B9D5C4"/>
+  <rect x="1112" y="422" width="100" height="100" rx="5" fill="#F4F9F6" stroke="#B9D5C4"/>
+  <rect x="1104" y="414" width="100" height="100" rx="5" fill="#FAFCFB" stroke="#9DC4AE"/>
+  <rect x="1104" y="414" width="100" height="100" filter="url(#fFine)"/>
+  <g fill="#C0392B"><circle cx="1124" cy="432" r="1.9"/><circle cx="1152" cy="442" r="1.9"/><circle cx="1180" cy="434" r="1.9"/><circle cx="1118" cy="466" r="1.9"/><circle cx="1148" cy="478" r="1.9"/><circle cx="1178" cy="472" r="1.9"/><circle cx="1130" cy="500" r="1.9"/><circle cx="1166" cy="504" r="1.9"/></g>
+  <rect x="1104" y="414" width="100" height="100" rx="5" fill="none" stroke="#7FA98F"/>
+  <text class="lab" x="1330" y="540" text-anchor="middle">16 members · 0.05° · 128×128</text>
+  <rect x="1240" y="420" width="180" height="106" rx="6" fill="#FBFDFC" stroke="#C6DCCF"/>
+  <path d="M1358,508 L1408,518 L1358,518 Z" fill="#C0392B" opacity="0.16"/>
+  <path d="M1252,518 C1280,518 1290,442 1312,442 C1334,442 1340,496 1358,508 C1378,516 1392,517 1410,518" fill="none" stroke="#3F8F6E" stroke-width="1.8"/>
+  <path d="M1252,518 C1280,518 1292,456 1314,456 C1336,456 1344,502 1362,512 C1382,517 1394,517 1410,518" fill="none" stroke="#5D89C4" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <path d="M1252,518 H1412" stroke="#B7C6BD" stroke-width="1"/>
+  <text class="lab" x="1330" y="436" text-anchor="middle" font-size="8">analysis vs CHIRPS PDF</text>
+  <text class="lab" x="1384" y="502" text-anchor="middle" font-size="8">heavy tail</text>
+  <text class="small" x="1090" y="552">Verify at <tspan font-weight="700">withheld</tspan> gauges (3-fold CV): CRPS · RMSE / MAE ·</text>
+  <text class="small" x="1090" y="566">FSS · SAL · POD / FAR / CSI — and, because generative DA is</text>
+  <text class="small" x="1090" y="580">reliably under-dispersive, <tspan font-weight="700" fill="#9C3B4C">spread–skill by intensity</tspan> plus</text>
+  <text class="small" x="1090" y="594"><tspan font-weight="700" fill="#9C3B4C">rank histograms</tspan> with observation error added to members.</text>
+  <text class="small" x="1090" y="616">Baselines: ERA5 · IMERG · CHIRPS · kriging · deterministic U-Net</text>
+  <text class="small" x="1090" y="636" fill="#9C3B4C">Target: −10% RMSE at left-out stations (Manshausen et al. 2025)</text>
+
+  <path class="flow" d="M1054,486 H1074"/>
+
+  <text class="small" x="740" y="702" text-anchor="middle" font-size="9.5">Tune Gamma, sigma_obs and the prior temperature T on pseudo-observations — CHIRPS sampled at the gauge sites, where the true field is known — before ever touching real gauges.</text>
+</svg>

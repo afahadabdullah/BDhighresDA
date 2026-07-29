@@ -14,7 +14,11 @@ about one third of the sampling cost (Wetherell 2026).
 
 ## 0. Pipeline overview — two phases, and only one of them sees observations
 
-![BDhighresDA pipeline](figures/pipeline.svg)
+![BDhighresDA pipeline](figures/pipeline.png)
+
+<sub>Vector version: [`figures/pipeline.svg`](figures/pipeline.svg) · source and
+regeneration: [`figures/pipeline.src.svg`](figures/pipeline.src.svg),
+`python scripts/make_pipeline_figure.py`</sub>
 
 **Phase 1 — training (offline, once).** ERA5 at 0.25° plus static fields
 condition a flow-matching U-Net, which is trained against CHIRPS at 0.05° as
