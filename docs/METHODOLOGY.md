@@ -12,6 +12,24 @@ gives better spatial skill at ~1/3 the sampling cost (Wetherell 2026).
 
 ---
 
+## 0. Pipeline overview
+
+![BDhighresDA pipeline](figures/pipeline.svg)
+
+**Read it left to right.** (1) ERA5, static fields and the calendar form the
+conditioning `c`; IMERG is switchable between conditioning and observation.
+(2) A U-Net regresses the flow-matching velocity field `u_theta(x_t, t, c)`,
+trained (3) against CHIRPS 0.05 deg as the target `x1` along the linear
+interpolant. (4) At inference the ODE is integrated with Heun's method while
+the gauge/IMERG likelihood nudges every step, which is the assimilation.
+(5) The output is a 16-member 5 km daily ensemble, verified at withheld gauges.
+
+The one thing to notice: the network is trained *only* on CHIRPS. It never
+sees an observation. Everything in panel 4 happens at sampling time, which is
+why new observations never require retraining.
+
+---
+
 ## 1. The problem
 
 | | |

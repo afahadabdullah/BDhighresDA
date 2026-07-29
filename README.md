@@ -22,11 +22,7 @@ the data plan, and the experiment/ablation list.
 
 ## Pipeline at a glance
 
-```
-ERA5 0.25°  ──┐
-IMERG 0.1°  ──┤──►  flow-matching model  ──►  5 km ensemble  ──►  gauge guidance  ──►  ANALYSIS
-statics     ──┘      (trained on CHIRPS 0.05°)                      (BMD, ~35 stations)
-```
+![BDhighresDA pipeline](docs/figures/pipeline.svg)
 
 | Step | Script |
 |---|---|
@@ -92,7 +88,7 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt 
 | Grid | Extent | Size | Use |
 |---|---|---|---|
 | `wide` | 84.0–96.8°E, 16.0–28.8°N | 256×256 @ 0.05° | training (random 128×128 crops) |
-| `bd` | 87.6–94.0°E, 20.2–26.6°N | 128×128 @ 0.05° | evaluation and the released product |
+| `bd` | 87.6–94.0°E, 20.3–26.7°N | 128×128 @ 0.05° | evaluation and the released product |
 
 The wide domain exists because ~16,000 daily fields is a small dataset for a
 generative model; random cropping multiplies the effective sample count and
