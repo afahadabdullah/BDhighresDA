@@ -117,6 +117,41 @@ partition, or interpreter with `ERA5_OUT`, `ERA5_PARTITION`, or
 four-CPU task. Keep array concurrency modest so the public S3 service and
 cluster egress are not overloaded.
 
+## Download DEM and build static fields
+
+Copernicus DEM GLO-90 is read anonymously from its public AWS bucket; no
+Copernicus account or AWS credentials are required. A single CPU-only job
+downloads the one-degree Cloud Optimized GeoTIFF tiles intersecting the WIDE
+domain, averages them directly to the project's 0.05-degree grid, and writes:
+
+```text
+data/raw/dem/copernicus_glo90_wide.nc
+data/static/static_wide.nc
+```
+
+The second file contains the seven model-ready static channels: scaled
+elevation, physical terrain slope, CHIRPS land-validity mask, and four absolute
+position encodings. IMERG and gauge inputs are not used.
+
+Submit from the repository root after at least one CHIRPS year has completed:
+
+```bash
+slurm/submit_dem_static.sh
+```
+
+The default mask source is `data/raw/chirps/chirps_wide_2010.nc`. If a
+different year is available, set it explicitly:
+
+```bash
+CHIRPS_REFERENCE=data/raw/chirps/chirps_wide_1981.nc \
+slurm/submit_dem_static.sh
+```
+
+The job runs on `grace-cpuonly` with four concurrent tile downloads. Override
+those defaults with `DEM_PARTITION` and `DEM_JOBS`. Source 90 m tiles are
+deleted after the compact regional product passes validation; set
+`DEM_KEEP_TILES=1` to retain them.
+
 ## Submit training
 
 Use the wrapper from any directory. It resolves the repository root and

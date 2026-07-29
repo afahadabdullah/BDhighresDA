@@ -16,7 +16,7 @@
       aggregate to one regional daily NetCDF per year)
 - [ ] CHIRPS download + subset, 1981–2025
 - [ ] IMERG Final download, 2000-06–2025
-- [ ] DEM (GMTED2010 or SRTM) → static channels
+- [ ] Copernicus DEM GLO-90 → 0.05° WIDE elevation + static channels
 - [ ] Pack to Zarr; **verify time alignment** by correlating ERA5 tp and CHIRPS
       at lags −2…+2 days — the peak must be at lag 0
 - [ ] BMD gauge CSV from BMD; QC; pseudo-station archive

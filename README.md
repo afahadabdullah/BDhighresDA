@@ -38,7 +38,7 @@ the data plan, and the experiment/ablation list.
 | 0. ERA5 predictors | `scripts/00_download_era5.py` |
 | 1. CHIRPS target | `scripts/01_download_chirps.py` |
 | 2. IMERG observations | `scripts/02_download_imerg.py` |
-| 3. Static fields (orography, mask, position) | `scripts/03_build_static.py` |
+| 3. DEM + static fields (orography, mask, position) | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
 | 4. Regrid + pack to Zarr | `scripts/04_regrid_and_pack.py` |
 | 5. Station QC + pseudo-stations | `scripts/05_prepare_stations.py` |
 | 6. Normalisation stats | `scripts/06_compute_stats.py` |
@@ -68,7 +68,8 @@ conda run -p ../envs/bdda-earthmover \
   python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
 python scripts/02_download_imerg.py  --start 2000 --end 2025 --out data/raw/imerg
-python scripts/03_build_static.py --dem data/raw/dem/gmted.tif \
+python scripts/03_download_dem.py --out data/raw/dem/copernicus_glo90_wide.nc
+python scripts/03_build_static.py --dem data/raw/dem/copernicus_glo90_wide.nc \
        --chirps data/raw/chirps/chirps_wide_2010.nc --out data/static/static_wide.nc
 python scripts/04_regrid_and_pack.py --start 1981 --end 2025 --out data/processed/bd_wide.zarr
 python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
@@ -81,6 +82,9 @@ slurm/submit_download_chirps.sh
 
 # ERA5: free Earthmover ARCO store, six variables, daily regional files:
 slurm/submit_download_era5.sh
+
+# DEM: public Copernicus GLO-90, then build all seven static channels:
+slurm/submit_dem_static.sh
 
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
@@ -104,7 +108,7 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final
 | **ERA5 access** | No key required; the Earthmover AWS Open Data store is read anonymously |
 | **Earthdata login** | `~/.netrc` entry for IMERG (GES DISC) |
 | **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
-| **DEM** | GMTED2010 or SRTM over 84–97°E, 16–29°N. Optional but strongly recommended — orography is the most informative static channel over Bangladesh |
+| **DEM access** | No key required; Copernicus GLO-90 is downloaded anonymously from the AWS Open Data Registry |
 
 ## Conditioning: six ERA5 surface channels
 

@@ -50,6 +50,7 @@ whole design exists to preserve.
 | **Observation 1** | GPM IMERG Final, 0.1° (~10 km), 2000-06 → present, daily |
 | **Observation 2** | BMD daily rain gauges, ~35 stations, 2020–2025 |
 | **Prior training target** | CHIRPS v2.0 daily 0.05°, 1981–present |
+| **Static terrain** | Copernicus DEM GLO-90 (2021), aggregated from ~90 m to 0.05° |
 | **Output** | 0.05° (~5 km) daily precipitation, 16-member ensemble |
 
 ERA5 at 28 km cannot resolve the two features that dominate Bangladesh
@@ -60,6 +61,12 @@ mesoscale organisation of monsoon convection. IMERG sees *where* it rained at
 sparse — roughly one per 4,200 km². The generative prior supplies the
 fine-scale structure ERA5 lacks; IMERG constrains the pattern; the gauges
 constrain the amplitude.
+
+The terrain input is the public Copernicus GLO-90 digital surface model,
+area-averaged onto the exact WIDE grid before elevation and slope channels are
+derived. Although GLO-90 is formally a surface rather than bare-earth terrain
+model, vegetation and building-height effects become negligible relative to
+regional relief after aggregation to a 0.05° (~5 km) cell.
 
 ## 2. Why generative
 
