@@ -20,7 +20,10 @@ Notes
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 import xarray as xr
@@ -97,6 +100,75 @@ def validate_era5(path: Path) -> None:
             raise ValueError(f"{path} contains no ERA5 variables")
 
 
+def publish_download(download: Path, target: Path) -> None:
+    """Validate a CDS response and atomically publish it as one NetCDF file.
+
+    Since the November 2024 CDS converter update, a request containing fields
+    with different GRIB ``stepType`` values can be returned as a ZIP archive
+    containing multiple NetCDF files.  The core request does exactly that:
+    total precipitation is accumulated while the other predictors are
+    instantaneous.  Merge those members here so downstream code still sees
+    one monthly file.
+    """
+    if not zipfile.is_zipfile(download):
+        validate_era5(download)
+        download.replace(target)
+        return
+
+    staged = target.with_suffix(target.suffix + ".ready")
+    staged.unlink(missing_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target.stem}-", dir=target.parent
+    ) as tmp_name:
+        tmp = Path(tmp_name)
+        with zipfile.ZipFile(download) as archive:
+            members = [
+                info for info in archive.infolist()
+                if not info.is_dir()
+                and Path(info.filename).suffix.lower() in {".nc", ".nc4"}
+            ]
+            if not members:
+                names = ", ".join(info.filename for info in archive.infolist())
+                raise ValueError(
+                    f"{download} is a ZIP archive with no NetCDF members: {names}"
+                )
+
+            extracted = []
+            for index, member in enumerate(members):
+                # Do not use extract(): archive paths are untrusted and may
+                # contain absolute paths or ".." components.
+                member_path = tmp / f"{index:03d}_{Path(member.filename).name}"
+                with archive.open(member) as source, member_path.open("wb") as dest:
+                    shutil.copyfileobj(source, dest)
+                validate_era5(member_path)
+                extracted.append(member_path)
+
+        print(
+            f"merging {len(extracted)} NetCDF members from {download.name}",
+            flush=True,
+        )
+        datasets = [xr.open_dataset(path) for path in extracted]
+        merged = None
+        try:
+            merged = xr.merge(
+                datasets,
+                compat="no_conflicts",
+                join="outer",
+                combine_attrs="override",
+            )
+            merged.to_netcdf(staged, engine="netcdf4")
+        finally:
+            if merged is not None:
+                merged.close()
+            for dataset in datasets:
+                dataset.close()
+
+    validate_era5(staged)
+    staged.replace(target)
+    download.unlink()
+
+
 def retrieve_atomic(client, dataset: str, request: dict, target: Path) -> None:
     """Retrieve and validate one CDS request before publishing *target*."""
     if target.exists():
@@ -109,11 +181,19 @@ def retrieve_atomic(client, dataset: str, request: dict, target: Path) -> None:
             target.unlink()
 
     partial = target.with_suffix(target.suffix + ".part")
-    partial.unlink(missing_ok=True)
+    if partial.exists():
+        print("recovering completed CDS download", partial, flush=True)
+        try:
+            publish_download(partial, target)
+            print("wrote", target, flush=True)
+            return
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            print(f"removing invalid partial download {partial}: {exc}", flush=True)
+            partial.unlink()
+
     print("requesting", target, flush=True)
     client.retrieve(dataset, request, str(partial))
-    validate_era5(partial)
-    partial.replace(target)
+    publish_download(partial, target)
     print("wrote", target, flush=True)
 
 
