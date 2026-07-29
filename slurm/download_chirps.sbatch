@@ -16,7 +16,9 @@ cd "$SLURM_SUBMIT_DIR"
     exit 1
 }
 
-YEAR="${SLURM_ARRAY_TASK_ID:?Submit this file as a Slurm array job.}"
+START_YEAR="${CHIRPS_START_YEAR:?Use slurm/submit_download_chirps.sh to submit this job.}"
+ARRAY_INDEX="${SLURM_ARRAY_TASK_ID:?Submit this file as a Slurm array job.}"
+YEAR="$((START_YEAR + ARRAY_INDEX))"
 OUT_DIR="${CHIRPS_OUT:-data/raw/chirps}"
 PYTHON_BIN="${CHIRPS_PYTHON:-python}"
 
@@ -39,6 +41,7 @@ PY
 mkdir -p "$OUT_DIR"
 
 echo "Repository: $SLURM_SUBMIT_DIR"
+echo "Array index: $ARRAY_INDEX"
 echo "Year: $YEAR"
 echo "Output: $OUT_DIR"
 echo "Python: $(command -v "$PYTHON_BIN")"

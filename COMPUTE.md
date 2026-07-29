@@ -51,7 +51,10 @@ submit from any directory:
 ```
 
 The default array covers 1981–2025 with at most two simultaneous downloads.
-Override the years, concurrency, or partition through environment variables:
+It uses zero-based Slurm indices (`0-44%2`) and maps those indices back to
+calendar years inside the job, which keeps it compatible with clusters whose
+maximum permitted array index is below 1981. Override the years, concurrency,
+or partition through environment variables:
 
 ```bash
 CHIRPS_START=1981 CHIRPS_END=2025 CHIRPS_MAX_PARALLEL=2 \

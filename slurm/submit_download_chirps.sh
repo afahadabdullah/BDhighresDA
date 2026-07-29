@@ -29,10 +29,24 @@ PARTITION="${CHIRPS_PARTITION:-}"
 cd "$REPO_ROOT"
 mkdir -p logs
 
-SBATCH_ARGS=("--array=${START}-${END}%${MAX_PARALLEL}")
+# Many Slurm installations require array indices to be smaller than
+# MaxArraySize (often 1001), so calendar years such as 1981 cannot be used as
+# indices. Submit zero-based indices and let the batch script map them back to
+# years with CHIRPS_START_YEAR + SLURM_ARRAY_TASK_ID.
+LAST_INDEX="$((END - START))"
+if ((LAST_INDEX == 0)); then
+    ARRAY_SPEC="0"
+else
+    ARRAY_SPEC="0-${LAST_INDEX}%${MAX_PARALLEL}"
+fi
+
+SBATCH_ARGS=(
+    "--array=${ARRAY_SPEC}"
+    "--export=ALL,CHIRPS_START_YEAR=${START}"
+)
 if [[ -n "$PARTITION" ]]; then
     SBATCH_ARGS+=("--partition=$PARTITION")
 fi
 
-echo "Submitting CHIRPS years ${START}-${END} (${MAX_PARALLEL} simultaneous jobs)"
+echo "Submitting CHIRPS years ${START}-${END} as array ${ARRAY_SPEC}"
 exec sbatch "${SBATCH_ARGS[@]}" slurm/download_chirps.sbatch
