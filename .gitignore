@@ -1,9 +1,10 @@
 # data is large and, for BMD gauges, not redistributable
-data/
-!data/.gitkeep
-runs/
-results/
-logs/
+# NOTE: leading slash -- otherwise this would also ignore src/bdhires/data/
+/data/
+!/data/.gitkeep
+/runs/
+/results/
+/logs/
 *.zarr/
 *.nc
 *.nc4
