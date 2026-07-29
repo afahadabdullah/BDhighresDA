@@ -1,4 +1,7 @@
 #!/bin/bash
+# This script is for PRISM x86-64 V100 nodes only.
+# Do not use the bdda-gh200 aarch64 environment with this script.
+# It intentionally retains a separate x86/CUDA environment workflow.
 #SBATCH --job-name=bdhires-B
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

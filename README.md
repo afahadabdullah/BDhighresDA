@@ -51,7 +51,7 @@ the data plan, and the experiment/ablation list.
 ## Quick start
 
 ```bash
-# 0. environment
+# 0. portable/local environment (PRISM users: use the GH200 section below)
 conda env create -f environment.yml && conda activate bdhires
 pip install -e .
 
@@ -70,18 +70,18 @@ python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
 python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
        --zarr data/processed/bd_wide.zarr --out data/stations
 
-# 3. train (2 x V100)
-sbatch slurm/train_2xV100.sbatch          # single stage, ERA5-conditioned prior
+# 3. train on PRISM GH200 (wrapper creates logs before submitting)
+slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final.pt \
        --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
 
 # 5. produce the product
-sbatch slurm/assimilate.sbatch            # array job, one year per task
+slurm/submit_assimilate_gh200.sh          # array job, one year per task
 
 # 6. verify against withheld gauges (3-fold CV) + baselines
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final.pt \
        --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv.json
 ```
 
@@ -120,15 +120,56 @@ methodology.
 
 ## Compute notes
 
-* **2 × V100 (32 GB)**: `configs/train_v100.yaml`, batch 8/GPU. V100 is
-  `sm_70` and has **no bf16 tensor cores**, so `utils/dist.amp_dtype()`
-  automatically selects fp16 + `GradScaler`. Expect ~1–2 days for stage B.
-* **H100**: `configs/train_h100.yaml`, bigger model, bf16, batch 32.
-  Expect a few hours.
+* **PRISM GH200 (`aarch64`)**: `configs/train_h100.yaml`, one GPU, bf16,
+  batch 32. Use the ARM-native `bdda-gh200` environment and the submission
+  wrappers described below.
+* **2 × V100 (32 GB, x86-64 alternative)**: `configs/train_v100.yaml`, batch
+  8/GPU. V100 is `sm_70` and has **no bf16 tensor cores**, so
+  `utils/dist.amp_dtype()` automatically selects fp16 + `GradScaler`. Never
+  use the GH200 ARM environment for this workflow.
 * Guided sampling backpropagates through the network, so a 16-member guided
   day costs ~2–3× an unguided one — budget ~10–30 s/day on one GPU. That cost
   is independent of observation count, so the ~3,500 IMERG footprints are
   effectively free alongside the 35 gauges.
+
+## NASA NCCS PRISM GH200
+
+PRISM Grace nodes are `aarch64` systems with one GH200 GPU per node. Use the
+existing ARM Miniforge environment:
+
+```bash
+source /home/afahad/nb/project/BDDA/miniforge3-aarch64/etc/profile.d/conda.sh
+conda activate /home/afahad/nb/project/BDDA/envs/bdda-gh200
+export PYTHONNOUSERSITE=1
+
+cd /path/to/BDhighresDA
+python -m pip install -e . --no-deps
+
+mkdir -p logs
+sbatch slurm/train_h100.sbatch
+```
+
+`--no-deps` is intentional: the ARM environment already contains compatible
+package versions. Batch jobs must not install or update packages. The
+recommended submission commands create `logs` automatically:
+
+```bash
+slurm/submit_train_gh200.sh
+slurm/submit_assimilate_gh200.sh
+```
+
+Monitor or cancel jobs with:
+
+```bash
+squeue -u "$USER"
+scontrol show job JOB_ID
+tail -f logs/bdhires-gh200-JOB_ID.out
+scancel JOB_ID
+```
+
+See [`COMPUTE.md`](COMPUTE.md) for environment isolation, automatic checkpoint
+resumption, array concurrency, log names, preflight checks, and the retained
+x86-64 V100 alternative.
 
 ## Ensemble spread
 
