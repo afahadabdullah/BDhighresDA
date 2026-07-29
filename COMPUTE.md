@@ -84,12 +84,13 @@ six predictors to correctly aligned daily fields, and atomically writes
 `data/raw/era5/era5_daily_YEAR.nc`.
 
 Icechunk v2 requires Python 3.12, while the GH200 training environment uses
-Python 3.11. Create the small dedicated CPU download environment once:
+Python 3.11. Prism's Miniforge installation is ARM-native and cannot execute
+directly on an x86_64 login node. Create the small dedicated download
+environment once with the wrapper; it runs Conda on `grace-cpuonly`:
 
 ```bash
-source /home/afahad/nb/project/BDDA/miniforge3-aarch64/etc/profile.d/conda.sh
 cd /home/afahad/project/BDDA/BDhighresDA
-conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
+slurm/setup_earthmover_env.sh
 ```
 
 The batch script finds `../envs/bdda-earthmover/bin/python` automatically and

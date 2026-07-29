@@ -43,8 +43,8 @@ else
     done
     [[ -n "$PYTHON_BIN" ]] || {
         echo "ERROR: The dedicated Python 3.12 Earthmover environment was not found."
-        echo "Create it with:"
-        echo "  conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml"
+        echo "From the repository root, create it on an ARM CPU node with:"
+        echo "  slurm/setup_earthmover_env.sh"
         echo "or set ERA5_PYTHON=/absolute/path/to/python3.12."
         exit 1
     }

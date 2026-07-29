@@ -59,8 +59,11 @@ pip install -e .
 python scripts/smoke_test.py
 
 # 2. data
-# ERA5 extraction needs the dedicated Python 3.12 Icechunk environment:
-conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
+# ERA5 extraction needs the dedicated Python 3.12 Icechunk environment.
+# On Prism, this launches setup on an ARM CPU node:
+slurm/setup_earthmover_env.sh
+# On an ARM/local machine with a working Conda installation, the equivalent is:
+# conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
 conda run -p ../envs/bdda-earthmover \
   python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
