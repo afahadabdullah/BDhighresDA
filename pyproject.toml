@@ -14,7 +14,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["cdsapi", "netcdf4", "h5netcdf", "dask", "xesmf", "rioxarray"]
+data = [
+  "netcdf4", "h5netcdf", "dask", "xesmf", "rioxarray",
+]
+earthmover = [
+  "icechunk>=2.1.1,<3", "pcodec>=1.0.2", "zarr>=3.2",
+]
 eval = ["pysteps", "matplotlib", "cartopy"]
 dev = ["pytest", "ruff"]
 

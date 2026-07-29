@@ -58,8 +58,11 @@ pip install -e .
 # 1. does everything work? (synthetic data, CPU, ~2 min, no downloads)
 python scripts/smoke_test.py
 
-# 2. data (the slow part is the CDS queue, not the volume)
-python scripts/00_download_era5.py  --start 1981 --end 2025 --out data/raw/era5   # 5 channels
+# 2. data
+# ERA5 extraction needs the dedicated Python 3.12 Icechunk environment:
+conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
+conda run -p ../envs/bdda-earthmover \
+  python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
 python scripts/02_download_imerg.py  --start 2000 --end 2025 --out data/raw/imerg
 python scripts/03_build_static.py --dem data/raw/dem/gmted.tif \
@@ -73,7 +76,7 @@ python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
 # On Prism, submit resumable CHIRPS downloads to CPU-only nodes:
 slurm/submit_download_chirps.sh
 
-# ERA5: official CDS, five variables, regional subset, CPU-only nodes:
+# ERA5: free Earthmover ARCO store, six variables, daily regional files:
 slurm/submit_download_era5.sh
 
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
@@ -95,22 +98,23 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final
 
 | | |
 |---|---|
-| **CDS API key** | `~/.cdsapirc` for ERA5 ([how-to](https://cds.climate.copernicus.eu/how-to-api)) |
+| **ERA5 access** | No key required; the Earthmover AWS Open Data store is read anonymously |
 | **Earthdata login** | `~/.netrc` entry for IMERG (GES DISC) |
 | **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
 | **DEM** | GMTED2010 or SRTM over 84–97°E, 16–29°N. Optional but strongly recommended — orography is the most informative static channel over Bangladesh |
 
-## Conditioning: five ERA5 channels, on purpose
+## Conditioning: six ERA5 surface channels
 
-`tp` (model rainfall) · `tcwv` (column moisture) · `ivte`/`ivtn` (moisture
-transport) · `cape` (instability) — plus IVT magnitude and sin/cos direction
-derived for free, and the statics. All single-level, so no ERA5 pressure-level
-request is needed at all.
+`tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·
+`u10`/`v10` (low-level flow) · `msl` (synoptic circulation), plus the static
+fields. These are all available in Earthmover's free surface store.
 
-With ~14k daily training samples, extra channels are capacity the network
-spends learning to ignore. The larger set (MSL, t2m/d2m, CIN, moisture-flux
-divergence, 850/500 hPa `u/v/q/w`) is available behind `--extended` and should
-be treated as an ablation — turn it on only if validation CRPS improves.
+The regional fields of `u10`, `v10` and `msl` replace the unavailable
+vertically integrated moisture-flux pair. ERA5 `tp` remains the strongest
+background predictor because it already reflects the model's full dynamics
+and moisture convergence. Exact IVT is retained as a future ablation: add it
+only if a controlled validation experiment improves CRPS and extreme-rain
+skill.
 
 ## Domains
 
@@ -187,7 +191,9 @@ fight that, with three independent spread sources:
    (asserted in the smoke test). Inflating the *prior* means observations pull
    members back where they exist, so spread grows only where the field is
    unconstrained.
-2. **ERA5-EDA members** — real background uncertainty, one member each.
+2. **Optional future ERA5-EDA members** — real background uncertainty, one
+   member each. These are not included in the Earthmover surface workflow and
+   would require a separate CDS download.
 3. **Perturbed observations** — `y_r = y + ε_r`, spatially correlated for
    IMERG. Assimilating identical `y` into every member is the generative
    analogue of an unperturbed-obs EnKF.

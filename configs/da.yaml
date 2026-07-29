@@ -60,8 +60,8 @@ ensemble:
                                 # identical y into every member is the generative
                                 # analogue of an unperturbed-obs EnKF and is the
                                 # classic cause of under-dispersion.
-  era5_eda: false               # cycle ERA5 ensemble-of-data-assimilation members
-                                # across analysis members (needs the EDA download)
+  era5_eda: false               # optional future CDS/EDA workflow; unavailable
+                                # from the Earthmover surface downloader
   inference_dropout: 0.0        # keep U-Net dropout active at sampling time to add
                                 # a crude epistemic component (0 = off)
 

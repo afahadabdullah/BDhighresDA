@@ -42,5 +42,5 @@ SBATCH_ARGS=(
     "--partition=${PARTITION}"
 )
 
-echo "Submitting ERA5 years ${START}-${END} as array ${ARRAY_SPEC} on ${PARTITION}"
+echo "Submitting Earthmover ERA5 years ${START}-${END} as array ${ARRAY_SPEC} on ${PARTITION}"
 exec sbatch "${SBATCH_ARGS[@]}" slurm/download_era5.sbatch

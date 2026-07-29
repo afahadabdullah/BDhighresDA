@@ -49,12 +49,13 @@
   <rect x="56" y="114" width="76" height="76" filter="url(#fCoarse)"/>
   <rect x="56" y="114" width="76" height="76" rx="4" fill="none" stroke="#8FAAC4"/>
   <text class="lab" x="94" y="203" text-anchor="middle">28 km cells</text>
-  <text class="body" x="144" y="130">tp</text><text class="small" x="174" y="130">model rain</text>
-  <text class="body" x="144" y="147">tcwv</text><text class="small" x="186" y="147">moisture</text>
-  <text class="body" x="144" y="164">ivte</text><text class="small" x="182" y="164">transport</text>
-  <text class="body" x="144" y="181">ivtn</text><text class="small" x="182" y="181">direction</text>
-  <text class="body" x="144" y="198">cape</text><text class="small" x="188" y="198">instability</text>
-  <text class="small" x="56" y="224" font-weight="700" fill="#33556E">5 channels — all single-level</text>
+  <text class="body" x="144" y="124">tp</text><text class="small" x="174" y="124">model rain</text>
+  <text class="body" x="144" y="140">tcwv</text><text class="small" x="186" y="140">moisture</text>
+  <text class="body" x="144" y="156">cape</text><text class="small" x="188" y="156">instability</text>
+  <text class="body" x="144" y="172">u10</text><text class="small" x="178" y="172">zonal flow</text>
+  <text class="body" x="144" y="188">v10</text><text class="small" x="178" y="188">merid. flow</text>
+  <text class="body" x="144" y="204">msl</text><text class="small" x="178" y="204">circulation</text>
+  <text class="small" x="56" y="224" font-weight="700" fill="#33556E">6 Earthmover surface channels</text>
   <text class="small" x="56" y="244" font-size="8.8">+ statics: elevation, slope,</text>
   <text class="small" x="56" y="257" font-size="8.8">land mask, lat/lon, day-of-year</text>
   <rect x="200" y="228" width="44" height="36" rx="4" fill="#F9FBF8" stroke="#A5BC99"/>
@@ -122,7 +123,7 @@
   <rect x="56" y="422" width="64" height="64" rx="4" fill="#F7FAFD" stroke="#C9D8E6"/>
   <rect x="56" y="422" width="64" height="64" filter="url(#fCoarse)"/>
   <rect x="56" y="422" width="64" height="64" rx="4" fill="none" stroke="#8FAAC4"/>
-  <text class="small" x="132" y="442">same 5</text>
+  <text class="small" x="132" y="442">same 6</text>
   <text class="small" x="132" y="456">channels</text>
   <text class="small" x="132" y="470">+ statics</text>
   <text class="lab" x="56" y="504">conditioning  c</text>
@@ -158,7 +159,7 @@
   <rect x="308" y="596" width="380" height="56" rx="6" fill="#FDF3E0" stroke="#E3C692"/>
   <text class="small" x="318" y="612" font-size="9">Observations off  →  <tspan font-weight="700">BACKGROUND</tspan>  (first guess, ERA5 alone)</text>
   <text class="small" x="318" y="627" font-size="9">Observations on   →  <tspan font-weight="700" fill="#9C3B4C">ANALYSIS</tspan>  (the product)</text>
-  <text class="small" x="318" y="644" font-size="9">Spread: x_0 draw × prior temperature T · EDA member · perturbed y</text>
+  <text class="small" x="318" y="644" font-size="9">Spread: x_0 draw × prior temperature T · perturbed y · optional future EDA</text>
 
   <!-- observations -->
   <rect class="card" x="724" y="392" width="330" height="270" rx="10" fill="#FDEFF1" stroke="#E3A9B4"/>

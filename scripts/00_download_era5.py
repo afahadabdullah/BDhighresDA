@@ -1,305 +1,320 @@
-#!/usr/bin/env python
-"""Download ERA5 single-level + pressure-level daily predictors over the wide domain.
+#!/usr/bin/env python3
+"""Extract regional daily ERA5 predictors from Earthmover's public ARCO store.
 
-Requires a CDS API key in ~/.cdsapirc (https://cds.climate.copernicus.eu/how-to-api).
+The source is the free, quarterly updated Icechunk v2 / Zarr v3 repository in
+the AWS Open Data Registry.  No CDS or AWS credentials are required.
 
-    python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
+    python scripts/00_download_era5.py \
+        --start 1981 --end 2025 --out data/raw/era5
 
-Notes
------
-* Only five conditioning channels are downloaded by default -- see the CORE
-  list below for why.  Use ``--extended`` for the ablation set.
-* We download HOURLY fields and aggregate to daily here rather than using the
-  "daily statistics" application, because precipitation needs a 00-00 UTC sum
-  aligned with CHIRPS (which is a 00-00 UTC daily total) while the state
-  variables want a daily mean.  Getting this alignment wrong is the single
-  most common source of a spurious 1-day lag in downscaling studies.
-* ERA5 total precipitation at hour H is the accumulation over the PRECEDING
-  hour, so the daily total for day D is the sum of hours 01:00 (D) .. 00:00 (D+1).
+Each output is a compact annual NetCDF file at native ERA5 0.25-degree
+resolution, cropped to the WIDE domain plus a one-degree interpolation halo.
+Hourly source data are aggregated before they are saved:
+
+* ``tp`` is summed over 01:00(D) through 00:00(D+1), then converted m -> mm.
+* ``tcwv``, ``cape``, ``u10``, ``v10`` and ``msl`` are averaged over
+  00:00 through 23:00 UTC on day D.
+
+Icechunk v2 requires Python 3.12 or newer.  On Prism, use the dedicated
+``bdda-earthmover`` environment described in the README.
 """
 from __future__ import annotations
 
 import argparse
-import shutil
+import calendar
 import sys
-import tempfile
-import zipfile
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.grids import WIDE  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# CONDITIONING SET -- deliberately minimal: 5 channels.
-#
-# With ~14k daily training samples, every extra channel is capacity spent on
-# something the network must learn to ignore.  These five answer the only
-# questions that matter for a daily rainfall total over the Bengal delta:
-#
-#   tp     how much rain did the background model itself produce?
-#          (a MODEL field, not an observation -- that is why it belongs here)
-#   tcwv   how much moisture is available in the column?
-#   ivte   how much moisture is being transported, and from where?
-#   ivtn     -> the monsoon flux hitting the Meghalaya barrier is the single
-#              mechanism behind the domain's rainfall maximum
-#   cape   is the atmosphere unstable enough to convect it out?
-#
-# All five are SINGLE-LEVEL, so no pressure-level request is needed at all --
-# the CDS download shrinks by roughly an order of magnitude.
-#
-# Everything else (winds and humidity on levels, CIN, BLH, stability indices,
-# shear, dewpoint depression) is available behind --extended and should be
-# treated as an ABLATION, not a default.  Add channels only if the validation
-# CRPS actually improves.
-# ---------------------------------------------------------------------------
+BUCKET = "earthmover-icechunk-era5"
+PREFIX = "icechunkV2"
+REGION = "us-east-1"
+GROUP = "single/temporal"
+BRANCH = "main"
+PAD = 1.0
 
-CORE = [
-    "total_precipitation",
-    "total_column_water_vapour",
-    "vertical_integral_of_eastward_water_vapour_flux",
-    "vertical_integral_of_northward_water_vapour_flux",
-    "convective_available_potential_energy",
-]
-
-EXTENDED_SINGLE = [
-    "mean_sea_level_pressure",
-    "2m_temperature",
-    "2m_dewpoint_temperature",
-    "convective_inhibition",
-    "convective_precipitation",
-    "vertical_integral_of_divergence_of_moisture_flux",
-]
-
-EXTENDED_PRESSURE = {
-    "variable": ["u_component_of_wind", "v_component_of_wind",
-                 "specific_humidity", "vertical_velocity"],
-    "pressure_level": ["850", "500"],
-}
-
-PAD = 1.0  # degrees of halo so the regridder has neighbours at the edges
+# Earthmover surface-only replacement for the former CDS five-channel set.
+# The wide spatial fields of u10/v10 provide flow direction; msl supplies the
+# synoptic circulation pattern.  ERA5 tp already embeds the model's full
+# dynamical and moisture-convergence calculation.
+VARIABLES = ("tp", "tcwv", "cape", "u10", "v10", "msl")
+STATE_VARIABLES = tuple(variable for variable in VARIABLES if variable != "tp")
 
 
-def area():
-    lo, la, hi, ha = WIDE.bbox
-    return [ha + PAD, lo - PAD, la - PAD, hi + PAD]  # N, W, S, E
+def bounds() -> tuple[float, float, float, float]:
+    """Return regional bounds as north, west, south, east."""
+    west, south, east, north = WIDE.bbox
+    return north + PAD, west - PAD, south - PAD, east + PAD
 
 
-def validate_era5(path: Path) -> None:
-    """Raise if *path* is not a readable regional ERA5 NetCDF file."""
-    with xr.open_dataset(path) as ds:
-        names = set(ds.coords) | set(ds.dims)
-        if not ({"time", "valid_time"} & names):
-            raise ValueError(f"{path} has no time coordinate")
-        if not ({"latitude", "lat"} & names):
-            raise ValueError(f"{path} has no latitude coordinate")
-        if not ({"longitude", "lon"} & names):
-            raise ValueError(f"{path} has no longitude coordinate")
-        if not ds.data_vars:
-            raise ValueError(f"{path} contains no ERA5 variables")
+def expected_days(year: int) -> int:
+    return 366 if calendar.isleap(year) else 365
 
 
-def publish_download(download: Path, target: Path) -> None:
-    """Validate a CDS response and atomically publish it as one NetCDF file.
-
-    Since the November 2024 CDS converter update, a request containing fields
-    with different GRIB ``stepType`` values can be returned as a ZIP archive
-    containing multiple NetCDF files.  The core request does exactly that:
-    total precipitation is accumulated while the other predictors are
-    instantaneous.  Merge those members here so downstream code still sees
-    one monthly file.
-    """
-    if not zipfile.is_zipfile(download):
-        validate_era5(download)
-        download.replace(target)
-        return
-
-    staged = target.with_suffix(target.suffix + ".ready")
-    staged.unlink(missing_ok=True)
-
-    with tempfile.TemporaryDirectory(
-        prefix=f".{target.stem}-", dir=target.parent
-    ) as tmp_name:
-        tmp = Path(tmp_name)
-        with zipfile.ZipFile(download) as archive:
-            members = [
-                info for info in archive.infolist()
-                if not info.is_dir()
-                and Path(info.filename).suffix.lower() in {".nc", ".nc4"}
-            ]
-            if not members:
-                names = ", ".join(info.filename for info in archive.infolist())
-                raise ValueError(
-                    f"{download} is a ZIP archive with no NetCDF members: {names}"
-                )
-
-            extracted = []
-            for index, member in enumerate(members):
-                # Do not use extract(): archive paths are untrusted and may
-                # contain absolute paths or ".." components.
-                member_path = tmp / f"{index:03d}_{Path(member.filename).name}"
-                with archive.open(member) as source, member_path.open("wb") as dest:
-                    shutil.copyfileobj(source, dest)
-                validate_era5(member_path)
-                extracted.append(member_path)
-
-        print(
-            f"merging {len(extracted)} NetCDF members from {download.name}",
-            flush=True,
-        )
-        datasets = [xr.open_dataset(path) for path in extracted]
-        merged = None
-        try:
-            merged = xr.merge(
-                datasets,
-                compat="no_conflicts",
-                join="outer",
-                combine_attrs="override",
+def validate_year(path: Path, year: int) -> None:
+    """Raise if *path* is not a complete daily regional ERA5 year."""
+    with xr.open_dataset(path) as dataset:
+        missing = set(VARIABLES) - set(dataset.data_vars)
+        extra = set(dataset.data_vars) - set(VARIABLES)
+        if missing or extra:
+            raise ValueError(
+                f"{path} variable mismatch; missing={sorted(missing)}, "
+                f"extra={sorted(extra)}"
             )
-            merged.to_netcdf(staged, engine="netcdf4")
-        finally:
-            if merged is not None:
-                merged.close()
-            for dataset in datasets:
-                dataset.close()
 
-    validate_era5(staged)
-    staged.replace(target)
-    download.unlink()
+        required = {"time", "latitude", "longitude"}
+        absent = required - (set(dataset.coords) | set(dataset.dims))
+        if absent:
+            raise ValueError(f"{path} is missing coordinates {sorted(absent)}")
+
+        days = pd.DatetimeIndex(dataset.time.values)
+        expected = pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")
+        if not days.equals(expected):
+            raise ValueError(
+                f"{path} has an incomplete time axis: "
+                f"{days[0] if len(days) else 'empty'} to "
+                f"{days[-1] if len(days) else 'empty'}, {len(days)} values"
+            )
+
+        north, west, south, east = bounds()
+        lat_min = float(dataset.latitude.min())
+        lat_max = float(dataset.latitude.max())
+        lon_min = float(dataset.longitude.min())
+        lon_max = float(dataset.longitude.max())
+        resolution = 0.25
+        if (
+            lat_min > south + 1e-6
+            or lat_max < north - resolution - 1e-6
+            or lon_min > west + 1e-6
+            or lon_max < east - resolution - 1e-6
+        ):
+            raise ValueError(
+                f"{path} does not cover the requested halo: "
+                f"lat={lat_min}..{lat_max}, lon={lon_min}..{lon_max}"
+            )
+
+        # Reading the first and last day catches truncated/corrupt NetCDF
+        # payloads without loading the full annual file a second time.
+        edge = dataset[list(VARIABLES)].isel(time=[0, -1]).load()
+        for variable in VARIABLES:
+            if not np.isfinite(edge[variable].values).any():
+                raise ValueError(f"{path} has no finite edge values for {variable}")
 
 
-def retrieve_atomic(client, dataset: str, request: dict, target: Path) -> None:
-    """Retrieve and validate one CDS request before publishing *target*."""
+def aggregate_year(source: xr.Dataset, year: int) -> xr.Dataset:
+    """Return one correctly aligned daily year from an hourly source dataset."""
+    start = pd.Timestamp(year=year, month=1, day=1)
+    stop = pd.Timestamp(year=year + 1, month=1, day=1)
+    hourly_expected = pd.date_range(start, stop, freq="h")
+
+    north, west, south, east = bounds()
+    window = source[list(VARIABLES)].sel(
+        valid_time=slice(start, stop),
+        latitude=slice(north, south),  # Earthmover latitude is descending
+        longitude=slice(west, east),
+    )
+
+    hourly_actual = pd.DatetimeIndex(window.valid_time.values)
+    if not hourly_actual.equals(hourly_expected):
+        raise ValueError(
+            f"Earthmover has an incomplete hourly window for {year}: "
+            f"expected {len(hourly_expected)}, found {len(hourly_actual)}"
+        )
+    if window.sizes["latitude"] == 0 or window.sizes["longitude"] == 0:
+        raise ValueError(f"Earthmover regional selection is empty for {year}")
+
+    # State variables use 00:00..23:00 on D.  The inclusive selection includes
+    # 00:00 on Jan 1 of the following year, so drop its final sample.
+    states = window[list(STATE_VARIABLES)].isel(valid_time=slice(0, -1))
+    states_daily = states.resample(valid_time="1D").mean(keep_attrs=True)
+
+    # ERA5 tp at time H is the accumulation over the preceding hour.  Drop
+    # 00:00 on Jan 1, retain 00:00 on Jan 1 of the next year, and shift the
+    # labels back one hour before summing.
+    precipitation = window["tp"].isel(valid_time=slice(1, None))
+    precipitation = precipitation.assign_coords(
+        valid_time=precipitation.valid_time - np.timedelta64(1, "h")
+    )
+    precipitation_daily = precipitation.resample(valid_time="1D").sum(
+        keep_attrs=True
+    )
+    precipitation_daily = (precipitation_daily * 1000.0).astype("float32")
+    precipitation_daily.attrs.update(
+        units="mm day-1",
+        long_name="ERA5 total precipitation, 00:00-24:00 UTC daily total",
+        aggregation="sum of preceding-hour accumulations 01:00(D)-00:00(D+1)",
+    )
+
+    daily = xr.merge(
+        [precipitation_daily.to_dataset(name="tp"), states_daily],
+        compat="no_conflicts",
+        combine_attrs="drop_conflicts",
+    ).astype("float32")
+    daily = daily.rename(valid_time="time")
+    daily = daily.transpose("time", "latitude", "longitude")
+    daily.attrs.update(
+        title="Daily regional ERA5 predictors for BDhighresDA",
+        source=(
+            "Earthmover public ERA5 ARCO Icechunk store "
+            "s3://earthmover-icechunk-era5/icechunkV2"
+        ),
+        source_group=GROUP,
+        source_branch=BRANCH,
+        source_resolution="0.25 degree hourly",
+        temporal_resolution="daily",
+        state_aggregation="mean of 00:00-23:00 UTC",
+        spatial_subset=(
+            f"north={north}, west={west}, south={south}, east={east}"
+        ),
+        license="CC-BY-4.0",
+    )
+
+    if daily.sizes["time"] != expected_days(year):
+        raise ValueError(
+            f"daily aggregation produced {daily.sizes['time']} days for {year}"
+        )
+    return daily
+
+
+def open_earthmover() -> xr.Dataset:
+    """Open the public temporal-layout ERA5 group with native Dask chunks."""
+    if sys.version_info < (3, 12):
+        raise RuntimeError(
+            "Earthmover's Icechunk v2 store requires Python 3.12 or newer. "
+            "Create the dedicated environment from environment-earthmover.yml."
+        )
+
+    try:
+        import dask  # noqa: F401
+        import icechunk
+        import pcodec  # noqa: F401  # registers the Zarr PCodec decoder
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing Earthmover dependency. Create the dedicated environment "
+            "from environment-earthmover.yml."
+        ) from exc
+
+    storage = icechunk.s3_storage(
+        bucket=BUCKET,
+        prefix=PREFIX,
+        region=REGION,
+        anonymous=True,
+    )
+    repository = icechunk.Repository.open(storage)
+    session = repository.readonly_session(branch=BRANCH)
+    dataset = xr.open_zarr(
+        session.store,
+        group=GROUP,
+        consolidated=False,
+        chunks={},
+    )
+
+    missing = set(VARIABLES) - set(dataset.data_vars)
+    if missing:
+        raise ValueError(
+            f"Earthmover group {GROUP} is missing variables {sorted(missing)}"
+        )
+    return dataset
+
+
+def write_year(source: xr.Dataset, year: int, out: Path, workers: int) -> None:
+    """Aggregate, write and validate one annual file atomically."""
+    target = out / f"era5_daily_{year}.nc"
+    partial = target.with_suffix(target.suffix + ".part")
+
     if target.exists():
         try:
-            validate_era5(target)
+            validate_year(target, year)
             print("already complete", target, flush=True)
             return
         except (OSError, ValueError) as exc:
-            print(f"removing invalid ERA5 file {target}: {exc}", flush=True)
+            print(f"removing invalid output {target}: {exc}", flush=True)
             target.unlink()
 
-    partial = target.with_suffix(target.suffix + ".part")
     if partial.exists():
-        print("recovering completed CDS download", partial, flush=True)
         try:
-            publish_download(partial, target)
-            print("wrote", target, flush=True)
+            validate_year(partial, year)
+            partial.replace(target)
+            print("recovered", target, flush=True)
             return
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
-            print(f"removing invalid partial download {partial}: {exc}", flush=True)
+        except (OSError, ValueError):
             partial.unlink()
 
-    print("requesting", target, flush=True)
-    client.retrieve(dataset, request, str(partial))
-    publish_download(partial, target)
+    print(f"aggregating Earthmover ERA5 for {year}", flush=True)
+    daily = aggregate_year(source, year)
+    nlat = daily.sizes["latitude"]
+    nlon = daily.sizes["longitude"]
+    encoding = {
+        variable: {
+            "dtype": "float32",
+            "zlib": True,
+            "complevel": 4,
+            "shuffle": True,
+            "chunksizes": (31, nlat, nlon),
+        }
+        for variable in VARIABLES
+    }
+
+    import dask
+    from dask.diagnostics import ProgressBar
+
+    with dask.config.set(scheduler="threads", num_workers=workers):
+        with ProgressBar():
+            daily.to_netcdf(
+                partial,
+                engine="netcdf4",
+                encoding=encoding,
+                compute=True,
+            )
+    daily.close()
+
+    validate_year(partial, year)
+    partial.replace(target)
     print("wrote", target, flush=True)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--start", type=int, default=1981)
-    ap.add_argument("--end", type=int, default=2025)
-    ap.add_argument("--out", default="data/raw/era5")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--extended", action="store_true",
-                    help="also fetch the optional ablation channels (adds a "
-                         "pressure-level request and roughly 10x the volume)")
-    ap.add_argument("--ensemble", action="store_true",
-                    help="also fetch the 10-member ERA5 EDA (0.5 deg, 3-hourly). "
-                         "Gives each analysis member its own background, which is "
-                         "the physically correct source of background-error spread "
-                         "-- see docs/METHODOLOGY.md Section 6.")
-    args = ap.parse_args()
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start", type=int, default=1981)
+    parser.add_argument("--end", type=int, default=2025)
+    parser.add_argument("--out", default="data/raw/era5")
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    if args.start > args.end:
+        parser.error("--start must be less than or equal to --end")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    single = CORE + (EXTENDED_SINGLE if args.extended else [])
-
     if args.dry_run:
-        print("area (N,W,S,E):", area())
-        print(f"core single-level channels: {len(CORE)}")
-        for v in CORE:
-            print(f"    {v}")
-        if args.extended:
-            npl = len(EXTENDED_PRESSURE["variable"]) * len(EXTENDED_PRESSURE["pressure_level"])
-            print(f"extended: +{len(EXTENDED_SINGLE)} single-level, +{npl} pressure-level")
-        print(f"total ERA5 channels: {len(single) + (len(EXTENDED_PRESSURE['variable']) * len(EXTENDED_PRESSURE['pressure_level']) if args.extended else 0)}")
+        print("source:", f"s3://{BUCKET}/{PREFIX}", GROUP)
+        print("years:", args.start, "-", args.end)
+        print("variables:", ", ".join(VARIABLES))
+        print("bounds (N,W,S,E):", bounds())
+        print("output:", out / "era5_daily_YYYY.nc")
         return
 
-    import cdsapi
-
-    c = cdsapi.Client()
-    for year in range(args.start, args.end + 1):
-        for month in range(1, 13):
-            tag = f"{year}{month:02d}"
-            days = [f"{d:02d}" for d in range(1, 32)]
-            hours = [f"{h:02d}:00" for h in range(24)]
-
-            f1 = out / f"era5_sfc_{tag}.nc"
-            retrieve_atomic(
-                c,
-                "reanalysis-era5-single-levels",
-                dict(
-                    product_type="reanalysis",
-                    variable=single,
-                    year=str(year),
-                    month=f"{month:02d}",
-                    day=days,
-                    time=hours,
-                    area=area(),
-                    data_format="netcdf",
-                    download_format="unarchived",
-                ),
-                f1,
-            )
-
-            if args.ensemble:
-                f3 = out / f"era5_eda_{tag}.nc"
-                retrieve_atomic(
-                    c,
-                    "reanalysis-era5-single-levels",
-                    dict(
-                        product_type="ensemble_members",
-                        variable=[
-                            "total_column_water_vapour",
-                            "mean_sea_level_pressure",
-                            "2m_temperature",
-                            "total_precipitation",
-                        ],
-                        year=str(year),
-                        month=f"{month:02d}",
-                        day=days,
-                        time=[f"{h:02d}:00" for h in range(0, 24, 3)],
-                        area=area(),
-                        data_format="netcdf",
-                        download_format="unarchived",
-                    ),
-                    f3,
-                )
-
-            if not args.extended:
-                continue
-
-            f2 = out / f"era5_pl_{tag}.nc"
-            retrieve_atomic(
-                c,
-                "reanalysis-era5-pressure-levels",
-                dict(
-                    product_type="reanalysis",
-                    **EXTENDED_PRESSURE,
-                    year=str(year),
-                    month=f"{month:02d}",
-                    day=days,
-                    time=[f"{h:02d}:00" for h in (0, 6, 12, 18)],
-                    area=area(),
-                    data_format="netcdf",
-                    download_format="unarchived",
-                ),
-                f2,
-            )
+    source = open_earthmover()
+    try:
+        print(
+            f"opened Earthmover {GROUP}: "
+            f"{source.valid_time.values[0]} to {source.valid_time.values[-1]}",
+            flush=True,
+        )
+        for year in range(args.start, args.end + 1):
+            write_year(source, year, out, args.workers)
+    finally:
+        source.close()
 
 
 if __name__ == "__main__":

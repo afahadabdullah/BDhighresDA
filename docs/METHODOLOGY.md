@@ -87,7 +87,7 @@ few years.
 
 ## 3. The prior
 
-### 3.1 Conditioning: five ERA5 channels
+### 3.1 Conditioning: six ERA5 surface channels
 
 The prior is conditioned on ERA5 and time-invariant fields. Nothing else — and
 deliberately very little of ERA5.
@@ -96,35 +96,36 @@ deliberately very little of ERA5.
 |---|---|
 | `tp` | How much rain did the background model itself produce? |
 | `tcwv` | How much moisture is in the column? |
-| `ivte` | How much moisture is being transported, |
-| `ivtn` | and from which direction? |
 | `cape` | Is the atmosphere unstable enough to convect it out? |
+| `u10` | What is the east–west component of the low-level flow? |
+| `v10` | What is the north–south component of the low-level flow? |
+| `msl` | What is the surrounding synoptic circulation pattern? |
 
-Plus three derived-for-free terms from the IVT pair — magnitude, and direction
-as sin/cos so the network never sees the 0/360° discontinuity — and the
-statics: sqrt-elevation, slope, land–sea mask, four lat/lon positional-encoding
-channels, sin/cos day-of-year.
+The static inputs remain sqrt-elevation, slope, land–sea mask, four lat/lon
+positional-encoding channels, and sin/cos day-of-year.
 
 **Why so few.** With ~14,000 daily training samples, every additional channel
-is capacity spent on something the network has to learn to ignore. These five
-cover the actual causal chain for a daily rainfall total over the Bengal
-delta: available moisture, its transport, the instability that converts it to
-rain, and the background model's own estimate of the result. The monsoon flux
-striking the Meghalaya barrier — which produces the domain's rainfall maximum —
-is captured by the IVT pair together with the static orography.
+is capacity spent on something the network has to learn to ignore. These six
+cover the available column moisture, low-level flow, synoptic circulation,
+instability, and the background model's estimate of rainfall. The wide-domain
+wind and pressure fields, together with static orography, let the convolutional
+network identify Bay of Bengal inflow and terrain-relative flow.
 
-They are also all **single-level**, so no ERA5 pressure-level request is
-needed at all. The CDS download shrinks by roughly an order of magnitude,
-which matters because the download queue, not training, is the long pole.
+Exact vertically integrated eastward/northward moisture flux is unavailable in
+Earthmover's free surface store. It is not assumed to be equivalent to surface
+wind: instead, IVT is an explicit future ablation. ERA5 `tp` already embeds the
+forecast model's three-dimensional circulation and moisture convergence, so
+omitting IVT is a defensible first baseline rather than removing all dynamical
+information.
 
 `ERA5 tp` deserves a note: it is a *model* field, the background's own
 parameterised guess at rainfall, not a measurement. That is precisely why it
 belongs in the prior and not in the likelihood.
 
-**The extended set is an ablation, not a default.** `--extended` adds MSL,
-t2m/d2m, CIN, convective precipitation, moisture-flux divergence, and
-850/500 hPa `u/v/q/w` with derived shear. Turn them on only if validation CRPS
-actually improves; report the comparison either way.
+**Additional predictors are ablations, not defaults.** Candidates include
+convective precipitation, cloud cover, 2 m temperature/dewpoint and exact IVT
+from CDS. Add them only if validation CRPS and extreme-rain skill improve;
+report the comparison either way.
 
 ### 3.2 Rectified flow / stochastic interpolant
 
@@ -356,13 +357,13 @@ integration error and mode-seeking guidance compounding along a trajectory —
 it. Keep `η` as a tunable; do not rely on it for dispersion. Reporting this
 honestly is worth more than an extra knob.
 
-**(c) Background uncertainty from the ERA5 EDA.** ERA5 ships a 10-member
-ensemble of data assimilations at 0.5°. Conditioning different analysis
-members on different EDA members propagates *background* uncertainty into the
-ensemble — a physically meaningful source that pure sampling noise cannot
-represent, and which nobody in the generative-DA literature is currently
-using. `scripts/00_download_era5.py --ensemble`; enable with
-`ensemble.era5_eda: true`.
+**(c) Optional future background uncertainty from the ERA5 EDA.** ERA5 ships a
+10-member ensemble of data assimilations at 0.5°. Conditioning different
+analysis members on different EDA members would propagate *background*
+uncertainty into the ensemble — a physically meaningful source that pure
+sampling noise cannot represent. EDA is not present in Earthmover's free
+surface workflow and therefore needs a separate CDS downloader before
+`ensemble.era5_eda: true` can be enabled.
 
 Together (a)–(c) give three separate, physically interpretable spread sources:
 **downscaling ambiguity** (the x₀ draw, widened by `T`), **background error**
@@ -447,7 +448,8 @@ The most common silent bug in this kind of study.
 
 - CHIRPS day D is 00–24 UTC.
 - ERA5 `tp` is a *backward* hourly accumulation, so day D = sum of steps
-  01:00(D) … 00:00(D+1). The packing script shifts by −1 h before resampling.
+  01:00(D) … 00:00(D+1). The Earthmover extraction script applies this shift
+  before writing each daily annual file.
 - IMERG `3IMERGDF` is already 00–24 UTC but stores a **rate in mm/hr** —
   multiply by 24.
 - State variables are averaged over 00–24 UTC of day D.

@@ -76,17 +76,25 @@ the repository-relative output directory.
 
 ## Download ERA5
 
-ERA5 is requested from the official Copernicus Climate Data Store (CDS). The
-request is cropped server-side to 83.0–97.8°E, 15.0–29.8°N: the `wide`
-training domain plus a 1° interpolation halo. Only the five core single-level
-predictors are downloaded by default. Monthly hourly NetCDF files are retained
-so total precipitation can later be aligned as 01:00(D) through 00:00(D+1)
-before daily aggregation.
+ERA5 is read anonymously from Earthmover's free Icechunk v2 / Zarr v3 store in
+the AWS Open Data Registry. No CDS key, Earthmover login or AWS credentials are
+required. Each array task reads one year from the time-series-optimized
+`single/temporal` group, crops it to 83.0–97.8°E, 15.0–29.8°N, aggregates the
+six predictors to correctly aligned daily fields, and atomically writes
+`data/raw/era5/era5_daily_YEAR.nc`.
 
-Before submitting, log in to the CDS, accept the ERA5 single-level dataset
-licence, and save the two lines shown on the CDS profile page as
-`$HOME/.cdsapirc`. The ARM project environment must contain `cdsapi`, `xarray`,
-and a NetCDF backend.
+Icechunk v2 requires Python 3.12, while the GH200 training environment uses
+Python 3.11. Create the small dedicated CPU download environment once:
+
+```bash
+source /home/afahad/nb/project/BDDA/miniforge3-aarch64/etc/profile.d/conda.sh
+cd /home/afahad/project/BDDA/BDhighresDA
+conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
+```
+
+The batch script finds `../envs/bdda-earthmover/bin/python` automatically and
+verifies Python, Icechunk, PCodec, Zarr, Xarray, Dask and NetCDF4 before
+accessing S3.
 
 Test one year first:
 
@@ -104,9 +112,9 @@ slurm/submit_download_era5.sh
 
 The default partition is `grace-cpuonly`. Override the output directory,
 partition, or interpreter with `ERA5_OUT`, `ERA5_PARTITION`, or
-`ERA5_PYTHON`. Set `ERA5_EXTENDED=1` or `ERA5_ENSEMBLE=1` only for the
-optional ablation and uncertainty experiments; neither is part of the default
-five-channel training workflow.
+`ERA5_PYTHON`. Set `ERA5_WORKERS` to change the Dask worker count inside each
+four-CPU task. Keep array concurrency modest so the public S3 service and
+cluster egress are not overloaded.
 
 ## Submit training
 

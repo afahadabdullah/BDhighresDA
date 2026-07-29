@@ -12,8 +12,8 @@
 
 ## Phase 1 — data (the long pole)
 
-- [ ] ERA5 download, 1981–2025 (CDS queue is the bottleneck; submit early,
-      chunk by month, expect days-to-weeks)
+- [ ] ERA5 extraction, 1981–2025 (Earthmover temporal ARCO store; subset and
+      aggregate to one regional daily NetCDF per year)
 - [ ] CHIRPS download + subset, 1981–2025
 - [ ] IMERG Final download, 2000-06–2025
 - [ ] DEM (GMTED2010 or SRTM) → static channels

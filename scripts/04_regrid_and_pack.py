@@ -37,20 +37,19 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.grids import WIDE  # noqa: E402
 
-# ERA5 short name -> channel name.  The CORE five (see 00_download_era5.py);
-# everything else is optional and only appears with --extended.
+# Earthmover ERA5 short name -> conditioning channel.  These six surface
+# predictors are written as already-aggregated daily fields by
+# 00_download_era5.py.
 CORE_MAP = {
     "tp": "era5_tp",          # background model rainfall
     "tcwv": "era5_tcwv",      # column moisture
-    "p71.162": "era5_ivte",   # eastward moisture flux
-    "p72.162": "era5_ivtn",   # northward moisture flux
     "cape": "era5_cape",      # instability
-    # CDS sometimes returns long names instead of GRIB codes
-    "vertical_integral_of_eastward_water_vapour_flux": "era5_ivte",
-    "vertical_integral_of_northward_water_vapour_flux": "era5_ivtn",
+    "u10": "era5_u10",        # low-level zonal flow
+    "v10": "era5_v10",        # low-level meridional flow
+    "msl": "era5_msl",        # synoptic circulation
 }
 EXTENDED_MAP = {
-    "msl": "era5_msl", "t2m": "era5_t2m", "d2m": "era5_d2m",
+    "t2m": "era5_t2m", "d2m": "era5_d2m",
     "cin": "era5_cin", "cp": "era5_cp", "p84.162": "era5_mfd",
     "vertical_integral_of_divergence_of_moisture_flux": "era5_mfd",
 }
@@ -85,14 +84,21 @@ def to_grid(da: xr.DataArray, grid, conservative: bool = False) -> xr.DataArray:
 
 
 def daily_era5(sfc_files, pl_files, grid, days, extended=False) -> tuple[np.ndarray, list[str]]:
+    if not sfc_files:
+        raise FileNotFoundError("no era5_daily_YYYY.nc files were found")
     sfc = _rename_coords(xr.open_mfdataset(sfc_files, combine="by_coords"))
     pl = _rename_coords(xr.open_mfdataset(pl_files, combine="by_coords")) if pl_files else None
     sfc_map = dict(CORE_MAP, **(EXTENDED_MAP if extended else {}))
 
-    # precipitation: shift back 1h so that 01:00(D)..00:00(D+1) lands on day D
-    tp = sfc["tp"].assign_coords(time=sfc["time"] - np.timedelta64(1, "h"))
-    tp_daily = (tp.resample(time="1D").sum() * 1000.0)  # m -> mm
-    tp_daily = tp_daily.reindex(time=days)
+    if sfc.attrs.get("temporal_resolution") != "daily":
+        raise ValueError(
+            "ERA5 inputs are not Earthmover daily files; run "
+            "scripts/00_download_era5.py before packing"
+        )
+
+    # Earthmover extraction already aligned tp to 00-24 UTC, summed it and
+    # converted it to mm/day.  State variables are already daily means.
+    tp_daily = sfc["tp"].reindex(time=days)
 
     channels, names = [], []
     channels.append(to_grid(tp_daily, grid, conservative=True))
@@ -101,7 +107,7 @@ def daily_era5(sfc_files, pl_files, grid, days, extended=False) -> tuple[np.ndar
     for v, name in sfc_map.items():
         if v == "tp" or v not in sfc:
             continue
-        d = sfc[v].resample(time="1D").mean().reindex(time=days)
+        d = sfc[v].reindex(time=days)
         channels.append(to_grid(d, grid))
         names.append(name)
 
@@ -116,14 +122,7 @@ def daily_era5(sfc_files, pl_files, grid, days, extended=False) -> tuple[np.ndar
             names.append(f"era5_{v}{lev}")
 
     # ---- derived channels ------------------------------------------------
-    # Only what is free given the core five.  IVT direction is split into
-    # sin/cos so the network never sees the 0/360 discontinuity.
     idx = {n: i for i, n in enumerate(names)}
-    if {"era5_ivte", "era5_ivtn"} <= set(idx):
-        e, n_ = channels[idx["era5_ivte"]], channels[idx["era5_ivtn"]]
-        mag = np.hypot(e, n_)
-        channels += [mag, e / (mag + 1e-6), n_ / (mag + 1e-6)]
-        names += ["era5_ivt_mag", "era5_ivt_sin", "era5_ivt_cos"]
 
     if extended and {"era5_u850", "era5_u500", "era5_v850", "era5_v500"} <= set(idx):
         du = channels[idx["era5_u500"]] - channels[idx["era5_u850"]]
@@ -203,10 +202,10 @@ def main():
         tgt = tgt.reindex(time=days).transpose("time", "lat", "lon").values.astype(np.float32)
 
         # --- conditioning: ERA5 (+ IMERG)
-        sfc = sorted(Path(args.era5).glob(f"era5_sfc_{year}*.nc"))
+        sfc = sorted(Path(args.era5).glob(f"era5_daily_{year}.nc"))
         pl = sorted(Path(args.era5).glob(f"era5_pl_{year}*.nc"))
         for y in range(year + 1, yr_end + 1):
-            sfc += sorted(Path(args.era5).glob(f"era5_sfc_{y}*.nc"))
+            sfc += sorted(Path(args.era5).glob(f"era5_daily_{y}.nc"))
             pl += sorted(Path(args.era5).glob(f"era5_pl_{y}*.nc"))
         era, names = daily_era5([str(p) for p in sfc], [str(p) for p in pl], grid, days,
                                 extended=args.extended)

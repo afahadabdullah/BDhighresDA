@@ -1,0 +1,14 @@
+name: bdda-earthmover
+channels: [conda-forge]
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - pandas
+  - xarray>=2026.4
+  - dask
+  - netcdf4
+  - zarr>=3.2
+  - pip:
+      - icechunk>=2.1.1,<3
+      - pcodec>=1.0.2
