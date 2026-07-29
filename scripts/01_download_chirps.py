@@ -7,8 +7,9 @@ is why it, rather than ERA5-Land (9 km) or IMERG (0.1 deg), is the truth here.
 
     python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
 
-The global daily files are ~1 GB/yr; we subset immediately after download and
-delete the global file unless ``--keep-global`` is passed.
+The global daily files are ~1 GB/yr. Downloads are resumable and written via
+``.part`` files; each global file is subset immediately and deleted unless
+``--keep-global`` is passed.
 """
 from __future__ import annotations
 
@@ -31,13 +32,72 @@ BASE = (
 # calibration over South Asia but changes the climatology, so do not mix.
 
 
+def validate_chirps(path: Path) -> None:
+    """Raise if *path* is not a readable CHIRPS NetCDF file."""
+    with xr.open_dataset(path) as ds:
+        missing_dims = {"time", "latitude", "longitude"} - set(ds.dims)
+        if missing_dims:
+            raise ValueError(f"{path} is missing dimensions: {sorted(missing_dims)}")
+        if "precip" not in ds:
+            raise ValueError(f"{path} does not contain the CHIRPS 'precip' variable")
+
+
+def download_year(url: str, destination: Path) -> None:
+    """Resume *url* into a temporary file and atomically publish it."""
+    if destination.exists():
+        try:
+            validate_chirps(destination)
+            return
+        except (OSError, ValueError) as exc:
+            print(f"existing download is incomplete ({exc}); resuming it", flush=True)
+            destination.replace(destination.with_suffix(destination.suffix + ".part"))
+
+    partial = destination.with_suffix(destination.suffix + ".part")
+    command = [
+        "wget",
+        "--continue",
+        "--tries=10",
+        "--timeout=60",
+        "--waitretry=10",
+        "--retry-connrefused",
+        "--output-document",
+        str(partial),
+        url,
+    ]
+
+    # A stale partial file can occasionally have the correct byte count but
+    # invalid contents (for example, after a proxy error). Retry once from
+    # scratch if NetCDF validation fails after wget reports success.
+    for attempt in range(2):
+        print("downloading", url, flush=True)
+        subprocess.run(command, check=True)
+        try:
+            validate_chirps(partial)
+        except (OSError, ValueError):
+            if attempt:
+                raise
+            print("download validation failed; retrying once from scratch", flush=True)
+            partial.unlink(missing_ok=True)
+            continue
+        partial.replace(destination)
+        return
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", type=int, default=1981)
     ap.add_argument("--end", type=int, default=2025)
     ap.add_argument("--out", default="data/raw/chirps")
     ap.add_argument("--keep-global", action="store_true")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the requested URLs and output files without downloading",
+    )
     args = ap.parse_args()
+
+    if args.start > args.end:
+        ap.error("--start must be less than or equal to --end")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -45,19 +105,38 @@ def main():
 
     for year in range(args.start, args.end + 1):
         sub = out / f"chirps_wide_{year}.nc"
-        if sub.exists():
-            continue
         url = BASE.format(year=year)
         glob_f = out / Path(url).name
-        if not glob_f.exists():
-            print("downloading", url, flush=True)
-            subprocess.run(["wget", "-q", "--show-progress", "-O", str(glob_f), url], check=True)
+
+        if args.dry_run:
+            print(f"{year}: {url} -> {sub}")
+            continue
+
+        if sub.exists():
+            try:
+                validate_chirps(sub)
+                print("already complete", sub, flush=True)
+                continue
+            except (OSError, ValueError) as exc:
+                print(f"removing invalid regional file {sub}: {exc}", flush=True)
+                sub.unlink()
+
+        download_year(url, glob_f)
+        partial_sub = sub.with_suffix(sub.suffix + ".part")
         with xr.open_dataset(glob_f) as ds:
-            ds = ds.sel(longitude=slice(lo, hi), latitude=slice(la, ha))
-            ds["precip"] = ds["precip"].where(ds["precip"] > -100)  # -9999 -> NaN
-            ds = ds.sortby("latitude")  # enforce ascending latitude convention
-            ds.to_netcdf(sub, encoding={"precip": {"zlib": True, "complevel": 4}})
-        print("wrote", sub, ds.sizes, flush=True)
+            regional = ds.sel(longitude=slice(lo, hi), latitude=slice(la, ha))
+            regional["precip"] = regional["precip"].where(
+                regional["precip"] > -100
+            )  # -9999 -> NaN
+            regional = regional.sortby("latitude")  # project convention
+            sizes = dict(regional.sizes)
+            regional.to_netcdf(
+                partial_sub,
+                encoding={"precip": {"zlib": True, "complevel": 4}},
+            )
+        validate_chirps(partial_sub)
+        partial_sub.replace(sub)
+        print("wrote", sub, sizes, flush=True)
         if not args.keep_global:
             glob_f.unlink()
 

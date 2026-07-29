@@ -36,6 +36,39 @@ by absolute prefix, and then set `PYTHONPATH` to the repository's `src`
 directory. Do not load Miniforge, Anaconda, or CUDA modules, and do not source
 `mamba.sh` in these jobs.
 
+## Download CHIRPS
+
+The CHIRPS download is a CPU-only Slurm array. Each task downloads one yearly
+global NetCDF file, immediately crops it to the repository's `wide` training
+domain, writes `data/raw/chirps/chirps_wide_YEAR.nc`, and removes the global
+temporary file. Interrupted downloads resume from `.part` files.
+
+Activate a Python environment containing `xarray` and a NetCDF backend, then
+submit from any directory:
+
+```bash
+/path/to/BDhighresDA/slurm/submit_download_chirps.sh
+```
+
+The default array covers 1981–2025 with at most two simultaneous downloads.
+Override the years, concurrency, or partition through environment variables:
+
+```bash
+CHIRPS_START=1981 CHIRPS_END=2025 CHIRPS_MAX_PARALLEL=2 \
+CHIRPS_PARTITION=compute slurm/submit_download_chirps.sh
+```
+
+To test one year first:
+
+```bash
+CHIRPS_START=1981 CHIRPS_END=1981 \
+CHIRPS_PARTITION=compute slurm/submit_download_chirps.sh
+```
+
+If the desired Python is not first on `PATH`, set its absolute path with
+`CHIRPS_PYTHON=/path/to/environment/bin/python`. Set `CHIRPS_OUT` to override
+the repository-relative output directory.
+
 ## Submit training
 
 Use the wrapper from any directory. It resolves the repository root and
