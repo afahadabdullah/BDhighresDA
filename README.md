@@ -3,10 +3,19 @@
 **Generative downscaling + data assimilation for daily rainfall over Bangladesh.**
 
 ERA5 (0.25°) is downscaled to **0.05° (~5 km) daily precipitation** by a
-conditional **flow-matching** generative model conditioned on ERA5 and GPM
-IMERG, then corrected at inference time by **sparse BMD rain-gauge
-observations** using score guidance — no retraining needed when the observing
-network changes.
+conditional **flow-matching** generative prior, then corrected at inference
+time by **GPM IMERG footprints and sparse BMD rain gauges**, both assimilated
+through score guidance — no retraining needed when the observing network
+changes.
+
+**Two phases, and only one sees observations.**
+*Training* (offline, once): ERA5 → U-Net → CHIRPS at 5 km. No gauge, no
+satellite. The network learns `p(rainfall | ERA5)` and nothing else.
+*Inference* (every day): the same frozen network samples a background from
+ERA5, and observations nudge every integration step to give the analysis.
+That separation is what makes this data assimilation rather than multi-input
+regression, and it means the observing network can change — new gauges, a new
+IMERG version, radar later — without retraining anything.
 
 The approach follows [Manshausen et al. (2025, *JAMES*)](https://doi.org/10.1029/2024MS004505)
 (score-based data assimilation of weather stations at km scale), with the
@@ -28,14 +37,15 @@ the data plan, and the experiment/ablation list.
 |---|---|
 | 0. ERA5 predictors | `scripts/00_download_era5.py` |
 | 1. CHIRPS target | `scripts/01_download_chirps.py` |
-| 2. IMERG stage-1 obs | `scripts/02_download_imerg.py` |
+| 2. IMERG observations | `scripts/02_download_imerg.py` |
 | 3. Static fields (orography, mask, position) | `scripts/03_build_static.py` |
 | 4. Regrid + pack to Zarr | `scripts/04_regrid_and_pack.py` |
 | 5. Station QC + pseudo-stations | `scripts/05_prepare_stations.py` |
 | 6. Normalisation stats | `scripts/06_compute_stats.py` |
-| 7. Train (2 stages) | `scripts/train.py` |
-| 8. Assimilate → product | `scripts/assimilate.py` |
-| 9. Verify | `scripts/evaluate.py` |
+| 7. IMERG bias correction | `scripts/07_bias_correct_imerg.py` |
+| 8. Train the prior | `scripts/train.py` |
+| 9. Assimilate → product | `scripts/assimilate.py` |
+| 10. Verify | `scripts/evaluate.py` |
 
 ## Quick start
 
@@ -47,8 +57,8 @@ pip install -e .
 # 1. does everything work? (synthetic data, CPU, ~2 min, no downloads)
 python scripts/smoke_test.py
 
-# 2. data (this is the slow part: ~1.5 TB of ERA5 requests, days of queueing)
-python scripts/00_download_era5.py  --start 1981 --end 2025 --out data/raw/era5
+# 2. data (the slow part is the CDS queue, not the volume)
+python scripts/00_download_era5.py  --start 1981 --end 2025 --out data/raw/era5   # 5 channels
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
 python scripts/02_download_imerg.py  --start 2000 --end 2025 --out data/raw/imerg
 python scripts/03_build_static.py --dem data/raw/dem/gmted.tif \
@@ -60,17 +70,17 @@ python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
        --zarr data/processed/bd_wide.zarr --out data/stations
 
 # 3. train (2 x V100)
-sbatch slurm/train_2xV100.sbatch          # runs stage A then stage B
+sbatch slurm/train_2xV100.sbatch          # single stage, ERA5-conditioned prior
 
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
        --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
 
 # 5. produce the product
 sbatch slurm/assimilate.sbatch            # array job, one year per task
 
 # 6. verify against withheld gauges (3-fold CV) + baselines
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
        --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv.json
 ```
 
@@ -82,6 +92,18 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt 
 | **Earthdata login** | `~/.netrc` entry for IMERG (GES DISC) |
 | **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
 | **DEM** | GMTED2010 or SRTM over 84–97°E, 16–29°N. Optional but strongly recommended — orography is the most informative static channel over Bangladesh |
+
+## Conditioning: five ERA5 channels, on purpose
+
+`tp` (model rainfall) · `tcwv` (column moisture) · `ivte`/`ivtn` (moisture
+transport) · `cape` (instability) — plus IVT magnitude and sin/cos direction
+derived for free, and the statics. All single-level, so no ERA5 pressure-level
+request is needed at all.
+
+With ~14k daily training samples, extra channels are capacity the network
+spends learning to ignore. The larger set (MSL, t2m/d2m, CIN, moisture-flux
+divergence, 850/500 hPa `u/v/q/w`) is available behind `--extended` and should
+be treated as an ablation — turn it on only if validation CRPS improves.
 
 ## Domains
 
@@ -103,7 +125,28 @@ methodology.
 * **H100**: `configs/train_h100.yaml`, bigger model, bf16, batch 32.
   Expect a few hours.
 * Guided sampling backpropagates through the network, so a 16-member guided
-  day costs ~2–3× an unguided one — budget ~10–30 s/day on one GPU.
+  day costs ~2–3× an unguided one — budget ~10–30 s/day on one GPU. That cost
+  is independent of observation count, so the ~3,500 IMERG footprints are
+  effectively free alongside the 35 gauges.
+
+## Ensemble spread
+
+Generative DA systems are reliably under-dispersive; this one is built to
+fight that, with three independent spread sources:
+
+1. **Prior temperature `T`** — sampling `p^(1/T)` adds exactly one term,
+   `u_T = u_θ + (1 − 1/T)·x̂₀/t`, and widens the ensemble monotonically
+   (asserted in the smoke test). Inflating the *prior* means observations pull
+   members back where they exist, so spread grows only where the field is
+   unconstrained.
+2. **ERA5-EDA members** — real background uncertainty, one member each.
+3. **Perturbed observations** — `y_r = y + ε_r`, spatially correlated for
+   IMERG. Assimilating identical `y` into every member is the generative
+   analogue of an unperturbed-obs EnKF.
+
+Note that SDE sampling (`noise_scale`) is *not* a spread knob — it has
+matching marginals by construction. See §6 of the methodology, which is the
+part worth reading twice.
 
 ## Repository layout
 
@@ -113,11 +156,12 @@ src/bdhires/
   transforms.py     precipitation transforms (log1p / sqrt / cbrt)
   models/unet.py    ADM-style U-Net velocity network
   models/flow.py    rectified flow: interpolant, loss, score<->velocity identities, EMA
-  da/observation.py differentiable bilinear station operator, R, k-fold splits
+  da/observation.py station + IMERG operators, R, perturbed obs, k-fold splits
   da/guidance.py    Gaussian obs likelihood + guidance gradient (SDA Eq. 3)
-  da/sampler.py     Heun ODE sampler with guidance + Langevin correctors
+  da/sampler.py     ODE/SDE sampler with guidance + Langevin correctors
   data/             Zarr dataset with random-crop augmentation; BMD station I/O
-  eval/metrics.py   RMSE/MAE/CRPS/spread-skill/rank hist, FSS, SAL, POD/FAR/CSI/ETS
+  eval/metrics.py   RMSE/MAE/CRPS, FSS, SAL, POD/FAR/CSI/ETS
+  eval/calibration.py spread-skill (overall + by intensity), rank hist, inflation
 configs/            data + model + training + DA hyperparameters
 scripts/            numbered data pipeline, then train / assimilate / evaluate
 slurm/              ready-to-submit batch scripts

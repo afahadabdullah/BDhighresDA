@@ -43,29 +43,24 @@ def crps_ensemble(ens: np.ndarray, obs: np.ndarray) -> float:
     return float(np.mean(term1 - term2))
 
 
-def spread_skill(ens: np.ndarray, obs: np.ndarray) -> tuple[float, float]:
-    """Return ``(rmse_of_ensemble_mean, bias_corrected_spread)``.
+def spread_skill(ens: np.ndarray, obs: np.ndarray, obs_var: float = 0.0):
+    """Deprecated shim -- use ``bdhires.eval.calibration.spread_skill``.
 
-    A calibrated ensemble has spread ~= RMSE (Fortin et al. 2014); the SDA
-    paper found their ensembles under-dispersive, so always report both.
+    Kept because it returns the bare ``(skill, spread)`` tuple that older
+    scripts expect. The calibration module returns a dict and also handles the
+    observation-error term properly.
     """
-    R = ens.shape[0]
-    mean = ens.mean(axis=0)
-    var = ens.var(axis=0, ddof=1)
-    obs_b = np.broadcast_to(obs, mean.shape)
-    m = np.isfinite(obs_b) & np.isfinite(mean)
-    sk = float(np.sqrt(np.mean((mean[m] - obs_b[m]) ** 2)))
-    sp = float(np.sqrt(np.mean(var[m]) * (R + 1) / R))
-    return sk, sp
+    from .calibration import spread_skill as _ss
+
+    r = _ss(ens, obs, obs_var=obs_var)
+    return r["skill"], r["spread"]
 
 
-def rank_histogram(ens: np.ndarray, obs: np.ndarray, n_bins: int | None = None) -> np.ndarray:
-    R = ens.shape[0]
-    n_bins = n_bins or (R + 1)
-    obs_b = np.broadcast_to(obs, ens.shape[1:])
-    m = np.isfinite(obs_b) & np.all(np.isfinite(ens), axis=0)
-    ranks = (ens[:, m] < obs_b[m][None]).sum(axis=0)
-    return np.bincount(ranks, minlength=R + 1)[: R + 1].astype(float)
+def rank_histogram(ens: np.ndarray, obs: np.ndarray, obs_sd: float = 0.0) -> np.ndarray:
+    """Shim -- see ``bdhires.eval.calibration.rank_histogram``."""
+    from .calibration import rank_histogram as _rh
+
+    return _rh(ens, obs, obs_sd=obs_sd)
 
 
 # -------------------------------------------------------------- spatial scores

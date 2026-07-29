@@ -7,9 +7,9 @@ Single GPU:
 2 x V100 (one node):
     torchrun --nproc_per_node=2 scripts/train.py --config configs/train_v100.yaml
 
-Two-stage recipe (recommended, see docs/METHODOLOGY.md):
-    stage A  1981-2000, ERA5-only conditioning (IMERG channel masked)
-    stage B  2001-2018, ERA5 + IMERG, initialised from stage A
+Single stage: the prior is conditioned on ERA5 and the static fields only, so
+it trains on the full 1981-2018 record.  IMERG never reaches the network -- it
+is assimilated as an observation at inference time (docs/METHODOLOGY.md S4).
 """
 from __future__ import annotations
 
@@ -50,7 +50,6 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         random_crop=(split == "train"),
         years=tuple(cfg["data"]["years"][split]),
         seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
-        zero_cond_channels=tuple(cfg["data"].get("zero_cond_channels", ())),
     )
     return PrecipDataset(
         dcfg,

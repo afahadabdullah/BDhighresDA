@@ -10,8 +10,11 @@ Checks
    self-consistent to floating-point precision
 3. the U-Net forward pass and loss run and shapes match
 4. the observation operator recovers known point values
-5. guided sampling actually pulls the state toward the observations
-6. a synthetic Zarr store round-trips through PrecipDataset
+5. the IMERG block-average operator is exact and the grids nest
+6. per-member observation perturbations have the right sd and spatial correlation
+7. guided sampling actually pulls the state toward the observations
+8. prior temperature (T > 1) monotonically widens the ensemble
+9. a synthetic Zarr store round-trips through PrecipDataset
 """
 from __future__ import annotations
 
@@ -166,6 +169,108 @@ def test_dataset_roundtrip():
                       atol=1e-4))
 
 
+def test_block_average_operator():
+    """IMERG operator: the 0.05 deg grid must nest exactly in 0.1 deg footprints."""
+    from bdhires.da import BlockAverageObsOperator, CompositeObsOperator, build_R_multi
+
+    check("BD grid nests in a 0.1 deg satellite grid",
+          abs(round(BD.lon_min / 0.1) - BD.lon_min / 0.1) < 1e-6
+          and abs(round(BD.lat_min / 0.1) - BD.lat_min / 0.1) < 1e-6,
+          f"lon_min/0.1={BD.lon_min/0.1:.4f} lat_min/0.1={BD.lat_min/0.1:.4f}")
+
+    valid = np.ones((128, 128), np.float32)
+    valid[:20] = 0                      # fake ocean
+    op = BlockAverageObsOperator(2, valid=valid)
+    x = torch.arange(128 * 128, dtype=torch.float32).reshape(1, 1, 128, 128)
+    out = op(x)
+    check("block average shape", tuple(out.shape) == (1, 1, 64 * 64))
+    check("block average == manual 2x2 mean",
+          torch.allclose(out[0, 0, 0], x[0, 0, :2, :2].mean(), atol=1e-4))
+    check("footprints touching ocean are dropped",
+          int(op.valid_mask().sum()) == (64 - 10) * 64,
+          f"{int(op.valid_mask().sum())} kept of {64*64}")
+
+    Hs = BilinearObsOperator(BD, np.array([23.78]), np.array([90.38]))
+    C = CompositeObsOperator([Hs, op])
+    check("composite operator concatenates streams", C(x).shape[-1] == 1 + 64 * 64)
+    xr = torch.zeros(1, 1, 128, 128, requires_grad=True)
+    C(xr).sum().backward()
+    check("composite operator is differentiable", xr.grad.abs().sum().item() > 0)
+    R = build_R_multi([(1, 0.10, 0.25), (64 * 64, 0.35, 0.10)])
+    check("multi-stream R has the right size and ordering",
+          R.shape[0] == 1 + 64 * 64 and R[-1] > R[0], f"gauge={R[0]:.3f} imerg={R[-1]:.3f}")
+
+
+def test_perturbed_observations():
+    from bdhires.da import perturb_observations
+
+    y = np.zeros(4160, np.float32)
+    R = np.concatenate([np.full(64, 0.01), np.full(4096, 0.09)])
+    yp = perturb_observations(y, R, 32, seed=0,
+                              corr_blocks=[(64, 64, 64, 3.0)])
+    check("perturbed obs shape", yp.shape == (32, 4160))
+    sd_g = float(yp[:, :64].std())
+    sd_i = float(yp[:, 64:].std())
+    check("gauge perturbation sd matches sqrt(R)", abs(sd_g - 0.1) < 0.03, f"{sd_g:.3f} vs 0.100")
+    check("imerg perturbation sd matches sqrt(R)", abs(sd_i - 0.3) < 0.09, f"{sd_i:.3f} vs 0.300")
+    # correlated block: neighbouring footprints must covary, white noise would not
+    f = yp[:, 64:].reshape(32, 64, 64)
+    c = np.corrcoef(f[:, 32, 32], f[:, 32, 33])[0, 1]
+    check("imerg perturbations are spatially correlated", c > 0.5, f"lag-1 corr = {c:.2f}")
+
+
+def test_prior_temperature_controls_spread():
+    """T > 1 must monotonically widen the ensemble.  This is the designed
+    defence against under-dispersion, so it is worth asserting, not assuming.
+
+    Also checks the SDE runs and stays finite -- but deliberately does NOT
+    assert that it widens anything, because it has matching marginals by
+    construction and empirically does not."""
+    from bdhires.eval import spread_skill
+
+    torch.manual_seed(0)
+    net = UNet(in_channels=1, cond_channels=0, out_channels=1, base_channels=16,
+               channel_mult=(1, 2), num_res_blocks=1, attn_resolutions=(), image_size=32)
+    flow = RectifiedFlow()
+    opt = torch.optim.Adam(net.parameters(), lr=2e-3)
+    for _ in range(200):
+        x1 = torch.randn(16, 1, 32, 32) * 0.5      # true prior sd = 0.5
+        loss = flow_matching_loss(net, x1, None, flow, cond_dropout=0.0)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    def spread(T=1.0, eta=0.0):
+        cfg = SamplerConfig(n_steps=24, n_corrections=0, prior_temperature=T,
+                            noise_scale=eta, seed=0)
+        e = assimilate(net, None, (10, 1, 32, 32), torch.device("cpu"), cfg=cfg, flow=flow)
+        return float(e.numpy().std(axis=0).mean()), e
+
+    s1, _ = spread(1.0)
+    s2, _ = spread(1.5)
+    s3, _ = spread(2.0)
+    check("prior temperature widens the ensemble monotonically", s1 < s2 < s3,
+          f"T=1.0 -> {s1:.3f},  T=1.5 -> {s2:.3f},  T=2.0 -> {s3:.3f}  (true 0.500)")
+    check("T=1 under-disperses, as the literature reports", s1 < 0.5,
+          f"{s1:.3f} < 0.500")
+
+    _, e = spread(1.0, eta=0.3)
+    check("SDE sampler runs and stays finite", torch.isfinite(e).all().item())
+
+    # an ensemble whose members agree with each other but not with the truth
+    rng = np.random.default_rng(0)
+    truth = rng.gamma(0.4, 12, 400)
+    err = rng.normal(0, 2.0, 400)                     # per-day analysis error
+    narrow = truth[None] + err[None] + rng.normal(0, 0.3, (16, 400))
+    r = spread_skill(narrow, truth)
+    check("spread_skill flags an under-dispersive ensemble", r["ratio"] < 0.5,
+          f"spread={r['spread']:.2f} skill={r['skill']:.2f} ratio={r['ratio']:.2f}")
+    wide = truth[None] + err[None] + rng.normal(0, 2.0, (16, 400))
+    r2 = spread_skill(wide, truth)
+    check("...and accepts a calibrated one", 0.7 < r2["ratio"] < 1.4,
+          f"ratio = {r2['ratio']:.2f}")
+
+
 def test_grids():
     check("BD grid is 128x128", BD.shape == (128, 128))
     check("BD covers Bangladesh",
@@ -183,6 +288,9 @@ if __name__ == "__main__":
     test_obs_operator()
     test_unet()
     test_dataset_roundtrip()
+    test_block_average_operator()
+    test_perturbed_observations()
     test_guided_sampling()
+    test_prior_temperature_controls_spread()
     print("=" * 70)
     print("all smoke tests passed")

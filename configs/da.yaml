@@ -1,63 +1,81 @@
 # Inference / data-assimilation configuration.
+#
+# Design in one line: ERA5 is the BACKGROUND (it conditions the generative
+# prior); every measurement of rainfall -- satellite and gauge -- is an
+# OBSERVATION and enters only through the likelihood.  There is no
+# conditioning path for IMERG.  See docs/METHODOLOGY.md Sections 3-4.
 data:
   zarr: data/processed/bd_wide.zarr
   stats: data/processed/stats.json
-  grid: bd                    # produce output on the 128x128 Bangladesh grid
-  imerg_cond_index: null      # read from the zarr attrs written by 04_regrid_and_pack
+  grid: bd                      # produce output on the 128x128 Bangladesh grid
   era5_tp_cond_index: 0
 
-# ---------------------------------------------------------------------------
-# Observation streams.  This is the key architectural switch: IMERG can be a
-# CONDITIONING channel of the generative prior, or an OBSERVATION assimilated
-# through the likelihood alongside the gauges.  See docs/METHODOLOGY.md S3.6.
-#
-#   imerg.mode = "condition"   -> prior p(x | ERA5, IMERG); likelihood = gauges only
-#   imerg.mode = "assimilate"  -> prior p(x | ERA5);        likelihood = IMERG + gauges
-#
-# If you set "assimilate" you MUST train with configs/train_era5only.yaml, which
-# zeroes the IMERG conditioning channel -- otherwise IMERG is double-counted
-# (once in the prior, once in the likelihood) and the analysis is over-confident.
-# ---------------------------------------------------------------------------
 observations:
   gauges:
     enabled: true
     csv: data/stations/bmd_daily.csv
     min_coverage: 0.5
-    sigma_obs: 0.10           # gauge error, TRANSFORMED units (tune first!)
-    representativeness: 0.25  # point-vs-5km-cell mismatch; usually dominant
-
+    sigma_obs: 0.10             # gauge measurement error, TRANSFORMED units
+    representativeness: 0.25    # point-vs-5km-cell mismatch; usually dominant
   imerg:
-    mode: assimilate          # condition | assimilate
-    factor: 2                 # 0.05 deg -> 0.1 deg is an exact 2x2 block mean
-    sigma_obs: 0.35           # satellite retrieval error, TRANSFORMED units
-    representativeness: 0.10  # footprint-vs-block-mean mismatch (small: H is exact)
-    bias_correction: null     # path to data/processed/imerg_qm.npz from script 07
+    enabled: true
+    factor: 2                   # 0.05 deg -> 0.1 deg is an exact 2x2 block mean
+    sigma_obs: 0.35             # retrieval error; measure it with script 07
+    representativeness: 0.10    # footprint-vs-block-mean mismatch (H is exact)
+    error_corr_cells: 3.0       # satellite errors correlate over ~30 km; white
+                                # perturbations would average away and add no spread
+    bias_correction: null       # path to data/processed/imerg_qm.npz (script 07)
+                                # REQUIRED before trusting the analysis: a Gaussian
+                                # likelihood assumes an unbiased observation
 
 sampler:
   n_steps: 50
-  heun: true
+  heun: true                    # ignored when noise_scale > 0
   schedule_power: 2.0
-  n_corrections: 2            # C in Rozet & Louppe Alg. 4 / Manshausen Table B1
-  corrector_tau: 0.3          # tau~
-  churn: 0.0
+  noise_scale: 0.0              # eta: SDE noise. Has the SAME marginals as the
+                                # ODE by construction -- it is NOT a spread knob.
+                                # Tune it, but do not rely on it for dispersion.
+  prior_temperature: 1.25       # T > 1 broadens the prior: the real spread knob.
+                                # Inflating the prior (not the analysis) lets the
+                                # observations pull members back where they exist.
+  temperature_t_start: 0.15
+  n_corrections: 2              # Langevin correctors (SDA Alg. 4)
+  corrector_tau: 0.3
+  t_noise_end: 0.98
   seed: null
 
 guidance:
-  gamma: 1.0e-3               # Manshausen et al. found 1e-3 > 1e-2 for precip
+  gamma: 1.0e-3                 # Manshausen et al. found 1e-3 > 1e-2 for precip.
+                                # Larger gamma = softer guidance = more spread.
   scale: 1.0
   t_start: 0.10
   t_end: 0.999
-  clip_norm: 200.0            # raise when assimilating IMERG: ~3.5k dense obs give a
-                              # far larger gradient norm than 35 gauges alone
-  huber_delta: null           # ~3.0 for robustness to gauge/satellite outliers
+  clip_norm: 200.0              # ~3.5k dense IMERG obs give a much larger gradient
+                                # norm than 35 gauges alone
+  huber_delta: null             # ~3.0 for robustness to gauge/satellite outliers
 
 ensemble:
   members: 16
+  perturb_observations: true    # one observation draw per member. Assimilating
+                                # identical y into every member is the generative
+                                # analogue of an unperturbed-obs EnKF and is the
+                                # classic cause of under-dispersion.
+  era5_eda: false               # cycle ERA5 ensemble-of-data-assimilation members
+                                # across analysis members (needs the EDA download)
+  inference_dropout: 0.0        # keep U-Net dropout active at sampling time to add
+                                # a crude epistemic component (0 = off)
+
+calibration:
+  obs_sd_for_verification: 0.10 # sigma added to members before rank histograms
+  intensity_bins: [0, 1, 10, 25, 50, 100, 1.0e9]
+  post_hoc_inflation: false     # last resort; always report uninflated too
 
 tuning:
   gamma: [1.0e-4, 1.0e-3, 1.0e-2]
   sigma_obs: [0.05, 0.10, 0.20, 0.40]
   imerg_sigma_obs: [0.20, 0.35, 0.60, 1.00]
+  noise_scale: [0.0, 0.15, 0.30]
+  prior_temperature: [1.0, 1.15, 1.25, 1.5, 2.0]
 
 verification:
   thresholds: [1, 10, 20, 50, 100]

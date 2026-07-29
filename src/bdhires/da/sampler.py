@@ -1,19 +1,43 @@
-"""ODE samplers for the rectified flow, with and without observation guidance.
+"""Samplers for the rectified flow, with and without observation guidance.
 
-Three modes:
+Integration runs over t: 0 (noise) -> 1 (field).
 
-* ``sample``           -- conditional downscaling (ERA5 + IMERG -> 5 km).  No
-                          station data.  This is the "background"/first guess.
-* ``assimilate``       -- the same trajectory, guided at every step by the
-                          station likelihood.  This is the analysis.
-* ``assimilate(cond=None)`` -- pure SDA in the Manshausen sense: an
-                          unconditional prior guided only by observations.
-                          Works because the model is trained with conditioning
-                          dropout.
+ODE  (``noise_scale = 0``, default)
+    dx = u_t(x) dt
+    Deterministic given x0; Heun, 2 NFE per step.
 
-Integration uses Heun (2nd order) with a non-uniform schedule that takes
-smaller steps as t -> 1, plus optional Langevin Monte Carlo corrector steps
-(Rozet & Louppe 2024, Algorithm 4) to stop guidance errors accumulating.
+SDE  (``noise_scale = eta > 0``)
+    dx = [ u_t(x) + (g_t^2/2) * score_t(x) ] dt + g_t dW,   g_t^2 = 2*eta*(1-t)
+    With our interpolant the drift correction collapses to ``-eta * x0_hat``,
+    so the update is
+        x <- x + dt*(u - eta*x0_hat) + sqrt(2*eta*(1-t)*dt) * z.
+
+    IMPORTANT, because it is easy to assume otherwise: this SDE has the *same
+    marginals* as the ODE by construction (Albergo et al. 2025).  It is NOT a
+    spread-inflation mechanism.  Its purpose is to re-inject entropy so that
+    integration error and mode-seeking guidance cannot compound along a
+    trajectory.  With an imperfect score it can move spread either way -- in a
+    small toy test here it slightly *reduced* it.  Treat eta as something to
+    tune, never as the thing that fixes an under-dispersive ensemble.
+
+PRIOR TEMPERATURE  (``prior_temperature = T > 1``)
+    This is the knob that genuinely widens the prior.  Sampling the tempered
+    density p^(1/T) means using score/T, and converting that to a velocity via
+    ``u = (x_t + (1-t)*score)/t`` gives, exactly,
+
+        u_T = u + (1 - 1/T) * x0_hat / t
+
+    one extra term, monotone in T.  Measured on the toy prior in
+    ``scripts/smoke_test.py`` (true sd 0.50): T=1.0 -> 0.43, T=1.25 -> 0.56,
+    T=1.6 -> 0.71, T=2.0 -> 0.84.
+
+    Inflating the *prior* rather than the analysis is the right place to do it:
+    observations then pull the ensemble back where they exist, so spread grows
+    where the field is unconstrained and stays tight where it is observed --
+    which is the behaviour you actually want from a reanalysis.  The 1/t factor
+    is gated below ``temperature_t_start``.
+
+Langevin corrector steps (Rozet & Louppe 2024, Alg. 4) run on top of any mode.
 """
 
 from __future__ import annotations
@@ -28,12 +52,15 @@ from .guidance import GuidanceConfig, guidance_grad, guided_velocity
 
 @dataclass
 class SamplerConfig:
-    n_steps: int = 50            # ODE steps (2 NFE each with Heun)
-    heun: bool = True
-    schedule_power: float = 2.0  # t_i = 1 - (1 - i/n)^p ; p=1 is uniform
-    n_corrections: int = 2       # Langevin corrector steps per ODE step (C in SDA)
-    corrector_tau: float = 0.3   # tau~ in SDA; step size delta = tau~ * dim(s)/||s||^2
-    churn: float = 0.0           # optional stochasticity, 0 = deterministic ODE
+    n_steps: int = 50            # ODE/SDE steps (2 NFE each with Heun)
+    heun: bool = True            # ignored when noise_scale > 0 (Euler-Maruyama)
+    schedule_power: float = 2.0  # t_i = 1 - (1 - i/n)^p ; p = 1 is uniform
+    noise_scale: float = 0.0     # eta: 0 = probability-flow ODE, >0 = SDE
+    prior_temperature: float = 1.0   # T > 1 broadens the prior (see below)
+    temperature_t_start: float = 0.15
+    n_corrections: int = 2       # Langevin corrector steps per level (C in SDA)
+    corrector_tau: float = 0.3   # tau~ ; step size delta = tau~ * dim(s)/||s||^2
+    t_noise_end: float = 0.98    # stop injecting noise near t = 1 (avoids grain)
     seed: int | None = None
 
 
@@ -69,7 +96,7 @@ def sample(
     flow: RectifiedFlow | None = None,
     mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Unguided conditional generation (the ML downscaler)."""
+    """Unguided conditional generation (the downscaler / background)."""
     return assimilate(
         model, cond, shape, device, H=None, y=None, R=None, cfg=cfg, flow=flow, mask=mask
     )
@@ -89,10 +116,17 @@ def assimilate(
     mask: torch.Tensor | None = None,
     x0: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Generate an ensemble member, optionally guided by station observations.
+    """Generate an ensemble, optionally guided by observations.
 
-    ``shape`` is ``(B, C, H, W)``; B is the ensemble size (all members share
-    the same conditioning, which is broadcast).
+    ``shape`` is ``(B, C, H, W)`` where B is the ensemble size.
+
+    ``y`` may be ``(1, C, S)`` (all members see the same observations) or
+    ``(B, C, S)`` (each member sees its own perturbed draw).  The second form
+    is strongly preferred: assimilating identical observations into every
+    member is the classic cause of an under-dispersive analysis ensemble, in
+    exactly the same way that an EnKF with unperturbed observations
+    systematically underestimates the analysis covariance.  Use
+    ``bdhires.da.observation.perturb_observations`` to build it.
     """
     cfg = cfg or SamplerConfig()
     gcfg = gcfg or GuidanceConfig()
@@ -102,32 +136,49 @@ def assimilate(
     if cfg.seed is not None:
         torch.manual_seed(cfg.seed)
 
+    n = shape[0]
     x = torch.randn(shape, device=device) if x0 is None else x0.to(device)
-    if cond is not None and cond.shape[0] == 1 and shape[0] > 1:
-        cond = cond.expand(shape[0], -1, -1, -1)
+    if cond is not None and cond.shape[0] == 1 and n > 1:
+        cond = cond.expand(n, -1, -1, -1)
 
     guided = H is not None and y is not None
+    if guided and y.shape[0] == 1 and n > 1:
+        y = y.expand(n, -1, -1)
 
     def guide(xx, tt):
         return guidance_grad(xx, tt, model, flow, cond, H, y, R, gcfg, mask=mask)
 
+    stochastic = cfg.noise_scale > 0.0
     ts = make_schedule(cfg, device)
 
     for i in range(cfg.n_steps):
-        t0, t1 = ts[i], ts[i + 1]
+        t0, t1 = float(ts[i]), float(ts[i + 1])
         dt = t1 - t0
-        tb = torch.full((shape[0],), float(t0), device=device)
+        tb = torch.full((n,), t0, device=device)
 
         if guided:
             u, g = guide(x, tb)
             v = guided_velocity(u, g, tb, flow, gcfg, x)
         else:
             with torch.no_grad():
-                v = model(x, tb, cond)
+                u = model(x, tb, cond)
+            v = u
 
-        if cfg.heun and i < cfg.n_steps - 1:
+        if cfg.prior_temperature != 1.0 and t0 >= cfg.temperature_t_start:
+            kappa = 1.0 - 1.0 / cfg.prior_temperature
+            v = v + kappa * flow.x0_hat(x, tb, u) / max(t0, 1e-3)
+
+        if stochastic:
+            # Euler-Maruyama on the SDE with matching marginals.
+            eta = cfg.noise_scale
+            x0_hat = flow.x0_hat(x, tb, u)
+            x = x + dt * (v - eta * x0_hat)
+            if t1 < cfg.t_noise_end:
+                g_dt = (2.0 * eta * max(1.0 - t0, 0.0) * dt) ** 0.5
+                x = x + g_dt * torch.randn_like(x)
+        elif cfg.heun and i < cfg.n_steps - 1:
             x_eul = x + dt * v
-            tb1 = torch.full((shape[0],), float(t1), device=device)
+            tb1 = torch.full((n,), t1, device=device)
             if guided:
                 u1, g1 = guide(x_eul, tb1)
                 v1 = guided_velocity(u1, g1, tb1, flow, gcfg, x_eul)
@@ -138,9 +189,9 @@ def assimilate(
         else:
             x = x + dt * v
 
-        if cfg.n_corrections and 0.0 < float(t1) < 1.0:
+        if cfg.n_corrections and 0.0 < t1 < 1.0:
             x = _langevin_correct(
-                x, float(t1), model, flow, cond, cfg, guide=guide if guided else None
+                x, t1, model, flow, cond, cfg, guide=guide if guided else None
             )
 
         if mask is not None:
@@ -156,13 +207,21 @@ def ensemble(
     shape_chw: tuple[int, int, int],
     device,
     chunk: int = 8,
+    y=None,
     **kwargs,
 ) -> torch.Tensor:
-    """Generate ``n_members`` samples in memory-safe chunks. Returns (N, C, H, W)."""
+    """Generate ``n_members`` samples in memory-safe chunks. Returns (N, C, H, W).
+
+    If ``y`` has one row per member it is sliced consistently with the chunking,
+    so per-member observation perturbations survive.
+    """
     out = []
-    remaining = n_members
-    while remaining > 0:
-        b = min(chunk, remaining)
-        out.append(assimilate(model, cond, (b, *shape_chw), device, **kwargs).cpu())
-        remaining -= b
+    done = 0
+    while done < n_members:
+        b = min(chunk, n_members - done)
+        yb = None
+        if y is not None:
+            yb = y[done : done + b] if y.shape[0] == n_members else y
+        out.append(assimilate(model, cond, (b, *shape_chw), device, y=yb, **kwargs).cpu())
+        done += b
     return torch.cat(out, dim=0)

@@ -6,7 +6,9 @@ Store layout (all on the 0.05 deg target grid, latitude ascending)::
       time      (T,)              datetime64[ns]
       lat       (H,)  lon (W,)
       target    (T, H, W)         CHIRPS daily precip, mm/day, NaN over ocean
-      cond      (T, Ccond, H, W)  ERA5 (+ IMERG) predictors, already regridded
+      cond      (T, Ccond, H, W)  ERA5 predictors only, already regridded
+      imerg     (T, H, W)         IMERG daily precip, mm/day -- an OBSERVATION,
+                                  deliberately NOT part of ``cond``
       static    (Cstat, H, W)     orography, land-sea mask, lat/lon encodings
       valid     (H, W)            1 where CHIRPS has data (land)
 
@@ -36,11 +38,8 @@ class DatasetConfig:
     random_crop: bool = True
     years: tuple[int, int] | None = None      # inclusive
     seasonal_encoding: bool = True
-    # Channels of ``cond`` to zero out.  Set this to the IMERG index to train an
-    # ERA5-only prior -- required when IMERG is assimilated as an OBSERVATION
-    # rather than used as conditioning, otherwise the same information enters
-    # both the prior and the likelihood and gets double-counted.
-    zero_cond_channels: tuple[int, ...] = ()
+    era5_member: int | None = None   # ERA5-EDA member index, or None for the
+                                     # deterministic HRES analysis
 
 
 class PrecipDataset(Dataset):
@@ -121,8 +120,6 @@ class PrecipDataset(Dataset):
         if self.cond_mean is not None:
             cond = (cond - self.cond_mean[:, None, None]) / self.cond_std[:, None, None]
         cond = np.nan_to_num(cond, nan=0.0, posinf=0.0, neginf=0.0)
-        for c in self.cfg.zero_cond_channels:
-            cond[c] = 0.0
 
         parts = [cond, static]
         if self.cfg.seasonal_encoding:

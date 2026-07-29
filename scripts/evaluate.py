@@ -2,11 +2,11 @@
 """Verification against withheld stations and against CHIRPS, plus baselines.
 
     # cross-validated station scores (3-fold rotation of the gauge network)
-    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt \
+    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
         --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv2021_2023.json
 
     # tune Gamma / sigma_obs on pseudo-observations before touching real gauges
-    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/stageB/final.pt \
+    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
         --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.da import BilinearObsOperator, GuidanceConfig, SamplerConfig, build_R, split_stations  # noqa: E402
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
-from bdhires.eval import crps_ensemble, fss_series, rank_histogram, spread_skill, summarize  # noqa: E402
+from bdhires.eval import calibration_report, crps_ensemble, fss_series, summarize  # noqa: E402
 from bdhires.grids import get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
 from bdhires.transforms import PrecipTransform  # noqa: E402
@@ -88,8 +88,8 @@ def main():
     model, _ = load_model(args.ckpt, ds.total_cond_channels, grid.nlon, device)
     mask = torch.from_numpy(ds.valid[None, None]).to(device)
 
-    ss, values = load_stations(cfg["stations"]["csv"], times, grid=grid,
-                               min_coverage=cfg["stations"]["min_coverage"])
+    ss, values = load_stations(cfg["observations"]["gauges"]["csv"], times, grid=grid,
+                               min_coverage=cfg["observations"]["gauges"]["min_coverage"])
     y_all = tf.forward(values)
     y_all[~np.isfinite(values)] = np.nan
 
@@ -106,7 +106,7 @@ def main():
         for gamma, sigma in grid_search:
             gcfg = GuidanceConfig(**{**cfg["guidance"], "gamma": gamma})
             R = build_R(len(assim_idx), sigma, device=device,
-                        representativeness=cfg["stations"]["representativeness"])
+                        representativeness=cfg["observations"]["gauges"]["representativeness"])
             pred = run_case(model, ds, grid, tf, times, sel, Hop, y_all[:, assim_idx], R,
                             scfg, gcfg, args.members, device, mask)
             obs = values[sel][:, eval_idx]
@@ -115,9 +115,13 @@ def main():
                             for k in range(len(sel))])          # (T, N, S)
             sc = summarize(est.mean(axis=1), obs)
             sc["crps"] = crps_ensemble(np.moveaxis(est, 1, 0), obs)
+            sc["spread_skill_ratio"] = calibration_report(
+                np.moveaxis(est, 1, 0), obs,
+                obs_sd=cfg["calibration"]["obs_sd_for_verification"])["overall"]["ratio"]
             results.setdefault("tuning", []).append(
                 dict(gamma=gamma, sigma_obs=sigma, **sc))
-            print(f"gamma={gamma:g} sigma={sigma:g}  rmse={sc['rmse']:.3f} crps={sc['crps']:.3f}")
+            print(f"gamma={gamma:g} sigma={sigma:g}  rmse={sc['rmse']:.3f} "
+                  f"crps={sc['crps']:.3f} spread/skill={sc['spread_skill_ratio']:.2f}")
             if best is None or sc["crps"] < best[0]:
                 best = (sc["crps"], gamma, sigma)
         results["best"] = dict(crps=best[0], gamma=best[1], sigma_obs=best[2])
@@ -131,8 +135,8 @@ def main():
     per_fold = []
     for f, (assim_idx, eval_idx) in enumerate(split_stations(ss, n_folds=args.cv_folds, seed=0)):
         Hop = BilinearObsOperator(grid, ss.lat[assim_idx], ss.lon[assim_idx]).to(device)
-        R = build_R(len(assim_idx), cfg["stations"]["sigma_obs"], device=device,
-                    representativeness=cfg["stations"]["representativeness"])
+        R = build_R(len(assim_idx), cfg["observations"]["gauges"]["sigma_obs"], device=device,
+                    representativeness=cfg["observations"]["gauges"]["representativeness"])
         obs = values[sel][:, eval_idx]
         fold: dict = {"fold": f, "n_assim": int(len(assim_idx)), "n_eval": int(len(eval_idx))}
 
@@ -147,9 +151,13 @@ def main():
                                                       ss.lon[eval_idx]) for k in range(len(sel))])
             sc = summarize(est.mean(axis=1), obs)
             sc["crps"] = crps_ensemble(np.moveaxis(est, 1, 0), obs)
-            sk, sp = spread_skill(np.moveaxis(est, 1, 0), obs)
-            sc.update(spread=sp, skill=sk, spread_skill_ratio=sp / sk if sk else np.nan)
-            sc["rank_hist"] = rank_histogram(np.moveaxis(est, 1, 0), obs).tolist()
+            # full calibration diagnostics: spread/skill overall AND by intensity,
+            # rank histogram with observation error added to the members, and the
+            # inflation factor that would be needed to close the gap
+            cal = calibration_report(np.moveaxis(est, 1, 0), obs,
+                                     obs_sd=cfg["calibration"]["obs_sd_for_verification"])
+            sc["calibration"] = cal
+            sc["spread_skill_ratio"] = cal["overall"]["ratio"]
             # gridded verification against CHIRPS (the training target)
             truth = np.stack([np.asarray(ds.z["target"][int(j)]) for j in sel])
             sc["fss"] = {f"{t}mm_{w}px": v for (t, w), v in
@@ -164,9 +172,8 @@ def main():
         truth = np.stack([np.asarray(ds.z["target"][int(j)]) for j in sel])
         fold["baseline_chirps"] = summarize(
             station_values_from_field(truth, grid, ss.lat[eval_idx], ss.lon[eval_idx]), obs)
-        icond = cfg["data"].get("imerg_cond_index")
-        if icond is not None:
-            imerg = np.stack([np.asarray(ds.z["cond"][int(j)][icond]) for j in sel])
+        if "imerg" in ds.z:
+            imerg = np.stack([np.asarray(ds.z["imerg"][int(j)]) for j in sel])
             fold["baseline_imerg"] = summarize(
                 station_values_from_field(imerg, grid, ss.lat[eval_idx], ss.lon[eval_idx]), obs)
         ecosnd = cfg["data"].get("era5_tp_cond_index")

@@ -11,7 +11,9 @@ Time alignment (get this right or everything downstream is subtly wrong)
   01:00(D) ... 00:00(D+1).
 * IMERG 3IMERGDF day D is labelled S000000-E235959 on day D, i.e. already
   00-24 UTC.  Its ``precipitation`` variable is a RATE in mm/hr -> multiply
-  by 24 for mm/day.
+  by 24 for mm/day.  IMERG is written to its OWN array, not into ``cond``:
+  it is an observation assimilated through the likelihood, never a predictor
+  fed to the network (see docs/METHODOLOGY.md Section 4).
 * State variables (winds, humidity, CAPE) are averaged over 00-24 UTC of day D.
 
 Regridding
@@ -35,13 +37,25 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.grids import WIDE  # noqa: E402
 
-SFC_MAP = {
-    "tp": "era5_tp", "tcwv": "era5_tcwv", "t2m": "era5_t2m", "d2m": "era5_d2m",
-    "msl": "era5_msl", "cape": "era5_cape", "u10": "era5_u10", "v10": "era5_v10",
-    "sp": "era5_sp", "p71.162": "era5_ivte", "p72.162": "era5_ivtn",
+# ERA5 short name -> channel name.  The CORE five (see 00_download_era5.py);
+# everything else is optional and only appears with --extended.
+CORE_MAP = {
+    "tp": "era5_tp",          # background model rainfall
+    "tcwv": "era5_tcwv",      # column moisture
+    "p71.162": "era5_ivte",   # eastward moisture flux
+    "p72.162": "era5_ivtn",   # northward moisture flux
+    "cape": "era5_cape",      # instability
+    # CDS sometimes returns long names instead of GRIB codes
+    "vertical_integral_of_eastward_water_vapour_flux": "era5_ivte",
+    "vertical_integral_of_northward_water_vapour_flux": "era5_ivtn",
 }
-PL_VARS = ["u", "v", "q", "t", "w", "z"]
-PL_LEVELS = [850, 700, 500, 200]
+EXTENDED_MAP = {
+    "msl": "era5_msl", "t2m": "era5_t2m", "d2m": "era5_d2m",
+    "cin": "era5_cin", "cp": "era5_cp", "p84.162": "era5_mfd",
+    "vertical_integral_of_divergence_of_moisture_flux": "era5_mfd",
+}
+PL_VARS = ["u", "v", "q", "w"]
+PL_LEVELS = [850, 500]
 
 
 def _rename_coords(ds: xr.Dataset) -> xr.Dataset:
@@ -70,9 +84,10 @@ def to_grid(da: xr.DataArray, grid, conservative: bool = False) -> xr.DataArray:
                      kwargs=dict(fill_value=None))
 
 
-def daily_era5(sfc_files, pl_files, grid, days) -> tuple[np.ndarray, list[str]]:
+def daily_era5(sfc_files, pl_files, grid, days, extended=False) -> tuple[np.ndarray, list[str]]:
     sfc = _rename_coords(xr.open_mfdataset(sfc_files, combine="by_coords"))
-    pl = _rename_coords(xr.open_mfdataset(pl_files, combine="by_coords"))
+    pl = _rename_coords(xr.open_mfdataset(pl_files, combine="by_coords")) if pl_files else None
+    sfc_map = dict(CORE_MAP, **(EXTENDED_MAP if extended else {}))
 
     # precipitation: shift back 1h so that 01:00(D)..00:00(D+1) lands on day D
     tp = sfc["tp"].assign_coords(time=sfc["time"] - np.timedelta64(1, "h"))
@@ -83,14 +98,14 @@ def daily_era5(sfc_files, pl_files, grid, days) -> tuple[np.ndarray, list[str]]:
     channels.append(to_grid(tp_daily, grid, conservative=True))
     names.append("era5_tp")
 
-    for v, name in SFC_MAP.items():
+    for v, name in sfc_map.items():
         if v == "tp" or v not in sfc:
             continue
         d = sfc[v].resample(time="1D").mean().reindex(time=days)
         channels.append(to_grid(d, grid))
         names.append(name)
 
-    for v in PL_VARS:
+    for v in (PL_VARS if (extended and pl is not None) else []):
         if v not in pl:
             continue
         for lev in PL_LEVELS:
@@ -100,11 +115,19 @@ def daily_era5(sfc_files, pl_files, grid, days) -> tuple[np.ndarray, list[str]]:
             channels.append(to_grid(d, grid))
             names.append(f"era5_{v}{lev}")
 
-    # derived: 850-200 hPa wind shear magnitude (monsoon-depression proxy)
+    # ---- derived channels ------------------------------------------------
+    # Only what is free given the core five.  IVT direction is split into
+    # sin/cos so the network never sees the 0/360 discontinuity.
     idx = {n: i for i, n in enumerate(names)}
-    if {"era5_u850", "era5_u200", "era5_v850", "era5_v200"} <= set(idx):
-        du = channels[idx["era5_u200"]] - channels[idx["era5_u850"]]
-        dv = channels[idx["era5_v200"]] - channels[idx["era5_v850"]]
+    if {"era5_ivte", "era5_ivtn"} <= set(idx):
+        e, n_ = channels[idx["era5_ivte"]], channels[idx["era5_ivtn"]]
+        mag = np.hypot(e, n_)
+        channels += [mag, e / (mag + 1e-6), n_ / (mag + 1e-6)]
+        names += ["era5_ivt_mag", "era5_ivt_sin", "era5_ivt_cos"]
+
+    if extended and {"era5_u850", "era5_u500", "era5_v850", "era5_v500"} <= set(idx):
+        du = channels[idx["era5_u500"]] - channels[idx["era5_u850"]]
+        dv = channels[idx["era5_v500"]] - channels[idx["era5_v850"]]
         channels.append(np.hypot(du, dv))
         names.append("era5_shear")
 
@@ -136,6 +159,9 @@ def main():
     ap.add_argument("--static", default="data/static/static_wide.nc")
     ap.add_argument("--out", default="data/processed/bd_wide.zarr")
     ap.add_argument("--chunk-years", type=int, default=1)
+    ap.add_argument("--extended", action="store_true",
+                    help="include the optional ablation channels (must match "
+                         "how 00_download_era5.py was run)")
     args = ap.parse_args()
 
     import zarr
@@ -155,7 +181,7 @@ def main():
     root.create_dataset("lat", data=grid.lat.astype(np.float32))
     root.create_dataset("lon", data=grid.lon.astype(np.float32))
 
-    target_z = cond_z = None
+    target_z = cond_z = imerg_z = None
     times_out, cond_names = [], None
     offset = 0
 
@@ -182,19 +208,18 @@ def main():
         for y in range(year + 1, yr_end + 1):
             sfc += sorted(Path(args.era5).glob(f"era5_sfc_{y}*.nc"))
             pl += sorted(Path(args.era5).glob(f"era5_pl_{y}*.nc"))
-        era, names = daily_era5([str(p) for p in sfc], [str(p) for p in pl], grid, days)
+        era, names = daily_era5([str(p) for p in sfc], [str(p) for p in pl], grid, days,
+                                extended=args.extended)
 
         im_files = []
         for y in range(year, yr_end + 1):
             im_files += sorted(Path(args.imerg).glob(f"*3IMERG.{y}*.nc4"))
         imerg = daily_imerg([str(p) for p in im_files], grid, days)
-        cond = np.concatenate([era, imerg], axis=1)
-        names = names + ["imerg_precip"]
+        cond = era
 
         if target_z is None:
             cond_names = names
             root.attrs["cond_channels"] = cond_names
-            root.attrs["imerg_cond_index"] = cond_names.index("imerg_precip")
             root.attrs["era5_tp_cond_index"] = cond_names.index("era5_tp")
             target_z = root.create_dataset(
                 "target", shape=(0, grid.nlat, grid.nlon), chunks=(32, grid.nlat, grid.nlon),
@@ -204,18 +229,24 @@ def main():
                 "cond", shape=(0, cond.shape[1], grid.nlat, grid.nlon),
                 chunks=(16, cond.shape[1], grid.nlat, grid.nlon), dtype="f4",
             )
+            imerg_z = root.create_dataset(
+                "imerg", shape=(0, grid.nlat, grid.nlon),
+                chunks=(32, grid.nlat, grid.nlon), dtype="f4",
+            )
         elif names != cond_names:
             raise RuntimeError(f"channel mismatch in {year}: {set(names) ^ set(cond_names)}")
 
         target_z.append(tgt)
         cond_z.append(cond)
+        imerg_z.append(imerg[:, 0])
         times_out.append(days.values)
         offset += len(days)
 
     root.create_dataset("time", data=np.concatenate(times_out).astype("datetime64[ns]").view("i8"))
     root.attrs["time_units"] = "nanoseconds since 1970-01-01"
-    print(f"wrote {args.out}: T={offset}, cond channels={len(cond_names)}")
+    print(f"wrote {args.out}: T={offset}, ERA5 cond channels={len(cond_names)}")
     print("cond channels:", cond_names)
+    print("imerg is stored separately -- it is an observation, not a predictor")
 
 
 if __name__ == "__main__":

@@ -21,9 +21,5 @@ export OMP_NUM_THREADS=6
 export NCCL_DEBUG=WARN
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 
-# Stage A (ERA5-only, 1981-2000) then Stage B (ERA5+IMERG, 2001-2018).
-if [ ! -f runs/stageA/final.pt ]; then
-  torchrun --standalone --nproc_per_node=2 scripts/train.py --config configs/train_stageA.yaml
-fi
-torchrun --standalone --nproc_per_node=2 scripts/train.py \
-    --config configs/train_v100.yaml --init-from runs/stageA/final.pt
+# Single-stage ERA5-conditioned prior over the full 1981-2018 record.
+torchrun --standalone --nproc_per_node=2 scripts/train.py --config configs/train_v100.yaml

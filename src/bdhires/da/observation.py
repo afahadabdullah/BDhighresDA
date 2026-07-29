@@ -173,6 +173,74 @@ def build_R_multi(specs: list[tuple[int, float, float]], device=None) -> torch.T
     return torch.cat([build_R(n, s, device=device, representativeness=r) for n, s, r in specs])
 
 
+def _smooth2d(x: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian blur over the last two axes, numpy only.
+
+    Three successive box filters approximate a Gaussian to within a few percent
+    (central limit theorem), which is far more accuracy than an ensemble-
+    perturbation correlation length needs.  Written by hand so that generating
+    the analysis has no SciPy dependency.
+    """
+    w = max(1, int(round(sigma * 3)) | 1)          # odd width
+    if w == 1:
+        return x
+    pad = w // 2
+    x = np.asarray(x, dtype=np.float64)
+    for axis in (-2, -1):
+        x = np.moveaxis(x, axis, -1)
+        for _ in range(3):
+            xp = np.concatenate([x[..., pad:0:-1], x, x[..., -2 : -pad - 2 : -1]], axis=-1)
+            cs = np.cumsum(xp, axis=-1)
+            cs = np.concatenate([np.zeros_like(cs[..., :1]), cs], axis=-1)
+            x = (cs[..., w:] - cs[..., :-w]) / w
+        x = np.moveaxis(x, -1, axis)
+    return x
+
+
+def perturb_observations(
+    y: np.ndarray,
+    R: np.ndarray | torch.Tensor,
+    n_members: int,
+    seed: int | None = None,
+    corr_blocks: list[tuple[int, int, int, float]] | None = None,
+) -> np.ndarray:
+    """Draw one perturbed observation vector per ensemble member.
+
+    Returns ``(n_members, S)`` from ``y`` of shape ``(S,)``.
+
+    Why this matters more than it looks: assimilating the *same* ``y`` into
+    every member is the generative analogue of an EnKF with unperturbed
+    observations, which is known to produce an analysis covariance that is too
+    small.  Perturbing observations restores the missing variance and is the
+    cheapest single fix for under-dispersion in this pipeline -- it costs
+    nothing at inference and is statistically the right thing to do, since each
+    member should be a draw from the posterior given a plausible realisation of
+    the observation error.
+
+    ``corr_blocks`` lets a contiguous slice of the observation vector be given
+    *spatially correlated* perturbations, as a list of
+    ``(start, nlat, nlon, corr_length_cells)``.  Satellite retrieval errors are
+    correlated over tens of kilometres; white-noise perturbations on a 0.1 deg
+    field average out over any neighbourhood and therefore add almost no
+    ensemble spread at the scales anyone cares about.
+    """
+    rng = np.random.default_rng(seed)
+    R = R.detach().cpu().numpy() if isinstance(R, torch.Tensor) else np.asarray(R)
+    sd = np.sqrt(np.clip(R, 0.0, None))
+    eps = rng.normal(size=(n_members, y.shape[-1]))
+
+    for start, nlat, nlon, ell in corr_blocks or []:
+        if ell <= 0:
+            continue
+        n = nlat * nlon
+        block = eps[:, start : start + n].reshape(n_members, nlat, nlon)
+        block = _smooth2d(block, ell)
+        block /= block.std(axis=(1, 2), keepdims=True) + 1e-8   # restore unit variance
+        eps[:, start : start + n] = block.reshape(n_members, n)
+
+    return y[None, :] + eps * sd[None, :]
+
+
 def imerg_error_variance(
     y_imerg_mm: np.ndarray,
     sigma_floor: float = 0.30,

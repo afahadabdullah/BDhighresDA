@@ -14,6 +14,6 @@ conda activate bdhires
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 Y=$SLURM_ARRAY_TASK_ID
-python scripts/assimilate.py --config configs/da.yaml --ckpt runs/stageB/final.pt \
+python scripts/assimilate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
     --start "${Y}-01-01" --end "${Y}-12-31" --mode analysis \
     --out "data/processed/bdhires_analysis_${Y}.nc"

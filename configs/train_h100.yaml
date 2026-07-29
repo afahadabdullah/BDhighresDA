@@ -5,7 +5,7 @@ data:
   crop: 128
   seasonal_encoding: true
   years:
-    train: [2001, 2018]
+    train: [1981, 2018]
     val:   [2019, 2020]
     test:  [2021, 2025]
 
@@ -18,7 +18,7 @@ model:
   num_heads: 4
 
 train:
-  out_dir: runs/stageB_h100
+  out_dir: runs/prior_h100
   epochs: 600
   batch_size: 32
   lr: 1.5e-4

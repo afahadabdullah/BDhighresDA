@@ -2,14 +2,20 @@
 """Produce the analysis: ERA5 + IMERG downscaled to 5 km and corrected by BMD gauges.
 
     python scripts/assimilate.py --config configs/da.yaml \
-        --ckpt runs/stageB/final.pt --start 2021-01-01 --end 2021-12-31 \
+        --ckpt runs/prior_v100/final.pt --start 2021-01-01 --end 2021-12-31 \
         --out data/processed/bdhires_2021.nc
 
 Modes (``--mode``):
-    background   conditional generation only (no stations)  -- the "first guess"
-    analysis     conditional generation + station guidance   -- the product
-    prior        unconditional prior + station guidance      -- Manshausen-style
-                 pure SDA, useful as an ablation to show what ERA5/IMERG add
+    background   ERA5-conditioned generation, no observations -- the first guess
+    analysis     background + IMERG + gauge guidance          -- the product
+    prior        unconditional prior + observations           -- Manshausen-style
+                 pure SDA, the ablation that isolates what ERA5 contributes
+
+Ensemble spread comes from three deliberately separate sources (see
+docs/METHODOLOGY.md Section 6):
+    1. downscaling ambiguity  -> the x0 draw, widened by sampler.prior_temperature
+    2. background uncertainty -> optionally a different ERA5-EDA member per member
+    3. observation error      -> per-member perturbed observations
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator, BlockAverageObsOperator, CompositeObsOperator,
-    GuidanceConfig, SamplerConfig, build_R_multi,
+    GuidanceConfig, SamplerConfig, build_R_multi, perturb_observations,
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
@@ -49,19 +55,24 @@ def load_model(ckpt_path: str, cond_channels: int, crop: int, device):
 def build_observations(cfg, ds, grid, tf, times, device, assim_stations=None):
     """Assemble the observation vector, operator and error covariance.
 
-    Two streams, each independently switchable in ``configs/da.yaml``:
+    Both observing systems go through the SAME likelihood -- there is no
+    conditioning path for either of them.  The network sees only ERA5 and the
+    static fields, which keeps a clean separation between the dynamical
+    background (prior) and everything that actually measured rainfall
+    (likelihood).  See docs/METHODOLOGY.md Section 4.
 
-    * ``gauges``  -- BMD daily rain gauges, bilinear point operator.
-    * ``imerg``   -- IMERG 0.1 deg footprints, exact 2x2 block-average operator.
-      Only active when ``observations.imerg.mode == "assimilate"``; when it is
-      ``"condition"`` IMERG is instead a conditioning channel of the network
-      and never enters the likelihood.  See docs/METHODOLOGY.md Section 3.6.
+    * ``gauges``  -- BMD daily rain gauges, bilinear point operator, ~35 points.
+    * ``imerg``   -- IMERG 0.1 deg footprints, exact 2x2 block-average operator,
+                     ~3.5k valid footprints over the Bangladesh grid.
 
-    Returns ``(H, y_all, R)`` with ``y_all`` of shape (T, S_total) in
-    TRANSFORMED units and NaN wherever an observation is missing.
+    Returns ``(H, y_all, R, corr_blocks)``.  ``y_all`` has shape (T, S_total) in
+    TRANSFORMED units, NaN wherever an observation is missing.  ``corr_blocks``
+    describes which slices of the vector should receive spatially correlated
+    perturbations when building per-member observation draws.
     """
     obs_cfg = cfg["observations"]
-    ops, ys, specs = [], [], []
+    ops, ys, specs, corr_blocks = [], [], [], []
+    offset = 0
 
     if obs_cfg["gauges"]["enabled"]:
         ss, values = load_stations(obs_cfg["gauges"]["csv"], times, grid=grid,
@@ -75,34 +86,39 @@ def build_observations(cfg, ds, grid, tf, times, device, assim_stations=None):
         ys.append(y)
         specs.append((len(ss), obs_cfg["gauges"]["sigma_obs"],
                       obs_cfg["gauges"]["representativeness"]))
+        offset += len(ss)
         print(f"[obs] gauges: {len(ss)} stations")
 
-    if obs_cfg["imerg"]["mode"] == "assimilate":
-        ic = ds.z.attrs["imerg_cond_index"] if hasattr(ds.z, "attrs") else cfg["data"]["imerg_cond_index"]
+    if obs_cfg["imerg"]["enabled"]:
         f = obs_cfg["imerg"]["factor"]
         op = BlockAverageObsOperator(f, valid=ds.valid).to(device)
         keep = op.valid_mask()
-        # IMERG is stored on the model grid; the 2x2 mean of that field IS the
-        # native 0.1 deg value because the packing step regridded conservatively.
-        raw = np.stack([np.asarray(ds.z["cond"][int(j)][ic]) for j in range(len(times))])
+        # IMERG lives on the model grid but was regridded conservatively, so its
+        # 2x2 block mean IS the native 0.1 deg footprint value.
+        raw = np.stack([np.asarray(ds.z["imerg"][int(j)]) for j in range(len(times))])
         if obs_cfg["imerg"].get("bias_correction"):
             raw = apply_qm(raw, obs_cfg["imerg"]["bias_correction"], times)
-        coarse = raw.reshape(len(times), grid.nlat // f, f, grid.nlon // f, f).mean(axis=(2, 4))
-        y = tf.forward(coarse).reshape(len(times), -1)
-        y[~np.isfinite(coarse.reshape(len(times), -1))] = np.nan
+        nlat, nlon = grid.nlat // f, grid.nlon // f
+        coarse = raw.reshape(len(times), nlat, f, nlon, f).mean(axis=(2, 4))
+        flat = coarse.reshape(len(times), -1)
+        y = tf.forward(flat)
+        y[~np.isfinite(flat)] = np.nan
         if keep is not None:
             y[:, ~keep.cpu().numpy()] = np.nan
         ops.append(op)
         ys.append(y)
         specs.append((y.shape[1], obs_cfg["imerg"]["sigma_obs"],
                       obs_cfg["imerg"]["representativeness"]))
-        print(f"[obs] imerg: {int((keep.sum() if keep is not None else y.shape[1]))} footprints "
-              f"(sigma={obs_cfg['imerg']['sigma_obs']})")
+        corr_blocks.append((offset, nlat, nlon, obs_cfg["imerg"]["error_corr_cells"]))
+        offset += y.shape[1]
+        n_ok = int(keep.sum()) if keep is not None else y.shape[1]
+        print(f"[obs] imerg: {n_ok} footprints (sigma={obs_cfg['imerg']['sigma_obs']}, "
+              f"error corr length {obs_cfg['imerg']['error_corr_cells']} cells)")
 
     if not ops:
-        return None, None, None
+        return None, None, None, []
     H = CompositeObsOperator(ops).to(device) if len(ops) > 1 else ops[0]
-    return H, np.concatenate(ys, axis=1), build_R_multi(specs, device=device)
+    return H, np.concatenate(ys, axis=1), build_R_multi(specs, device=device), corr_blocks
 
 
 def apply_qm(field: np.ndarray, qm_path: str, times) -> np.ndarray:
@@ -163,9 +179,11 @@ def main():
 
     # ---- observation streams --------------------------------------------
     H = y_all = R = None
+    corr_blocks: list = []
     if args.mode != "background":
-        H, y_all, R = build_observations(cfg, ds, grid, tf, times, device,
-                                         assim_stations=args.assim_stations)
+        H, y_all, R, corr_blocks = build_observations(
+            cfg, ds, grid, tf, times, device, assim_stations=args.assim_stations)
+    perturb = bool(cfg["ensemble"].get("perturb_observations", True))
 
     mask = torch.from_numpy(ds.valid[None, None]).to(device)
 
@@ -175,8 +193,15 @@ def main():
         cond = item["cond"][None].to(device)
         y = None
         if args.mode != "background":
-            yj = torch.from_numpy(y_all[j][None, None]).to(device)  # (1,1,S)
-            y = yj.expand(n_members, -1, -1)
+            if perturb:
+                # one observation draw per member -- the single cheapest fix for
+                # under-dispersion (see da/observation.perturb_observations)
+                yj = perturb_observations(y_all[j], R, n_members, seed=int(j),
+                                          corr_blocks=corr_blocks)
+                yj[:, ~np.isfinite(y_all[j])] = np.nan
+            else:
+                yj = np.repeat(y_all[j][None], n_members, axis=0)
+            y = torch.from_numpy(yj[:, None].astype(np.float32)).to(device)  # (M,1,S)
         out[k] = run_assim(
             model,
             None if args.mode == "prior" else cond,
