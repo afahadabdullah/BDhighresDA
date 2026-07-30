@@ -108,33 +108,72 @@ def main():
                 f"--era5-tp-index {args.era5_tp_index} selects {base_name!r}, "
                 f"which does not look like total precipitation"
             )
-        finite = np.isfinite(tgt) & valid[None]
-        target_t = tf.forward(np.where(finite, tgt, 0.0).astype(np.float64))
-        base_t = tf.forward(
-            np.clip(cond[:, args.era5_tp_index], 0.0, None).astype(np.float64)
-        )
-        difference = (target_t - base_t)[finite]
-        if not np.isfinite(difference).all():
-            raise ValueError("the residual target contains non-finite values")
+        # Accumulated in chunks.  Materialising float64 copies of the full
+        # (N, H, W) target and base plus their difference added ~2.2 GB of
+        # temporaries to an already 11 GB script and pushed the job over its
+        # 16 GB limit.  Running sums keep this O(chunk) instead of O(N).
+        count = 0
+        sum_d = sum_dd = 0.0
+        sum_t = sum_tt = sum_b = sum_bb = sum_tb = 0.0
+        min_d, max_d = np.inf, -np.inf
+        for start in range(0, tgt.shape[0], 64):
+            chunk = tgt[start : start + 64]
+            ok = np.isfinite(chunk) & valid[None]
+            if not ok.any():
+                continue
+            target_t = tf.forward(np.where(ok, chunk, 0.0).astype(np.float64))[ok]
+            base_t = tf.forward(
+                np.clip(
+                    cond[start : start + 64, args.era5_tp_index], 0.0, None
+                ).astype(np.float64)
+            )[ok]
+            difference = target_t - base_t
+            if not np.isfinite(difference).all():
+                raise ValueError("the residual target contains non-finite values")
+            count += difference.size
+            sum_d += float(difference.sum())
+            sum_dd += float((difference**2).sum())
+            sum_t += float(target_t.sum())
+            sum_tt += float((target_t**2).sum())
+            sum_b += float(base_t.sum())
+            sum_bb += float((base_t**2).sum())
+            sum_tb += float((target_t * base_t).sum())
+            min_d = min(min_d, float(difference.min()))
+            max_d = max(max_d, float(difference.max()))
+        if not count:
+            raise ValueError("no valid land pixels for the residual statistics")
+
+        mean_d = sum_d / count
+        var_d = max(sum_dd / count - mean_d**2, 0.0)
         residual = ResidualSpec(
             enabled=True,
-            mean=float(difference.mean()),
-            std=float(difference.std() + 1e-12),
+            mean=float(mean_d),
+            std=float(np.sqrt(var_d) + 1e-12),
             base_channel=int(args.era5_tp_index),
         )
-        encoded = (difference - residual.mean) / residual.std
+        mean_t, mean_b = sum_t / count, sum_b / count
+        var_t = max(sum_tt / count - mean_t**2, 0.0)
+        var_b = max(sum_bb / count - mean_b**2, 0.0)
+        covariance = sum_tb / count - mean_t * mean_b
+        correlation = (
+            covariance / np.sqrt(var_t * var_b) if var_t > 0 and var_b > 0 else float("nan")
+        )
+        # The encoding is monotonic in the residual, so the extreme encoded
+        # magnitude is reached at one of the two extreme raw values.
+        encoded_extremes = [
+            abs((value - residual.mean) / residual.std) for value in (min_d, max_d)
+        ]
         residual_summary = dict(
             base_channel_name=base_name,
+            n_pixels=int(count),
             raw_mean=residual.mean,
             raw_std=residual.std,
-            # the network's actual target: should be ~N(0, 1)
-            encoded_mean=float(encoded.mean()),
-            encoded_std=float(encoded.std()),
-            encoded_abs_max=float(np.abs(encoded).max()),
-            # how much of CHIRPS the base already explains
-            base_correlation=float(
-                np.corrcoef(target_t[finite], base_t[finite])[0, 1]
-            ),
+            # the network's actual target: standard by construction
+            encoded_mean=0.0,
+            encoded_std=1.0,
+            encoded_abs_max=float(max(encoded_extremes)),
+            # how much of the transformed target the base already explains
+            base_correlation=float(correlation),
         )
         print("residual target:", json.dumps(residual_summary, indent=2))
 
@@ -146,10 +185,21 @@ def main():
         if args.no_cond_transform
         else CondTransform.for_channels(channels, eps=args.eps)
     )
-    cond = ctf.forward(cond.astype(np.float64), channel_axis=1)
+    # Transform in place, one channel at a time, staying in float32.
+    # ``ctf.forward`` on the whole stack would hold a float64 input AND a float64
+    # copy simultaneously -- 8.8 GB for 1500 sampled days.  Per-channel keeps the
+    # temporary down to one (N, H, W) slice, and float32 is what the network
+    # actually sees, so the statistics describe the real values.
+    #
+    # NOTE: this mutates ``cond``.  Anything needing the RAW conditioning -- the
+    # residual base above -- must run before this point.
+    for index, kind in enumerate(ctf.kinds):
+        if kind != "none":
+            cond[:, index] = ctf.forward_channel(cond[:, index], index)
     if not np.isfinite(cond).all():
         raise ValueError("the conditioning transform produced non-finite values")
 
+    # float64 accumulators over float32 data
     cm = np.mean(cond, axis=(0, 2, 3), dtype=np.float64)
     cs = np.std(cond, axis=(0, 2, 3), dtype=np.float64) + 1e-6
     if not np.isfinite(cm).all() or not np.isfinite(cs).all() or np.any(cs <= 0):

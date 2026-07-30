@@ -3,7 +3,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+# 16G was not enough once residual statistics were added: the job OOM-killed
+# right at the end. The script now streams those statistics and transforms the
+# conditioning in place, which brings the peak back under ~4 GB, but the headroom
+# is cheap and the failure mode is a wasted allocation.
+#SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 
