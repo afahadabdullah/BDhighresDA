@@ -194,9 +194,21 @@ the `STATS_*` environment variables documented in `slurm/compute_stats.sbatch`.
 
 ## Submit training
 
-Use the wrapper from any directory. It resolves the repository root and
-creates `logs` before calling `sbatch`, which is necessary because Slurm opens
-the output file before the job body runs.
+First run a short real-data preflight on one GH200:
+
+```bash
+/path/to/BDhighresDA/slurm/submit_preflight_training_gh200.sh
+```
+
+It uses the production batch size and model, exercises the multi-worker Zarr
+loader, runs two optimizer/EMA steps and one validation batch, reports peak GPU
+memory, and writes `data/processed/training_preflight.json`. It saves no model
+checkpoint. Do not start the full run unless its log ends with
+`PREFLIGHT PASSED`.
+
+Then use the training wrapper from any directory. It resolves the repository
+root and creates `logs` before calling `sbatch`, which is necessary because
+Slurm opens the output file before the job body runs:
 
 ```bash
 /path/to/BDhighresDA/slurm/submit_train_gh200.sh
@@ -216,6 +228,11 @@ exists. Disable automatic resumption for a submission with:
 ```bash
 RESUME_IF_AVAILABLE=0 slurm/submit_train_gh200.sh
 ```
+
+The training job verifies that the preflight passed on the current Git commit
+with unchanged training configuration and statistics. The guard can be
+disabled explicitly with `REQUIRE_TRAINING_PREFLIGHT=0`, but doing so is not
+recommended.
 
 The completed checkpoint is `runs/prior_h100/final.pt`.
 

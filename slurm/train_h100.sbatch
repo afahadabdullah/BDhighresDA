@@ -63,6 +63,46 @@ print(
 )
 PY
 
+PREFLIGHT_REPORT="${TRAIN_PREFLIGHT_REPORT:-data/processed/training_preflight.json}"
+if [[ "${REQUIRE_TRAINING_PREFLIGHT:-1}" == "1" ]]; then
+    [[ -f "$PREFLIGHT_REPORT" ]] || {
+        echo "ERROR: GH200 real-data preflight report not found: $PREFLIGHT_REPORT"
+        echo "Run slurm/submit_preflight_training_gh200.sh first."
+        exit 1
+    }
+    python - "$PREFLIGHT_REPORT" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+assert report.get("passed") is True, "training preflight did not pass"
+head = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+assert report["git_commit"] == head, (
+    "repository changed after preflight; rerun the GH200 preflight"
+)
+for path_key, hash_key in (
+    ("config", "config_sha256"),
+    ("stats", "stats_sha256"),
+):
+    path = Path(report[path_key])
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == report[hash_key], (
+        f"{path} changed after preflight; rerun the GH200 preflight"
+    )
+print("Verified GH200 preflight:", sys.argv[1])
+print("Preflight validation loss:", report["validation_loss"])
+print("Preflight peak reserved GiB:", report["peak_memory_reserved_gib"])
+PY
+fi
+
 TRAIN_ARGS=()
 
 if [[ "${RESUME_IF_AVAILABLE:-1}" == "1" &&

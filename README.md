@@ -91,7 +91,10 @@ slurm/submit_pack_training_data.sh
 # Training-period normalization statistics (requires alignment pass):
 slurm/submit_compute_stats.sh
 
-# 3. train on PRISM GH200 (wrapper creates logs before submitting)
+# Real-data, production-batch GH200 preflight (no checkpoint is saved):
+slurm/submit_preflight_training_gh200.sh
+
+# 3. after PREFLIGHT PASSED, train on PRISM GH200:
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges

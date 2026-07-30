@@ -90,9 +90,10 @@ class UNet(nn.Module):
     """U-Net returning a field of shape ``(B, out_channels, H, W)``.
 
     Conditioning is by channel concatenation: ``forward(x, t, cond)`` where
-    ``cond`` holds the upsampled ERA5 / IMERG predictors, the static fields
-    (orography, land-sea mask, positional encoding) and the seasonal
-    encoding broadcast to maps.
+    ``cond`` holds the upsampled ERA5 predictors, the static fields
+    (orography, land-sea mask, positional encoding) and the seasonal encoding
+    broadcast to maps. IMERG is an assimilation-time observation and never a
+    network predictor.
     """
 
     def __init__(
