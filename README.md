@@ -88,6 +88,9 @@ slurm/submit_dem_static.sh
 # ERA5 + CHIRPS + static training store, followed by lag-alignment QC:
 slurm/submit_pack_training_data.sh
 
+# Training-period normalization statistics (requires alignment pass):
+slurm/submit_compute_stats.sh
+
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 

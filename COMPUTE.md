@@ -180,6 +180,18 @@ Override the default range or paths with `PACK_START`, `PACK_END`,
 `PACK_ERA5`, `PACK_CHIRPS`, `PACK_STATIC`, `PACK_OUT`, and `PACK_QC_OUT`.
 The default partition is `grace-cpuonly`; override it with `PACK_PARTITION`.
 
+After alignment passes, compute normalization statistics from the 1981–2018
+training period only:
+
+```bash
+slurm/submit_compute_stats.sh
+```
+
+This writes `data/processed/stats.json` using a fixed random sample of 1,500
+training days and the `log1p` precipitation transform. The job refuses to run
+unless `alignment_qc.json` reports a lag-zero pass. Override its inputs with
+the `STATS_*` environment variables documented in `slurm/compute_stats.sbatch`.
+
 ## Submit training
 
 Use the wrapper from any directory. It resolves the repository root and
