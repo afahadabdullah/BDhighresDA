@@ -235,14 +235,38 @@ def add_metric_annotation(axis, text: str) -> None:
 
 
 def map_column_titles(members: int) -> list[str]:
+    """Column headers for the map suite.
+
+    Lettered so panels can be referred to unambiguously in notes and captions.
+    Columns A-C share a rainfall colour scale within each row and D-E share a
+    symmetric error scale, which the subtitles state explicitly -- a reader
+    should not have to infer which panels are comparable.
+    """
     return [
-        "A. ERA5 input\nDaily precipitation",
-        "B. CHIRPS target\nDaily precipitation",
-        f"C. Model prediction\n{members}-member ensemble mean",
-        "D. ERA5 error\nInput − CHIRPS target",
-        "E. Model error\nPrediction mean − CHIRPS target",
-        "F. Predictive uncertainty\nEnsemble standard deviation",
+        "A.  ERA5 input\nTotal precipitation (mm day$^{-1}$)",
+        "B.  CHIRPS target\nObserved truth (mm day$^{-1}$)",
+        f"C.  Model prediction\n{members}-member ensemble mean (mm day$^{{-1}}$)",
+        "D.  ERA5 error\nInput − CHIRPS (mm day$^{-1}$)",
+        "E.  Model error\nEnsemble mean − CHIRPS (mm day$^{-1}$)",
+        "F.  Predictive uncertainty\nEnsemble standard deviation (mm day$^{-1}$)",
     ]
+
+
+def add_row_label(axis, case: dict) -> None:
+    """Identify the row in the left margin, clear of the latitude labels."""
+    axis.annotate(
+        f"{case['date']}\n"
+        f"q{int(round(case['quantile'] * 100)):02d} rainfall case\n"
+        f"{case['domain_mean_target_mm']:.1f} mm day$^{{-1}}$",
+        xy=(0, 0.5),
+        xycoords="axes fraction",
+        xytext=(-72, 0),
+        textcoords="offset points",
+        ha="center",
+        va="center",
+        fontsize=10.5,
+        fontweight="bold",
+    )
 
 
 def case_map_panels(
@@ -613,10 +637,12 @@ def save_metrics_figure(cases: list[dict], output: Path, members: int) -> None:
     axes[1, 2].margins(y=0.16)
 
     figure.suptitle(
-        "BDhighresDA held-out case metrics\n"
-        "ERA5-conditioned background versus CHIRPS; "
-        "target-selected cases are diagnostic, not an aggregate test score",
-        fontsize=15,
+        "BDhighresDA held-out case metrics - model versus its own ERA5 input\n"
+        f"{members}-member ensemble scored against CHIRPS on the target grid\n"
+        "The model must beat the ERA5 bars: a conditional generator that scores "
+        "worse than the field it is conditioned on has not learned to use it\n"
+        "Target-selected cases are diagnostic, not an aggregate test score",
+        fontsize=14,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + ".part")
@@ -852,24 +878,7 @@ def main() -> None:
             if row == 0:
                 axis.set_title(column_titles[column], fontsize=11, pad=10)
             if column == 0:
-                axis.text(
-                    0.02,
-                    0.98,
-                    f"{case['date']}\n"
-                    f"q{int(round(case['quantile'] * 100)):02d} rainfall case",
-                    transform=axis.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=10,
-                    zorder=6,
-                    bbox={
-                        "facecolor": "white",
-                        "edgecolor": "black",
-                        "linewidth": 0.4,
-                        "alpha": 0.88,
-                        "pad": 3.0,
-                    },
-                )
+                add_row_label(axis, case)
             add_metric_annotation(axis, annotation)
             row_images.append(image)
 
@@ -907,16 +916,22 @@ def main() -> None:
             fontsize=9,
         )
 
+    epoch_label = checkpoint_metadata.get("epoch")
     figure.suptitle(
         "BDhighresDA held-out ERA5-conditioned background comparison\n"
-        f"Best EMA checkpoint; test period {start} to {end}; "
-        f"{args.members}-member ensemble; "
-        f"sampler steps={base_sampler.n_steps}, temperature="
-        f"{base_sampler.prior_temperature:g}, "
-        f"CFG w={base_sampler.cfg_scale:g}\n"
-        "Rainfall panels share a row scale; error panels share a symmetric row "
-        "scale; Natural Earth 10 m boundaries",
-        fontsize=15,
+        f"{checkpoint_path}"
+        + (f"  (epoch {epoch_label + 1})" if epoch_label is not None else "")
+        + f", EMA weights   |   statistics {config['data']['stats']}   |   "
+        f"test period {start} to {end}\n"
+        f"{args.members}-member ensemble   |   sampler: {base_sampler.n_steps} steps, "
+        f"prior temperature {base_sampler.prior_temperature:g}, "
+        f"CFG w={base_sampler.cfg_scale:g}, "
+        f"schedule power {base_sampler.schedule_power:g}\n"
+        "Columns A-C share a rainfall colour scale within each row; D-E share a "
+        "symmetric error scale; rows are independent days\n"
+        "Cases are selected by domain-mean CHIRPS quantile and are diagnostic, "
+        "not an aggregate test score   |   Natural Earth 10 m boundaries",
+        fontsize=14,
     )
     output_figure = Path(args.out_figure)
     output_figure.parent.mkdir(parents=True, exist_ok=True)

@@ -116,6 +116,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         cond_transform=CondTransform.from_stats(stats),
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
+        extent=(grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max),
     )
 
 

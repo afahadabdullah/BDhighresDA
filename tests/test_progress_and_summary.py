@@ -313,3 +313,70 @@ def test_summary_warns_when_sampled_validation_is_off():
 def test_summary_lines_are_not_absurdly_wide():
     for line in _summary().splitlines():
         assert len(line) < 120, line
+
+
+# --------------------------------------------------------------------------
+# Figure labelling
+# --------------------------------------------------------------------------
+
+monitor = _load("_bd_monitor", "src/bdhires/eval/monitor.py")
+
+
+def test_map_columns_are_lettered_and_complete():
+    columns = monitor.ValidationMonitor.MAP_COLUMNS
+    assert [letter for letter, _, _ in columns] == list("ABCDEF")
+    titles = [title for _, title, _ in columns]
+    assert "ERA5 input" in titles
+    assert "CHIRPS target" in titles
+    assert "Model ensemble mean" in titles
+    # every column carries an explanatory subtitle, not just a bare name
+    assert all(subtitle.strip() for _, _, subtitle in columns)
+
+
+def test_member_count_is_substituted_into_the_column_subtitle():
+    _, _, subtitle = monitor.ValidationMonitor.MAP_COLUMNS[2]
+    assert subtitle.format(members=8) == "8 members"
+
+
+def test_progress_panels_cover_the_diagnostic_metrics():
+    keys = [key for key, _, _, _ in monitor.ValidationMonitor.PROGRESS_PANELS]
+    assert keys == [
+        "crps_mm", "rmse_mm", "spatial_correlation",
+        "bias_mm", "mean_spread_mm", "interval_90_coverage",
+    ]
+    for key, ylabel, subtitle, _ in monitor.ValidationMonitor.PROGRESS_PANELS:
+        assert subtitle.strip(), key
+        # every panel states its units or what the number is
+        assert ylabel.strip(), key
+    units = dict((k, y) for k, y, _, _ in monitor.ValidationMonitor.PROGRESS_PANELS)
+    assert "mm day" in units["crps_mm"]
+    assert "mm day" in units["rmse_mm"]
+    assert "mm day" in units["bias_mm"]
+
+
+def test_lower_is_better_flags_match_the_metric_direction():
+    direction = {
+        key: lower for key, _, _, lower in monitor.ValidationMonitor.PROGRESS_PANELS
+    }
+    assert direction["crps_mm"] is True         # minimise
+    assert direction["rmse_mm"] is True         # minimise
+    assert direction["spatial_correlation"] is False   # maximise
+    assert direction["bias_mm"] is None         # neither: zero is the target
+    assert direction["interval_90_coverage"] is None   # target is 0.90
+
+
+def test_test_prediction_column_titles_are_lettered_with_units():
+    spec = importlib.util.spec_from_file_location(
+        "_bd_plot", ROOT / "scripts" / "08_plot_test_predictions.py"
+    )
+    try:
+        plot = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plot)
+    except ImportError as exc:                  # cartopy/torch not installed here
+        pytest.skip(f"08_plot_test_predictions needs {exc.name}")
+    titles = plot.map_column_titles(16)
+    assert len(titles) == 6
+    for letter, title in zip("ABCDEF", titles):
+        assert title.startswith(f"{letter}."), title
+        assert "mm day" in title, title       # every column states its units
+    assert "16-member" in titles[2]

@@ -69,6 +69,12 @@ class _Case:
     quantile: float
     domain_mean_mm: float
     target: np.ndarray = field(repr=False)
+    era5: np.ndarray | None = field(default=None, repr=False)
+    baseline: dict | None = None      # ERA5-vs-CHIRPS scores for this day
+
+    @property
+    def label(self) -> str:
+        return f"{self.date}  (q{int(round(self.quantile * 100)):02d})"
 
 
 class ValidationMonitor:
@@ -89,7 +95,9 @@ class ValidationMonitor:
         cond_transform=None,
         cond_mean: np.ndarray | None = None,
         cond_std: np.ndarray | None = None,
+        extent: "tuple[float, float, float, float] | None" = None,
     ):
+        self.extent = extent      # (lon_min, lon_max, lat_min, lat_max) for axes
         self.cfg = cfg or MonitorConfig()
         self.ds = dataset
         self.transform = transform
@@ -105,6 +113,7 @@ class ValidationMonitor:
         self.valid = self.ds.fixed_valid > 0
         self.slices = self.ds.fixed_spatial_slices()
         self.cases = self._select_cases()
+        self._attach_baselines()
 
     # -- case selection ----------------------------------------------------
 
@@ -146,6 +155,41 @@ class ValidationMonitor:
                 )
             )
         return cases
+
+    def _attach_baselines(self) -> None:
+        """Score raw ERA5 against CHIRPS for each case, once.
+
+        This is the bar the model has to clear.  The epoch-119 failure was a
+        model whose ensemble mean correlated *worse* with CHIRPS than the ERA5
+        field it was conditioned on, and that was invisible until someone
+        compared two numbers by hand.  Drawing it as a reference line on every
+        progress figure makes it impossible to miss.
+        """
+        for case in self.cases:
+            try:
+                item = self.ds[self._position_of(case.index)]
+                case.era5 = self._era5_mm(item)
+                keep = self.valid & np.isfinite(case.target) & np.isfinite(case.era5)
+                predicted = case.era5[keep].astype(np.float64)
+                observed = case.target[keep].astype(np.float64)
+                difference = predicted - observed
+                case.baseline = {
+                    "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+                    # a deterministic forecast's CRPS is its MAE
+                    "crps_mm": float(np.mean(np.abs(difference))),
+                    "mae_mm": float(np.mean(np.abs(difference))),
+                    "bias_mm": float(np.mean(difference)),
+                    "spatial_correlation": (
+                        float(np.corrcoef(predicted, observed)[0, 1])
+                        if predicted.std() > 0 and observed.std() > 0
+                        else float("nan")
+                    ),
+                }
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                print(
+                    f"[validation monitor] no ERA5 baseline for {case.date}: {exc!r}",
+                    flush=True,
+                )
 
     def describe(self) -> str:
         cases = ", ".join(
@@ -333,6 +377,37 @@ class ValidationMonitor:
 
     # -- figures -----------------------------------------------------------
 
+    #: Column headers for the map panel.  Lettered so they can be referred to
+    #: unambiguously in notes and in the paper.
+    MAP_COLUMNS = [
+        ("A", "ERA5 input", "total precipitation, regridded"),
+        ("B", "CHIRPS target", "observed truth"),
+        ("C", "Model ensemble mean", "{members} members"),
+        ("D", "Single member", "realism / texture check"),
+        ("E", "Model error", "ensemble mean - CHIRPS"),
+        ("F", "Ensemble spread", "standard deviation"),
+    ]
+
+    def _decorate(self, axis, *, left: bool, bottom: bool) -> None:
+        """Degree ticks when the geographic extent is known, else bare axes."""
+        if self.extent is None:
+            axis.set_xticks([])
+            axis.set_yticks([])
+            return
+        lon0, lon1, lat0, lat1 = self.extent
+        axis.set_xticks(np.arange(np.ceil(lon0), np.floor(lon1) + 1, 2))
+        axis.set_yticks(np.arange(np.ceil(lat0), np.floor(lat1) + 1, 2))
+        axis.tick_params(labelsize=7, length=2)
+        if bottom:
+            axis.set_xlabel("Longitude (deg E)", fontsize=8)
+        else:
+            axis.set_xticklabels([])
+        if left:
+            axis.set_ylabel("Latitude (deg N)", fontsize=8)
+        else:
+            axis.set_yticklabels([])
+        axis.grid(alpha=0.15, linewidth=0.4, linestyle=":")
+
     def _plot_maps(self, records: list[dict], epoch: int) -> None:
         import matplotlib
 
@@ -341,7 +416,11 @@ class ValidationMonitor:
 
         rows = len(records)
         figure, axes = plt.subplots(
-            rows, 5, figsize=(19, 3.9 * rows), constrained_layout=True, squeeze=False
+            rows,
+            6,
+            figsize=(23, 4.6 * rows),
+            constrained_layout=True,
+            squeeze=False,
         )
         rain = plt.get_cmap("viridis").copy()
         rain.set_bad("white")
@@ -349,17 +428,23 @@ class ValidationMonitor:
         error.set_bad("white")
         spread_cmap = plt.get_cmap("magma").copy()
         spread_cmap.set_bad("white")
+        imshow_kwargs = dict(origin="lower", interpolation="nearest")
+        if self.extent is not None:
+            imshow_kwargs["extent"] = self.extent
 
         for row, record in enumerate(records):
             case, members = record["case"], record["members"]
             mean = np.mean(members, axis=0)
             spread = np.std(members, axis=0, ddof=1)
             metrics = record["metrics"]
+
+            # One rainfall scale across A-D so the four are directly comparable.
             pooled = np.concatenate(
                 [
+                    record["era5"][self.valid],
                     case.target[self.valid],
                     mean[self.valid],
-                    record["era5"][self.valid],
+                    members[0][self.valid],
                 ]
             )
             vmax = max(5.0, float(np.nanpercentile(pooled, 99.0)))
@@ -367,113 +452,191 @@ class ValidationMonitor:
                 2.0,
                 float(np.nanpercentile(np.abs((mean - case.target)[self.valid]), 99.0)),
             )
+
+            baseline = case.baseline or {}
             panels = [
-                (record["era5"], rain, 0, vmax, "ERA5 tp input"),
-                (
-                    case.target,
-                    rain,
-                    0,
-                    vmax,
-                    f"CHIRPS target\ndomain mean {case.domain_mean_mm:.1f} mm",
-                ),
-                (
-                    mean,
-                    rain,
-                    0,
-                    vmax,
-                    f"Ensemble mean\nCRPS {metrics['crps_mm']:.2f}  "
-                    f"r {metrics['spatial_correlation']:.2f}",
-                ),
-                (
-                    members[0],
-                    rain,
-                    0,
-                    vmax,
-                    "Single member\n(texture check)",
-                ),
-                (
-                    mean - case.target,
-                    error,
-                    -limit,
-                    limit,
-                    f"Error\nbias {metrics['bias_mm']:+.2f} mm",
-                ),
+                (record["era5"], rain, 0.0, vmax,
+                 f"RMSE {baseline.get('rmse_mm', float('nan')):.2f}   "
+                 f"r {baseline.get('spatial_correlation', float('nan')):.2f}"),
+                (case.target, rain, 0.0, vmax,
+                 f"domain mean {case.domain_mean_mm:.2f}   "
+                 f"max {metrics['target_max_mm']:.1f}"),
+                (mean, rain, 0.0, vmax,
+                 f"RMSE {metrics['rmse_mm']:.2f}   "
+                 f"r {metrics['spatial_correlation']:.2f}   "
+                 f"CRPS {metrics['crps_mm']:.2f}"),
+                (members[0], rain, 0.0, vmax,
+                 f"max {float(np.nanmax(members[0])):.1f}"),
+                (mean - case.target, error, -limit, limit,
+                 f"bias {metrics['bias_mm']:+.2f}   MAE {metrics['mae_mm']:.2f}"),
+                (spread, spread_cmap, 0.0,
+                 max(1.0, float(np.nanpercentile(spread[self.valid], 99.0))),
+                 f"mean {metrics['mean_spread_mm']:.2f}   "
+                 f"cov90 {metrics['interval_90_coverage'] * 100:.0f}%"),
             ]
-            for column, (values, cmap, vmin, vhigh, title) in enumerate(panels):
+
+            images = []
+            for column, (values, cmap, vmin, vhigh, note) in enumerate(panels):
                 axis = axes[row, column]
-                image = axis.imshow(
-                    values, origin="lower", cmap=cmap, vmin=vmin, vmax=vhigh,
-                    interpolation="nearest",
+                images.append(
+                    axis.imshow(values, cmap=cmap, vmin=vmin, vmax=vhigh,
+                                **imshow_kwargs)
                 )
-                axis.set_title(title, fontsize=9)
-                axis.set_xticks([])
-                axis.set_yticks([])
-                figure.colorbar(image, ax=axis, shrink=0.82)
-            axes[row, 0].set_ylabel(
-                f"{case.date}\nq{int(round(case.quantile * 100)):02d}", fontsize=9
+                self._decorate(axis, left=column == 0, bottom=row == rows - 1)
+                if row == 0:
+                    letter, title, subtitle = self.MAP_COLUMNS[column]
+                    axis.set_title(
+                        f"{letter}.  {title}\n"
+                        f"{subtitle.format(members=self.cfg.members)}",
+                        fontsize=10.5,
+                        pad=8,
+                    )
+                axis.text(
+                    0.02, 0.02, note, transform=axis.transAxes,
+                    ha="left", va="bottom", fontsize=7.5, zorder=6,
+                    bbox=dict(facecolor="white", edgecolor="none",
+                              alpha=0.82, pad=2.0),
+                )
+
+            # Row identifier in the left margin, clear of the latitude label.
+            axes[row, 0].annotate(
+                f"{case.date}\nq{int(round(case.quantile * 100)):02d} case\n"
+                f"{case.domain_mean_mm:.1f} mm day$^{{-1}}$",
+                xy=(0, 0.5), xycoords="axes fraction",
+                xytext=(-96, 0), textcoords="offset points",
+                ha="center", va="center", fontsize=10.5, fontweight="bold",
             )
 
+            bar = figure.colorbar(
+                images[0], ax=axes[row, 0:4].tolist(),
+                orientation="horizontal", shrink=0.6, aspect=45, pad=0.02,
+            )
+            bar.set_label("Daily precipitation (mm day$^{-1}$)", fontsize=9)
+            bar.ax.tick_params(labelsize=7)
+            bar = figure.colorbar(
+                images[4], ax=axes[row, 4], orientation="horizontal",
+                shrink=0.85, aspect=16, pad=0.02,
+            )
+            bar.set_label("Error (mm day$^{-1}$)", fontsize=9)
+            bar.ax.tick_params(labelsize=7)
+            bar = figure.colorbar(
+                images[5], ax=axes[row, 5], orientation="horizontal",
+                shrink=0.85, aspect=16, pad=0.02,
+            )
+            bar.set_label("Spread (mm day$^{-1}$)", fontsize=9)
+            bar.ax.tick_params(labelsize=7)
+
         figure.suptitle(
-            f"Sampled validation - epoch {epoch}  "
-            f"({self.cfg.members} members, CFG w={self.cfg.cfg_scale:g}, "
-            f"{self.cfg.n_steps} steps, EMA weights)",
-            fontsize=13,
+            "BDhighresDA sampled validation - held-out ERA5-conditioned background\n"
+            f"Epoch {epoch + 1}   |   EMA weights   |   {self.cfg.members}-member "
+            f"ensemble   |   {self.cfg.n_steps} sampler steps, CFG w="
+            f"{self.cfg.cfg_scale:g}, prior temperature 1.0\n"
+            "Panels A-D share a common rainfall scale within each row; "
+            "rows are independent held-out days",
+            fontsize=13.5,
         )
-        path = self.out_dir / f"epoch_{epoch:04d}.png"
-        figure.savefig(path, dpi=110)
+        figure.savefig(self.out_dir / f"epoch_{epoch + 1:04d}.png", dpi=110)
         plt.close(figure)
 
+    #: (key, axis label, subtitle, lower-is-better) for the progress figure.
+    PROGRESS_PANELS = [
+        ("crps_mm", "CRPS (mm day$^{-1}$)",
+         "Probabilistic error - the selection metric", True),
+        ("rmse_mm", "RMSE (mm day$^{-1}$)",
+         "Ensemble-mean deterministic error", True),
+        ("spatial_correlation", "Pearson correlation",
+         "Spatial pattern agreement with CHIRPS", False),
+        ("bias_mm", "Mean error (mm day$^{-1}$)",
+         "Domain-mean bias - zero is the target", None),
+        ("mean_spread_mm", "Ensemble standard deviation (mm day$^{-1}$)",
+         "Predictive spread", None),
+        ("interval_90_coverage", "Fraction of valid grid cells",
+         "90% interval coverage - nominal 0.90", None),
+    ]
+
     def _plot_progress(self) -> None:
-        """Rewrite the metric-vs-epoch curves.  This is the 'is it improving' view."""
+        """Metric-vs-epoch curves with the ERA5 baseline drawn in.
+
+        The reference lines are the point of this figure: a conditional model
+        that cannot beat the field it is conditioned on has not learned to use
+        its conditioning.
+        """
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
 
-        rows = [json.loads(line) for line in self.history_path.read_text().splitlines() if line]
+        rows = [
+            json.loads(line)
+            for line in self.history_path.read_text().splitlines()
+            if line.strip()
+        ]
         if len(rows) < 2:
             return
-        epochs = [r["epoch"] for r in rows]
-        dates = [c["date"] for c in rows[0]["cases"]]
+        epochs = [r["epoch"] + 1 for r in rows]
+        colours = plt.get_cmap("tab10").colors
 
-        panels = [
-            ("crps_mm", "CRPS (mm day$^{-1}$)", "lower is better", True),
-            ("rmse_mm", "Ensemble-mean RMSE (mm day$^{-1}$)", "lower is better", True),
-            ("bias_mm", "Bias (mm day$^{-1}$)", "zero is better", False),
-            ("spatial_correlation", "Spatial correlation", "higher is better", False),
-            ("mean_spread_mm", "Ensemble spread (mm day$^{-1}$)", "", False),
-            ("interval_90_coverage", "90% interval coverage", "nominal 0.90", False),
-        ]
-        figure, axes = plt.subplots(2, 3, figsize=(16, 8.5), constrained_layout=True)
-        for axis, (key, label, note, mark_best) in zip(axes.ravel(), panels):
-            for case_number, date in enumerate(dates):
+        figure, axes = plt.subplots(2, 3, figsize=(17, 9), constrained_layout=True)
+        for axis, (key, ylabel, subtitle, lower_better) in zip(
+            axes.ravel(), self.PROGRESS_PANELS
+        ):
+            has_baseline = False
+            for number, case in enumerate(self.cases):
+                colour = colours[number % len(colours)]
                 series = [
-                    r["cases"][case_number][key]
+                    r["cases"][number][key]
                     for r in rows
-                    if case_number < len(r["cases"])
+                    if number < len(r["cases"])
                 ]
-                axis.plot(epochs[: len(series)], series, marker="o", ms=3, label=date)
-            if mark_best:
-                pooled = [np.mean([c[key] for c in r["cases"]]) for r in rows]
-                best = int(np.argmin(pooled))
-                axis.axvline(
-                    epochs[best], color="grey", ls="--", lw=1,
-                    label=f"best epoch {epochs[best]}",
+                axis.plot(
+                    epochs[: len(series)], series, marker="o", ms=3.2,
+                    lw=1.4, color=colour, label=case.label,
                 )
+                reference = (case.baseline or {}).get(key)
+                if reference is not None and reference == reference:
+                    # Unlabelled: one shared legend entry is added below instead
+                    # of repeating "ERA5 baseline" once per case per panel.
+                    axis.axhline(reference, color=colour, ls=":", lw=1.4)
+                    has_baseline = True
             if key == "bias_mm":
-                axis.axhline(0.0, color="black", lw=0.8)
+                axis.axhline(0.0, color="black", lw=0.9)
             if key == "interval_90_coverage":
-                axis.axhline(0.90, color="black", ls="--", lw=0.9)
-            axis.set_xlabel("epoch")
-            axis.set_ylabel(label)
-            axis.set_title(f"{label}{'  -  ' + note if note else ''}", fontsize=10)
-            axis.grid(alpha=0.25)
-            axis.legend(fontsize=7, frameon=False)
+                axis.axhline(0.90, color="black", ls="--", lw=1.0)
+                axis.set_ylim(0.0, 1.0)
 
+            handles, labels = axis.get_legend_handles_labels()
+            if has_baseline:
+                handles.append(Line2D([], [], color="grey", ls=":", lw=1.4))
+                labels.append("ERA5 input baseline")
+            if lower_better is not None:
+                pooled = [np.mean([c[key] for c in r["cases"]]) for r in rows]
+                best = int(np.argmin(pooled) if lower_better else np.argmax(pooled))
+                axis.axvline(epochs[best], color="grey", ls="--", lw=1.0)
+                handles.append(Line2D([], [], color="grey", ls="--", lw=1.0))
+                labels.append(f"best: epoch {epochs[best]}")
+
+            axis.set_xlabel("Epoch")
+            axis.set_ylabel(ylabel)
+            axis.set_title(subtitle, fontsize=10.5)
+            axis.grid(alpha=0.25)
+            axis.legend(
+                handles, labels, fontsize=7.2, frameon=True, framealpha=0.85,
+                edgecolor="none", loc="best",
+            )
+
+        month = (
+            "July" if self.cfg.month == 7 else f"month {self.cfg.month}"
+        )
         figure.suptitle(
-            "BDhighresDA sampled-validation progress (EMA weights, held-out "
-            f"{'July' if self.cfg.month == 7 else 'month ' + str(self.cfg.month)} days)",
-            fontsize=14,
+            "BDhighresDA training progress - sampled validation on held-out "
+            f"{month} days\n"
+            f"EMA weights   |   {self.cfg.members}-member ensemble   |   "
+            f"{self.cfg.n_steps} sampler steps, CFG w={self.cfg.cfg_scale:g}   |   "
+            f"evaluated every {self.cfg.every} epochs\n"
+            "Dotted lines are the raw ERA5 input scored against CHIRPS: the "
+            "model must beat its own conditioning",
+            fontsize=13.5,
         )
         figure.savefig(self.out_dir / "progress.png", dpi=115)
         plt.close(figure)
