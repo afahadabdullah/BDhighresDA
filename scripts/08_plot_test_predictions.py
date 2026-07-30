@@ -931,11 +931,16 @@ def main() -> None:
         )
 
     epoch_label = checkpoint_metadata.get("epoch")
+    weights_label = (
+        "online weights (no EMA)"
+        if checkpoint_metadata.get("weights") == "model"
+        else "EMA weights"
+    )
     figure.suptitle(
         "BDhighresDA held-out ERA5-conditioned background comparison\n"
         f"{checkpoint_path}"
         + (f"  (epoch {epoch_label + 1})" if epoch_label is not None else "")
-        + f", EMA weights   |   statistics {config['data']['stats']}   |   "
+        + f", {weights_label}   |   statistics {config['data']['stats']}   |   "
         f"test period {start} to {end}\n"
         f"{args.members}-member ensemble   |   sampler: {base_sampler.n_steps} steps, "
         f"prior temperature {base_sampler.prior_temperature:g}, "

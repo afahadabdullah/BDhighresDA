@@ -488,7 +488,10 @@ def test_h100_config_pairs_its_stats_file_with_a_matching_run_dir():
     # parameterisation.  What must hold is that the run directory is new, so a
     # previous run's checkpoints are never overwritten.
     assert stats.rsplit("_", 1)[-1].removesuffix(".json").startswith("v"), stats
-    previous = {"runs/prior_h100", "runs/prior_h100_v2", "runs/prior_h100_v3"}
+    previous = {
+        "runs/prior_h100", "runs/prior_h100_v2",
+        "runs/prior_h100_v3", "runs/prior_h100_v4",
+    }
     assert out_dir not in previous, (
         f"out_dir {out_dir} would overwrite an earlier run; bump the suffix"
     )

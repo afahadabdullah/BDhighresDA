@@ -98,6 +98,9 @@ class ValidationMonitor:
         extent: "tuple[float, float, float, float] | None" = None,
     ):
         self.extent = extent      # (lon_min, lon_max, lat_min, lat_max) for axes
+        # Set from the `ema` argument on every run, so the figures always
+        # state which weights produced them rather than assuming EMA.
+        self.weights_label = "EMA weights"
         self.cfg = cfg or MonitorConfig()
         self.ds = dataset
         self.transform = transform
@@ -233,7 +236,7 @@ class ValidationMonitor:
     # -- evaluation --------------------------------------------------------
 
     def run(self, model, ema, epoch: int, step: int) -> dict | None:
-        """Sample every case with the EMA weights and score it.
+        """Sample every case with the current inference weights and score it.
 
         Returns the summary dict, or ``None`` if anything went wrong -- a broken
         diagnostic must not take the training run down with it.
@@ -251,6 +254,9 @@ class ValidationMonitor:
         from ..models.flow import RectifiedFlow
 
         started = time.time()
+        self.weights_label = (
+            "EMA weights" if ema is not None else "online weights (no EMA)"
+        )
         # ``ema=None`` samples the online weights directly (train.use_ema=false).
         online = (
             {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -540,7 +546,7 @@ class ValidationMonitor:
 
         figure.suptitle(
             "BDhighresDA sampled validation - held-out ERA5-conditioned background\n"
-            f"Epoch {epoch + 1}   |   EMA weights   |   {self.cfg.members}-member "
+            f"Epoch {epoch + 1}   |   {self.weights_label}   |   {self.cfg.members}-member "
             f"ensemble   |   {self.cfg.n_steps} sampler steps, CFG w="
             f"{self.cfg.cfg_scale:g}, prior temperature 1.0\n"
             "Panels A-D share a common rainfall scale within each row; "
@@ -643,7 +649,7 @@ class ValidationMonitor:
         figure.suptitle(
             "BDhighresDA training progress - sampled validation on held-out "
             f"{month} days\n"
-            f"EMA weights   |   {self.cfg.members}-member ensemble   |   "
+            f"{self.weights_label}   |   {self.cfg.members}-member ensemble   |   "
             f"{self.cfg.n_steps} sampler steps, CFG w={self.cfg.cfg_scale:g}   |   "
             f"evaluated every {self.cfg.every} epochs\n"
             "Dotted lines are the raw ERA5 input scored against CHIRPS: the "

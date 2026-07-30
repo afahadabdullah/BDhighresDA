@@ -495,12 +495,11 @@ def test_early_stop_disabled_never_fires():
     assert _early_stop([5.0, 6.0, 7.0, 8.0, 9.0], patience=0)[0] is None
 
 
-def test_v4_config_turns_off_ema_and_cfg_and_keeps_snapshots():
+def test_config_keeps_cfg_off_and_retains_snapshots():
     import yaml
 
     cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
     train, validation = cfg["train"], cfg["validation"]
-    assert train["use_ema"] is False
     assert train["cond_dropout"] == 0.0, "unused at cfg_scale 1.0"
     assert validation["cfg_scale"] == 1.0
     assert train["keep_every"] > 0, "v3 lost its peak to overwriting"
@@ -549,14 +548,23 @@ def test_cond_dropout_and_cfg_scale_stay_consistent():
         assert da_cfg["background_sampler"]["cfg_scale"] == 1.0
 
 
-def test_summary_states_when_ema_is_disabled():
+def test_summary_reports_the_ema_setting_either_way():
+    import copy
+
     import yaml
 
     cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
     text = _summary(cfg=cfg)
-    assert "DISABLED" in text
     assert "early stop" in text
     assert "retained snapshot" in text
+
+    on, off = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    on["train"]["use_ema"] = True
+    off["train"]["use_ema"] = False
+    assert "DISABLED" in _summary(cfg=off)
+    assert "EMA shadow" not in _summary(cfg=off)
+    assert "DISABLED" not in _summary(cfg=on)
+    assert "EMA shadow" in _summary(cfg=on)
 
 
 def test_step_line_does_not_say_ema():

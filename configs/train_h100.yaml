@@ -32,7 +32,7 @@ model:
 train:
   # New directory per parameterisation: weights are not comparable across them,
   # and keeping the old ones intact preserves the before/after baselines.
-  out_dir: runs/prior_h100_v4
+  out_dir: runs/prior_h100_v5
   # 38 train years ~ 13.9k days / batch 32 = ~433 steps/epoch.
   #
   # The v3 run was scheduled for 580 epochs and peaked at epoch 80-125 (35-54k
@@ -49,12 +49,16 @@ train:
   weight_decay: 0.01
   warmup_steps: 2000
   grad_clip: 1.0
-  use_ema: false                # validate and checkpoint the online weights.
-                                # A noisier best checkpoint is acceptable; EMA
-                                # costs a full state-dict traversal per step and
-                                # smooths over the epoch-to-epoch variation we
-                                # want to see.
-  ema_decay: 0.9995             # only used when use_ema is true
+  use_ema: true                 # RE-ENABLED after v4. Running without it, the
+                                # sampled validation peaked at epoch 20-25 and
+                                # reversed, and q50 correlation sat at 0.249 vs
+                                # v3's 0.349 at the same epoch while every other
+                                # metric was tied -- a noisier model, not just a
+                                # noisier checkpoint. Flow/diffusion samples come
+                                # from an instantaneous weight vector, and at
+                                # lr~1.3e-4 that vector is worse than its own
+                                # recent average.
+  ema_decay: 0.9995             # ~2k steps ~ 4.6 epochs at 433 steps/epoch
   cond_dropout: 0.0             # the CFG sweep showed w>1 DEGRADES placement
                                 # (q90 correlation 0.731 at w=1.0 -> 0.510 at
                                 # w=2.0) with no effect on bias or spread. At
