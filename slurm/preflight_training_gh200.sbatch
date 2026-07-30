@@ -13,14 +13,16 @@ set -euo pipefail
 
 module purge 2>/dev/null || true
 
-export ARM_CONDA="/home/afahad/nb/project/BDDA/miniforge3-aarch64"
 export ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
+PYTHON_BIN="$ENV_PREFIX/bin/python"
 export PYTHONNOUSERSITE=1
 unset PYTHONHOME
 unset PYTHONPATH
 
-source "$ARM_CONDA/etc/profile.d/conda.sh"
-conda activate "$ENV_PREFIX"
+[[ -x "$PYTHON_BIN" ]] || {
+    echo "ERROR: ARM training Python not found: $PYTHON_BIN"
+    exit 1
+}
 
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
@@ -28,8 +30,10 @@ export PYTHONPATH="$PWD/src"
 [[ -f scripts/preflight_training.py &&
    -f configs/train_h100.yaml &&
    -d data/processed/bd_wide.zarr &&
-   -f data/processed/stats.json ]] || {
-    echo "ERROR: Training code, packed data, or statistics are missing."
+   -f data/processed/stats.json &&
+   -f data/processed/normalization_diagnostics.json &&
+   -f data/processed/normalization_diagnostics.png ]] || {
+    echo "ERROR: Training code, data, statistics, or normalization diagnostics are missing."
     exit 1
 }
 
@@ -38,7 +42,7 @@ export PYTHONPATH="$PWD/src"
     exit 1
 }
 
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import platform
 import sys
 
@@ -73,7 +77,7 @@ echo "Repository: $SLURM_SUBMIT_DIR"
 echo "Preflight steps: $STEPS"
 echo "Report: $OUTPUT"
 
-srun --ntasks=1 python -u scripts/preflight_training.py \
+srun --ntasks=1 "$PYTHON_BIN" -u scripts/preflight_training.py \
     --config configs/train_h100.yaml \
     --steps "$STEPS" \
     --out "$OUTPUT"

@@ -13,15 +13,17 @@ set -euo pipefail
 
 module purge 2>/dev/null || true
 
-export ARM_CONDA="/home/afahad/nb/project/BDDA/miniforge3-aarch64"
 export ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
+PYTHON_BIN="$ENV_PREFIX/bin/python"
 
 export PYTHONNOUSERSITE=1
 unset PYTHONHOME
 unset PYTHONPATH
 
-source "$ARM_CONDA/etc/profile.d/conda.sh"
-conda activate "$ENV_PREFIX"
+[[ -x "$PYTHON_BIN" ]] || {
+    echo "ERROR: ARM training Python not found: $PYTHON_BIN"
+    exit 1
+}
 
 # Submit from the repository root, preferably through submit_train_gh200.sh.
 cd "$SLURM_SUBMIT_DIR"
@@ -37,7 +39,7 @@ export PYTHONPATH="$PWD/src"
     exit 1
 }
 
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import platform
 import sys
 
@@ -70,7 +72,7 @@ if [[ "${REQUIRE_TRAINING_PREFLIGHT:-1}" == "1" ]]; then
         echo "Run slurm/submit_preflight_training_gh200.sh first."
         exit 1
     }
-    python - "$PREFLIGHT_REPORT" <<'PY'
+    "$PYTHON_BIN" - "$PREFLIGHT_REPORT" <<'PY'
 import hashlib
 import json
 import subprocess
@@ -91,6 +93,8 @@ assert report["git_commit"] == head, (
 for path_key, hash_key in (
     ("config", "config_sha256"),
     ("stats", "stats_sha256"),
+    ("normalization_report", "normalization_report_sha256"),
+    ("normalization_figure", "normalization_figure_sha256"),
 ):
     path = Path(report[path_key])
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -111,6 +115,6 @@ if [[ "${RESUME_IF_AVAILABLE:-1}" == "1" &&
     TRAIN_ARGS+=(--resume runs/prior_h100/last.pt)
 fi
 
-srun --ntasks=1 python -u scripts/train.py \
+srun --ntasks=1 "$PYTHON_BIN" -u scripts/train.py \
     --config configs/train_h100.yaml \
     "${TRAIN_ARGS[@]}"

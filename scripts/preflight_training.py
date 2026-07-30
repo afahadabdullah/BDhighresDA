@@ -99,6 +99,10 @@ def main() -> None:
         "--out",
         default="data/processed/training_preflight.json",
     )
+    parser.add_argument(
+        "--normalization-report",
+        default="data/processed/normalization_diagnostics.json",
+    )
     args = parser.parse_args()
     if args.steps < 1:
         parser.error("--steps must be positive")
@@ -111,6 +115,33 @@ def main() -> None:
     stats_path = (repository / config["data"]["stats"]).resolve()
     zarr_path = (repository / config["data"]["zarr"]).resolve()
     stats = json.loads(stats_path.read_text())
+    normalization_report_path = (
+        repository / args.normalization_report
+    ).resolve()
+    normalization_report = json.loads(normalization_report_path.read_text())
+    current_commit = git_commit(repository)
+    if normalization_report.get("passed") is not True:
+        raise ValueError("normalization diagnostic report did not pass")
+    if normalization_report.get("git_commit") != current_commit:
+        raise ValueError(
+            "repository changed after normalization diagnostics; rerun them"
+        )
+    if normalization_report.get("stats_sha256") != file_sha256(stats_path):
+        raise ValueError(
+            "stats.json changed after normalization diagnostics; rerun them"
+        )
+    normalization_figure_path = (
+        repository / normalization_report["figure"]
+    ).resolve()
+    if not normalization_figure_path.is_file():
+        raise FileNotFoundError(
+            f"normalization diagnostic figure not found: "
+            f"{normalization_figure_path}"
+        )
+    if normalization_report.get("figure_sha256") != file_sha256(
+        normalization_figure_path
+    ):
+        raise ValueError("normalization diagnostic figure checksum changed")
 
     era5_channels = len(stats["cond_channels"])
     static_channels = len(stats["static_channels"])
@@ -290,11 +321,23 @@ def main() -> None:
     report = {
         "passed": True,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "git_commit": git_commit(repository),
+        "git_commit": current_commit,
         "config": str(config_path.relative_to(repository)),
         "config_sha256": file_sha256(config_path),
         "stats": str(stats_path.relative_to(repository)),
         "stats_sha256": file_sha256(stats_path),
+        "normalization_report": str(
+            normalization_report_path.relative_to(repository)
+        ),
+        "normalization_report_sha256": file_sha256(
+            normalization_report_path
+        ),
+        "normalization_figure": str(
+            normalization_figure_path.relative_to(repository)
+        ),
+        "normalization_figure_sha256": file_sha256(
+            normalization_figure_path
+        ),
         "zarr": str(zarr_path.relative_to(repository)),
         "gpu": torch.cuda.get_device_name(device),
         "torch_version": torch.__version__,

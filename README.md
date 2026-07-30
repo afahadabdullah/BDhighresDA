@@ -91,6 +91,12 @@ slurm/submit_pack_training_data.sh
 # Training-period normalization statistics (requires alignment pass):
 slurm/submit_compute_stats.sh
 
+# One large raw/normalized field diagnostic, required before GPU preflight:
+slurm/submit_normalization_diagnostics.sh
+
+# One-time only if bdda-gh200 does not yet import GPU-enabled PyTorch:
+slurm/setup_pytorch_gh200.sh
+
 # Real-data, production-batch GH200 preflight (no checkpoint is saved):
 slurm/submit_preflight_training_gh200.sh
 

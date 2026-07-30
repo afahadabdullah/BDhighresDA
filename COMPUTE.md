@@ -36,6 +36,19 @@ by absolute prefix, and then set `PYTHONPATH` to the repository's `src`
 directory. Do not load Miniforge, Anaconda, or CUDA modules, and do not source
 `mamba.sh` in these jobs.
 
+If the environment does not yet contain a GPU-enabled PyTorch build, install
+it once from a Grace Hopper node:
+
+```bash
+slurm/setup_pytorch_gh200.sh
+```
+
+This modifies the existing `bdda-gh200` environment; it does not create a new
+Conda environment. The setup follows the NCCS Grace Hopper example and
+defaults to PyTorch 2.7.1 from the CUDA 12.9 wheel index. It verifies CUDA and
+Hopper compute capability before reporting `PYTORCH SETUP PASSED`. See the
+[NCCS Prism ARM/PyTorch guidance](https://www.nccs.nasa.gov/using-prism/).
+
 ## Download CHIRPS
 
 The CHIRPS download is a CPU-only Slurm array submitted to Prism's
@@ -192,6 +205,20 @@ training days and the `log1p` precipitation transform. The job refuses to run
 unless `alignment_qc.json` reports a lag-zero pass. Override its inputs with
 the `STATS_*` environment variables documented in `slurm/compute_stats.sbatch`.
 
+Create and numerically validate the normalization diagnostics next:
+
+```bash
+slurm/submit_normalization_diagnostics.sh
+```
+
+The job writes one large figure,
+`data/processed/normalization_diagnostics.png`, containing paired raw and
+normalized maps and distributions for CHIRPS and all six ERA5 predictors,
+followed by all seven static fields. Its companion
+`normalization_diagnostics.json` checks finite values and approximate
+zero-mean/unit-standard-deviation behavior on a deterministic training sample.
+Both files are mandatory inputs to the GH200 preflight.
+
 ## Submit training
 
 First run a short real-data preflight on one GH200:
@@ -204,7 +231,8 @@ It uses the production batch size and model, exercises the multi-worker Zarr
 loader, runs two optimizer/EMA steps and one validation batch, reports peak GPU
 memory, and writes `data/processed/training_preflight.json`. It saves no model
 checkpoint. Do not start the full run unless its log ends with
-`PREFLIGHT PASSED`.
+`PREFLIGHT PASSED`. The preflight refuses to run unless the normalization
+diagnostic report passed and the figure checksum is unchanged.
 
 Then use the training wrapper from any directory. It resolves the repository
 root and creates `logs` before calling `sbatch`, which is necessary because
