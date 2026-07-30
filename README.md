@@ -39,7 +39,7 @@ the data plan, and the experiment/ablation list.
 | 1. CHIRPS target | `scripts/01_download_chirps.py` |
 | 2. IMERG observations | `scripts/02_download_imerg.py` |
 | 3. DEM + static fields (orography, mask, position) | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
-| 4. Regrid + pack to Zarr | `scripts/04_regrid_and_pack.py` |
+| 4. Regrid + pack to Zarr, then alignment QC | `scripts/04_regrid_and_pack.py`, `scripts/04_check_alignment.py` |
 | 5. Station QC + pseudo-stations | `scripts/05_prepare_stations.py` |
 | 6. Normalisation stats | `scripts/06_compute_stats.py` |
 | 7. IMERG bias correction | `scripts/07_bias_correct_imerg.py` |
@@ -67,15 +67,14 @@ slurm/setup_earthmover_env.sh
 conda run -p ../envs/bdda-earthmover \
   python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
-python scripts/02_download_imerg.py  --start 2000 --end 2025 --out data/raw/imerg
 python scripts/03_download_dem.py --out data/raw/dem/copernicus_glo90_wide.nc
 python scripts/03_build_static.py --dem data/raw/dem/copernicus_glo90_wide.nc \
        --chirps data/raw/chirps/chirps_wide_2010.nc --out data/static/static_wide.nc
 python scripts/04_regrid_and_pack.py --start 1981 --end 2025 --out data/processed/bd_wide.zarr
+python scripts/04_check_alignment.py --zarr data/processed/bd_wide.zarr \
+       --out data/processed/alignment_qc.json
 python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
        --train-years 1981 2018 --transform log1p --out data/processed/stats.json
-python scripts/05_prepare_stations.py --csv data/stations/bmd_daily_raw.csv \
-       --zarr data/processed/bd_wide.zarr --out data/stations
 
 # On Prism, submit resumable CHIRPS downloads to CPU-only nodes:
 slurm/submit_download_chirps.sh
@@ -85,6 +84,9 @@ slurm/submit_download_era5.sh
 
 # DEM: public Copernicus GLO-90, then build all seven static channels:
 slurm/submit_dem_static.sh
+
+# ERA5 + CHIRPS + static training store, followed by lag-alignment QC:
+slurm/submit_pack_training_data.sh
 
 # 3. train on PRISM GH200 (wrapper creates logs before submitting)
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior

@@ -152,6 +152,34 @@ those defaults with `DEM_PARTITION` and `DEM_JOBS`. Source 90 m tiles are
 deleted after the compact regional product passes validation; set
 `DEM_KEEP_TILES=1` to retain them.
 
+## Pack training data and check daily alignment
+
+After all 45 ERA5 and CHIRPS annual files and `data/static/static_wide.nc`
+exist, submit:
+
+```bash
+slurm/submit_pack_training_data.sh
+```
+
+This CPU-only job creates the model-training store
+`data/processed/bd_wide.zarr` from ERA5, CHIRPS and the static fields. IMERG
+and gauges are deliberately excluded because they enter only during
+assimilation. Packing is resumable by completed year; rerun the same command
+after a timeout or node failure.
+
+The same job then computes cosine-latitude-weighted regional daily rainfall
+series and correlates CHIRPS day `t` against ERA5 day `t + lag` for lags
+−2 through +2. It fails unless the maximum correlation occurs at lag zero and
+writes the detailed result to:
+
+```text
+data/processed/alignment_qc.json
+```
+
+Override the default range or paths with `PACK_START`, `PACK_END`,
+`PACK_ERA5`, `PACK_CHIRPS`, `PACK_STATIC`, `PACK_OUT`, and `PACK_QC_OUT`.
+The default partition is `grace-cpuonly`; override it with `PACK_PARTITION`.
+
 ## Submit training
 
 Use the wrapper from any directory. It resolves the repository root and

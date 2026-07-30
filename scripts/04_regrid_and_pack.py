@@ -1,32 +1,33 @@
-#!/usr/bin/env python
-"""Regrid everything onto the 0.05 deg wide grid and pack into a single Zarr store.
+#!/usr/bin/env python3
+"""Pack ERA5, CHIRPS and static fields into the model-training Zarr store.
+
+This stage intentionally excludes IMERG and gauges. They are observations used
+later during assimilation, not predictors or training targets.
+
+The output has fixed time dimensions and is resumable by year. A year is added
+to the ``completed_years`` attribute only after its arrays have been validated
+and written, so rerunning the same command safely continues an interrupted job.
 
     python scripts/04_regrid_and_pack.py --start 1981 --end 2025 \
         --out data/processed/bd_wide.zarr
 
-Time alignment (get this right or everything downstream is subtly wrong)
-------------------------------------------------------------------------
-* CHIRPS day D  = 00:00 UTC D to 00:00 UTC D+1 accumulation.
-* ERA5 tp is a backward hourly accumulation, so day D = sum of steps
-  01:00(D) ... 00:00(D+1).
-* IMERG 3IMERGDF day D is labelled S000000-E235959 on day D, i.e. already
-  00-24 UTC.  Its ``precipitation`` variable is a RATE in mm/hr -> multiply
-  by 24 for mm/day.  IMERG is written to its OWN array, not into ``cond``:
-  it is an observation assimilated through the likelihood, never a predictor
-  fed to the network (see docs/METHODOLOGY.md Section 4).
-* State variables (winds, humidity, CAPE) are averaged over 00-24 UTC of day D.
+Time conventions
+----------------
+CHIRPS and the Earthmover ERA5 files both represent 00:00-24:00 UTC day D.
+``00_download_era5.py`` has already summed hourly ``tp`` and averaged the five
+state variables before this script reads them.
 
-Regridding
-----------
-Precipitation is regridded CONSERVATIVELY (xesmf if available, else an
-area-weighted block mean followed by bilinear); state variables are regridded
-bilinearly.  Using bilinear for precipitation coarse->fine is acceptable
-(it is just a smooth prior for the network) but conservative preserves the
-domain-mean rainfall, which makes the ERA5/IMERG baselines fair.
+Spatial conventions
+-------------------
+ERA5 precipitation is conservatively remapped from 0.25 degrees to the exact
+0.05-degree WIDE grid with separable spherical cell-overlap weights. State
+variables are bilinearly interpolated. CHIRPS is already on a 0.05-degree grid
+and is nearest-neighbour selected onto the exact project coordinates.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -37,215 +38,534 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.grids import WIDE  # noqa: E402
 
-# Earthmover ERA5 short name -> conditioning channel.  These six surface
-# predictors are written as already-aggregated daily fields by
-# 00_download_era5.py.
+SCHEMA_VERSION = 1
 CORE_MAP = {
-    "tp": "era5_tp",          # background model rainfall
-    "tcwv": "era5_tcwv",      # column moisture
-    "cape": "era5_cape",      # instability
-    "u10": "era5_u10",        # low-level zonal flow
-    "v10": "era5_v10",        # low-level meridional flow
-    "msl": "era5_msl",        # synoptic circulation
+    "tp": "era5_tp",
+    "tcwv": "era5_tcwv",
+    "cape": "era5_cape",
+    "u10": "era5_u10",
+    "v10": "era5_v10",
+    "msl": "era5_msl",
 }
-EXTENDED_MAP = {
-    "t2m": "era5_t2m", "d2m": "era5_d2m",
-    "cin": "era5_cin", "cp": "era5_cp", "p84.162": "era5_mfd",
-    "vertical_integral_of_divergence_of_moisture_flux": "era5_mfd",
-}
-PL_VARS = ["u", "v", "q", "w"]
-PL_LEVELS = [850, 500]
+CONDITION_CHANNELS = list(CORE_MAP.values())
 
 
-def _rename_coords(ds: xr.Dataset) -> xr.Dataset:
-    ren = {}
-    for a, b in (("latitude", "lat"), ("longitude", "lon"), ("valid_time", "time")):
-        if a in ds.coords or a in ds.dims:
-            ren[a] = b
-    ds = ds.rename(ren)
-    if "lat" in ds.coords and ds.lat[0] > ds.lat[-1]:
-        ds = ds.sortby("lat")
-    return ds
+def _rename_coords(dataset: xr.Dataset) -> xr.Dataset:
+    rename = {}
+    for old, new in (
+        ("latitude", "lat"),
+        ("longitude", "lon"),
+        ("valid_time", "time"),
+    ):
+        if old in dataset.coords or old in dataset.dims:
+            rename[old] = new
+    dataset = dataset.rename(rename)
+    if "lat" in dataset.coords and bool((dataset.lat[0] > dataset.lat[-1]).item()):
+        dataset = dataset.sortby("lat")
+    return dataset
 
 
-def to_grid(da: xr.DataArray, grid, conservative: bool = False) -> xr.DataArray:
-    """Regrid a lat/lon DataArray onto the target grid."""
-    if conservative:
-        try:
-            import xesmf as xe
-
-            target = xr.Dataset(coords=dict(lat=grid.lat, lon=grid.lon))
-            rg = xe.Regridder(da, target, "conservative_normed", periodic=False)
-            return rg(da)
-        except Exception as exc:  # pragma: no cover
-            print(f"  [regrid] xesmf unavailable ({exc}); falling back to bilinear")
-    return da.interp(lat=grid.lat, lon=grid.lon, method="linear",
-                     kwargs=dict(fill_value=None))
+def expected_time(year: int) -> pd.DatetimeIndex:
+    return pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")
 
 
-def daily_era5(sfc_files, pl_files, grid, days, extended=False) -> tuple[np.ndarray, list[str]]:
-    if not sfc_files:
-        raise FileNotFoundError("no era5_daily_YYYY.nc files were found")
-    sfc = _rename_coords(xr.open_mfdataset(sfc_files, combine="by_coords"))
-    pl = _rename_coords(xr.open_mfdataset(pl_files, combine="by_coords")) if pl_files else None
-    sfc_map = dict(CORE_MAP, **(EXTENDED_MAP if extended else {}))
+def coordinate_edges(centres: np.ndarray, *, latitude: bool = False) -> np.ndarray:
+    """Infer monotonically increasing cell edges from one-dimensional centres."""
+    centres = np.asarray(centres, dtype=np.float64)
+    if centres.ndim != 1 or len(centres) < 2:
+        raise ValueError("coordinate centres must be a one-dimensional array")
+    if not np.all(np.diff(centres) > 0):
+        raise ValueError("coordinate centres must be strictly increasing")
+    edges = np.empty(len(centres) + 1, dtype=np.float64)
+    edges[1:-1] = 0.5 * (centres[:-1] + centres[1:])
+    edges[0] = centres[0] - 0.5 * (centres[1] - centres[0])
+    edges[-1] = centres[-1] + 0.5 * (centres[-1] - centres[-2])
+    if latitude:
+        if edges[0] < -90.0 - 1e-6 or edges[-1] > 90.0 + 1e-6:
+            raise ValueError("latitude edges fall outside -90..90 degrees")
+        edges = np.sin(np.deg2rad(np.clip(edges, -90.0, 90.0)))
+    return edges
 
-    if sfc.attrs.get("temporal_resolution") != "daily":
+
+def overlap_weights(
+    source_centres: np.ndarray,
+    target_centres: np.ndarray,
+    *,
+    latitude: bool = False,
+) -> np.ndarray:
+    """Return target-by-source conservative cell-overlap weights."""
+    source_edges = coordinate_edges(source_centres, latitude=latitude)
+    target_edges = coordinate_edges(target_centres, latitude=latitude)
+    left = np.maximum(target_edges[:-1, None], source_edges[None, :-1])
+    right = np.minimum(target_edges[1:, None], source_edges[None, 1:])
+    overlap = np.maximum(right - left, 0.0)
+    target_width = target_edges[1:] - target_edges[:-1]
+    coverage = overlap.sum(axis=1)
+    if np.any(coverage < target_width * (1.0 - 1e-6)):
+        missing = np.where(coverage < target_width * (1.0 - 1e-6))[0]
         raise ValueError(
-            "ERA5 inputs are not Earthmover daily files; run "
-            "scripts/00_download_era5.py before packing"
+            "source grid does not cover target cells "
+            f"{missing[:5].tolist()}{'...' if len(missing) > 5 else ''}"
+        )
+    return overlap / coverage[:, None]
+
+
+def conservative_precipitation(
+    data: xr.DataArray,
+    target_lat: np.ndarray,
+    target_lon: np.ndarray,
+) -> np.ndarray:
+    """Area-average a regular lat/lon precipitation field onto a target grid."""
+    data = data.transpose("time", "lat", "lon")
+    source = np.asarray(data.values, dtype=np.float32)
+    if not np.isfinite(source).all():
+        raise ValueError("ERA5 precipitation contains non-finite source values")
+    source = np.clip(source, 0.0, None)
+
+    lat_weights = overlap_weights(data.lat.values, target_lat, latitude=True)
+    lon_weights = overlap_weights(data.lon.values, target_lon)
+    intermediate = np.einsum(
+        "ys,tsl->tyl", lat_weights, source, optimize=True
+    )
+    result = np.einsum(
+        "xl,tyl->tyx", lon_weights, intermediate, optimize=True
+    )
+    return result.astype(np.float32)
+
+
+def validate_time_axis(dataset: xr.Dataset, year: int, path: Path) -> None:
+    if "time" not in dataset.coords:
+        raise ValueError(f"{path} does not contain a time coordinate")
+    actual = pd.DatetimeIndex(dataset.time.values)
+    expected = expected_time(year)
+    if not actual.equals(expected):
+        raise ValueError(
+            f"{path} has an incomplete time axis: expected {len(expected)} "
+            f"days {expected[0].date()}..{expected[-1].date()}, found "
+            f"{len(actual)} days"
         )
 
-    # Earthmover extraction already aligned tp to 00-24 UTC, summed it and
-    # converted it to mm/day.  State variables are already daily means.
-    tp_daily = sfc["tp"].reindex(time=days)
 
-    channels, names = [], []
-    channels.append(to_grid(tp_daily, grid, conservative=True))
-    names.append("era5_tp")
+def validate_source_inventory(
+    years: list[int],
+    era5_dir: Path,
+    chirps_dir: Path,
+) -> tuple[dict[int, Path], dict[int, Path]]:
+    """Validate metadata and edge records for every requested raw-data year."""
+    era5_paths = {year: era5_dir / f"era5_daily_{year}.nc" for year in years}
+    chirps_paths = {
+        year: chirps_dir / f"chirps_wide_{year}.nc" for year in years
+    }
+    missing_era5 = [year for year, path in era5_paths.items() if not path.is_file()]
+    missing_chirps = [
+        year for year, path in chirps_paths.items() if not path.is_file()
+    ]
+    if missing_era5 or missing_chirps:
+        raise FileNotFoundError(
+            "raw-data inventory is incomplete; "
+            f"missing ERA5 years={missing_era5}, "
+            f"missing CHIRPS years={missing_chirps}"
+        )
 
-    for v, name in sfc_map.items():
-        if v == "tp" or v not in sfc:
-            continue
-        d = sfc[v].reindex(time=days)
-        channels.append(to_grid(d, grid))
-        names.append(name)
+    reference_lat = reference_lon = None
+    for year in years:
+        with xr.open_dataset(era5_paths[year]) as raw:
+            dataset = _rename_coords(raw)
+            validate_time_axis(dataset, year, era5_paths[year])
+            missing = set(CORE_MAP) - set(dataset.data_vars)
+            if missing:
+                raise ValueError(
+                    f"{era5_paths[year]} is missing ERA5 variables "
+                    f"{sorted(missing)}"
+                )
+            if dataset.attrs.get("temporal_resolution") != "daily":
+                raise ValueError(
+                    f"{era5_paths[year]} is not an Earthmover daily ERA5 file"
+                )
+            if reference_lat is None:
+                reference_lat = dataset.lat.values.copy()
+                reference_lon = dataset.lon.values.copy()
+                overlap_weights(reference_lat, WIDE.lat, latitude=True)
+                overlap_weights(reference_lon, WIDE.lon)
+            else:
+                np.testing.assert_allclose(dataset.lat.values, reference_lat)
+                np.testing.assert_allclose(dataset.lon.values, reference_lon)
+            edges = dataset[list(CORE_MAP)].isel(time=[0, -1]).load()
+            for variable in CORE_MAP:
+                if not np.isfinite(edges[variable].values).all():
+                    raise ValueError(
+                        f"{era5_paths[year]} has non-finite {variable} edge data"
+                    )
 
-    for v in (PL_VARS if (extended and pl is not None) else []):
-        if v not in pl:
-            continue
-        for lev in PL_LEVELS:
-            if lev not in pl["pressure_level"].values:
-                continue
-            d = pl[v].sel(pressure_level=lev).resample(time="1D").mean().reindex(time=days)
-            channels.append(to_grid(d, grid))
-            names.append(f"era5_{v}{lev}")
-
-    # ---- derived channels ------------------------------------------------
-    idx = {n: i for i, n in enumerate(names)}
-
-    if extended and {"era5_u850", "era5_u500", "era5_v850", "era5_v500"} <= set(idx):
-        du = channels[idx["era5_u500"]] - channels[idx["era5_u850"]]
-        dv = channels[idx["era5_v500"]] - channels[idx["era5_v850"]]
-        channels.append(np.hypot(du, dv))
-        names.append("era5_shear")
-
-    arr = np.stack([c.transpose("time", "lat", "lon").values for c in channels], axis=1)
-    return arr.astype(np.float32), names
+        with xr.open_dataset(chirps_paths[year]) as raw:
+            dataset = _rename_coords(raw)
+            validate_time_axis(dataset, year, chirps_paths[year])
+            if "precip" not in dataset:
+                raise ValueError(
+                    f"{chirps_paths[year]} does not contain precipitation"
+                )
+            edge = dataset["precip"].isel(time=[0, -1]).load()
+            if not np.isfinite(edge.values).any():
+                raise ValueError(
+                    f"{chirps_paths[year]} has no finite edge precipitation"
+                )
+        print(f"inventory OK: {year}", flush=True)
+    return era5_paths, chirps_paths
 
 
-def daily_imerg(files, grid, days) -> np.ndarray:
-    if not files:
-        return np.full((len(days), 1, grid.nlat, grid.nlon), np.nan, np.float32)
-    ds = _rename_coords(xr.open_mfdataset(files, combine="by_coords"))
-    var = "precipitation" if "precipitation" in ds else "precipitationCal"
-    da = ds[var]
-    if set(da.dims) >= {"lon", "lat"} and da.sizes.get("lon", 0) > da.sizes.get("lat", 0):
-        pass
-    da = da.transpose("time", "lat", "lon")
-    da = da * 24.0  # mm/hr -> mm/day
-    da = to_grid(da, grid, conservative=True).reindex(time=days)
-    return da.values[:, None].astype(np.float32)
+def load_static(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    with xr.open_dataset(path) as dataset:
+        required = {"static", "valid"}
+        missing = required - set(dataset.data_vars)
+        if missing:
+            raise ValueError(f"{path} is missing variables {sorted(missing)}")
+        static = dataset["static"].values.astype(np.float32)
+        valid = dataset["valid"].values.astype(np.float32)
+        channels = list(map(str, dataset.channel.values))
+        np.testing.assert_allclose(dataset.lat.values, WIDE.lat, atol=1e-6)
+        np.testing.assert_allclose(dataset.lon.values, WIDE.lon, atol=1e-6)
+    if static.shape[1:] != WIDE.shape or valid.shape != WIDE.shape:
+        raise ValueError(
+            f"{path} has static/valid shapes {static.shape}/{valid.shape}, "
+            f"expected (C, {WIDE.nlat}, {WIDE.nlon})/{WIDE.shape}"
+        )
+    if not np.isfinite(static).all() or not np.isfinite(valid).all():
+        raise ValueError(f"{path} contains non-finite static data")
+    if not np.any(valid > 0.5):
+        raise ValueError(f"{path} has an empty land-validity mask")
+    return static, valid, channels
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--start", type=int, default=1981)
-    ap.add_argument("--end", type=int, default=2025)
-    ap.add_argument("--era5", default="data/raw/era5")
-    ap.add_argument("--chirps", default="data/raw/chirps")
-    ap.add_argument("--imerg", default="data/raw/imerg")
-    ap.add_argument("--static", default="data/static/static_wide.nc")
-    ap.add_argument("--out", default="data/processed/bd_wide.zarr")
-    ap.add_argument("--chunk-years", type=int, default=1)
-    ap.add_argument("--extended", action="store_true",
-                    help="include the optional ablation channels (must match "
-                         "how 00_download_era5.py was run)")
-    args = ap.parse_args()
-
+def open_zarr_group(path: Path, mode: str):
     import zarr
 
-    grid = WIDE
-    days_all = pd.date_range(f"{args.start}-01-01", f"{args.end}-12-31", freq="D")
-    st = xr.open_dataset(args.static)
-    static = st["static"].values.astype(np.float32)
-    valid = st["valid"].values.astype(np.float32)
+    try:
+        return zarr.open_group(str(path), mode=mode, zarr_format=2)
+    except TypeError:
+        return zarr.open_group(str(path), mode=mode, zarr_version=2)
 
-    root = zarr.open(args.out, mode="w")
-    root.create_dataset("static", data=static)
-    root.create_dataset("valid", data=valid)
-    root.attrs["static_channels"] = list(map(str, st["channel"].values))
-    root.attrs["grid"] = dict(name=grid.name, lon_min=grid.lon_min, lat_min=grid.lat_min,
-                              nlon=grid.nlon, nlat=grid.nlat, res=grid.res)
-    root.create_dataset("lat", data=grid.lat.astype(np.float32))
-    root.create_dataset("lon", data=grid.lon.astype(np.float32))
 
-    target_z = cond_z = imerg_z = None
-    times_out, cond_names = [], None
-    offset = 0
+def ensure_array(
+    group,
+    name: str,
+    *,
+    shape: tuple[int, ...],
+    chunks: tuple[int, ...],
+    dtype: str,
+    fill_value=0,
+):
+    from numcodecs import Blosc
 
-    for year in range(args.start, args.end + 1, args.chunk_years):
-        yr_end = min(year + args.chunk_years - 1, args.end)
-        days = pd.date_range(f"{year}-01-01", f"{yr_end}-12-31", freq="D")
-        print(f"=== {year}-{yr_end}: {len(days)} days", flush=True)
-
-        # --- target: CHIRPS
-        cf = sorted(Path(args.chirps).glob(f"chirps_wide_{{{year}..{yr_end}}}.nc")) or [
-            Path(args.chirps) / f"chirps_wide_{y}.nc" for y in range(year, yr_end + 1)
-        ]
-        cf = [p for p in cf if p.exists()]
-        if not cf:
-            print(f"  no CHIRPS for {year}, skipping")
-            continue
-        ch = _rename_coords(xr.open_mfdataset([str(p) for p in cf], combine="by_coords"))
-        tgt = ch["precip"].interp(lat=grid.lat, lon=grid.lon, method="nearest")
-        tgt = tgt.reindex(time=days).transpose("time", "lat", "lon").values.astype(np.float32)
-
-        # --- conditioning: ERA5 (+ IMERG)
-        sfc = sorted(Path(args.era5).glob(f"era5_daily_{year}.nc"))
-        pl = sorted(Path(args.era5).glob(f"era5_pl_{year}*.nc"))
-        for y in range(year + 1, yr_end + 1):
-            sfc += sorted(Path(args.era5).glob(f"era5_daily_{y}.nc"))
-            pl += sorted(Path(args.era5).glob(f"era5_pl_{y}*.nc"))
-        era, names = daily_era5([str(p) for p in sfc], [str(p) for p in pl], grid, days,
-                                extended=args.extended)
-
-        im_files = []
-        for y in range(year, yr_end + 1):
-            im_files += sorted(Path(args.imerg).glob(f"*3IMERG.{y}*.nc4"))
-        imerg = daily_imerg([str(p) for p in im_files], grid, days)
-        cond = era
-
-        if target_z is None:
-            cond_names = names
-            root.attrs["cond_channels"] = cond_names
-            root.attrs["era5_tp_cond_index"] = cond_names.index("era5_tp")
-            target_z = root.create_dataset(
-                "target", shape=(0, grid.nlat, grid.nlon), chunks=(32, grid.nlat, grid.nlon),
-                dtype="f4",
+    if name in group:
+        array = group[name]
+        if tuple(array.shape) != tuple(shape):
+            raise ValueError(
+                f"existing {name} shape {array.shape} does not match {shape}"
             )
-            cond_z = root.create_dataset(
-                "cond", shape=(0, cond.shape[1], grid.nlat, grid.nlon),
-                chunks=(16, cond.shape[1], grid.nlat, grid.nlon), dtype="f4",
+        if np.dtype(array.dtype) != np.dtype(dtype):
+            raise ValueError(
+                f"existing {name} dtype {array.dtype} does not match {dtype}"
             )
-            imerg_z = root.create_dataset(
-                "imerg", shape=(0, grid.nlat, grid.nlon),
-                chunks=(32, grid.nlat, grid.nlon), dtype="f4",
-            )
-        elif names != cond_names:
-            raise RuntimeError(f"channel mismatch in {year}: {set(names) ^ set(cond_names)}")
+        return array
+    return group.create_dataset(
+        name,
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        compressor=Blosc(
+            cname="zstd",
+            clevel=3,
+            shuffle=Blosc.BITSHUFFLE,
+        ),
+        fill_value=fill_value,
+    )
 
-        target_z.append(tgt)
-        cond_z.append(cond)
-        imerg_z.append(imerg[:, 0])
-        times_out.append(days.values)
-        offset += len(days)
 
-    root.create_dataset("time", data=np.concatenate(times_out).astype("datetime64[ns]").view("i8"))
+def initialize_store(
+    output: Path,
+    days: pd.DatetimeIndex,
+    years: list[int],
+    static: np.ndarray,
+    valid: np.ndarray,
+    static_channels: list[str],
+):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    existed = output.exists()
+    root = open_zarr_group(output, "a")
+    if existed and "schema_version" not in root.attrs:
+        raise ValueError(
+            f"{output} is an older or unrecognized store. Move it aside or "
+            "choose a different --out path before running the resumable packer."
+        )
+    if "schema_version" in root.attrs:
+        expected = {
+            "schema_version": SCHEMA_VERSION,
+            "start_year": years[0],
+            "end_year": years[-1],
+            "cond_channels": CONDITION_CHANNELS,
+            "static_channels": static_channels,
+        }
+        for key, value in expected.items():
+            if root.attrs.get(key) != value:
+                raise ValueError(
+                    f"{output} attribute {key}={root.attrs.get(key)!r}, "
+                    f"expected {value!r}"
+                )
+    else:
+        root.attrs.update(
+            schema_version=SCHEMA_VERSION,
+            start_year=years[0],
+            end_year=years[-1],
+            completed_years=[],
+            complete=False,
+            cond_channels=CONDITION_CHANNELS,
+            static_channels=static_channels,
+            era5_tp_cond_index=0,
+            observations=(
+                "not included; IMERG and gauges are added during assimilation"
+            ),
+            grid={
+                "name": WIDE.name,
+                "lon_min": WIDE.lon_min,
+                "lat_min": WIDE.lat_min,
+                "nlon": WIDE.nlon,
+                "nlat": WIDE.nlat,
+                "res": WIDE.res,
+            },
+        )
+
+    ntime = len(days)
+    arrays = {
+        "time": ensure_array(
+            root,
+            "time",
+            shape=(ntime,),
+            chunks=(min(1024, ntime),),
+            dtype="i8",
+        ),
+        "lat": ensure_array(
+            root,
+            "lat",
+            shape=(WIDE.nlat,),
+            chunks=(WIDE.nlat,),
+            dtype="f4",
+        ),
+        "lon": ensure_array(
+            root,
+            "lon",
+            shape=(WIDE.nlon,),
+            chunks=(WIDE.nlon,),
+            dtype="f4",
+        ),
+        "static": ensure_array(
+            root,
+            "static",
+            shape=static.shape,
+            chunks=(1, WIDE.nlat, WIDE.nlon),
+            dtype="f4",
+        ),
+        "valid": ensure_array(
+            root,
+            "valid",
+            shape=valid.shape,
+            chunks=WIDE.shape,
+            dtype="f4",
+        ),
+        "target": ensure_array(
+            root,
+            "target",
+            shape=(ntime, *WIDE.shape),
+            chunks=(1, *WIDE.shape),
+            dtype="f4",
+            fill_value=np.nan,
+        ),
+        "cond": ensure_array(
+            root,
+            "cond",
+            shape=(ntime, len(CONDITION_CHANNELS), *WIDE.shape),
+            chunks=(1, len(CONDITION_CHANNELS), *WIDE.shape),
+            dtype="f4",
+            fill_value=np.nan,
+        ),
+    }
+    arrays["time"][:] = days.values.astype("datetime64[ns]").view("i8")
+    arrays["lat"][:] = WIDE.lat.astype(np.float32)
+    arrays["lon"][:] = WIDE.lon.astype(np.float32)
+    arrays["static"][:] = static
+    arrays["valid"][:] = valid
     root.attrs["time_units"] = "nanoseconds since 1970-01-01"
-    print(f"wrote {args.out}: T={offset}, ERA5 cond channels={len(cond_names)}")
-    print("cond channels:", cond_names)
-    print("imerg is stored separately -- it is an observation, not a predictor")
+    return root, arrays
+
+
+def load_year(
+    era5_path: Path,
+    chirps_path: Path,
+    year: int,
+    valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    days = expected_time(year)
+    with xr.open_dataset(chirps_path) as raw:
+        dataset = _rename_coords(raw)
+        target = dataset["precip"].interp(
+            lat=WIDE.lat,
+            lon=WIDE.lon,
+            method="nearest",
+        )
+        target = target.reindex(time=days).transpose("time", "lat", "lon")
+        target_values = target.values.astype(np.float32)
+
+    with xr.open_dataset(era5_path) as raw:
+        dataset = _rename_coords(raw)
+        dataset = dataset.reindex(time=days)
+        precipitation = conservative_precipitation(
+            dataset["tp"],
+            WIDE.lat,
+            WIDE.lon,
+        )
+        channels = [precipitation]
+        for variable in list(CORE_MAP)[1:]:
+            field = dataset[variable].interp(
+                lat=WIDE.lat,
+                lon=WIDE.lon,
+                method="linear",
+            )
+            channels.append(
+                field.transpose("time", "lat", "lon").values.astype(np.float32)
+            )
+        conditions = np.stack(channels, axis=1).astype(np.float32)
+
+    expected_target_shape = (len(days), *WIDE.shape)
+    expected_cond_shape = (
+        len(days),
+        len(CONDITION_CHANNELS),
+        *WIDE.shape,
+    )
+    if target_values.shape != expected_target_shape:
+        raise ValueError(
+            f"{chirps_path} produced {target_values.shape}, "
+            f"expected {expected_target_shape}"
+        )
+    if conditions.shape != expected_cond_shape:
+        raise ValueError(
+            f"{era5_path} produced {conditions.shape}, "
+            f"expected {expected_cond_shape}"
+        )
+    if not np.isfinite(conditions).all():
+        raise ValueError(f"{era5_path} produced non-finite condition values")
+    land_values = target_values[:, valid > 0.5]
+    if not np.isfinite(land_values).all():
+        missing = int((~np.isfinite(land_values)).sum())
+        raise ValueError(
+            f"{chirps_path} has {missing} missing target values over valid land"
+        )
+    if np.nanmin(target_values) < 0:
+        raise ValueError(f"{chirps_path} contains negative precipitation")
+    return target_values, conditions
+
+
+def validate_completed_edge(
+    arrays: dict,
+    start: int,
+    stop: int,
+    valid: np.ndarray,
+) -> None:
+    for index in (start, stop - 1):
+        conditions = np.asarray(arrays["cond"][index])
+        target = np.asarray(arrays["target"][index])
+        if not np.isfinite(conditions).all():
+            raise ValueError(f"stored conditions are invalid at time index {index}")
+        if not np.isfinite(target[valid > 0.5]).all():
+            raise ValueError(f"stored target is invalid at time index {index}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start", type=int, default=1981)
+    parser.add_argument("--end", type=int, default=2025)
+    parser.add_argument("--era5", default="data/raw/era5")
+    parser.add_argument("--chirps", default="data/raw/chirps")
+    parser.add_argument("--static", default="data/static/static_wide.nc")
+    parser.add_argument("--out", default="data/processed/bd_wide.zarr")
+    args = parser.parse_args()
+    if args.start > args.end:
+        parser.error("--start must be less than or equal to --end")
+
+    years = list(range(args.start, args.end + 1))
+    days = pd.date_range(f"{args.start}-01-01", f"{args.end}-12-31", freq="D")
+    era5_paths, chirps_paths = validate_source_inventory(
+        years,
+        Path(args.era5),
+        Path(args.chirps),
+    )
+    static, valid, static_channels = load_static(Path(args.static))
+    root, arrays = initialize_store(
+        Path(args.out),
+        days,
+        years,
+        static,
+        valid,
+        static_channels,
+    )
+
+    completed = {int(year) for year in root.attrs.get("completed_years", [])}
+    summaries = json.loads(root.attrs.get("year_summaries_json", "{}"))
+    all_years = days.year.to_numpy()
+    for year in years:
+        indices = np.flatnonzero(all_years == year)
+        start = int(indices[0])
+        stop = int(indices[-1]) + 1
+        if year in completed:
+            validate_completed_edge(arrays, start, stop, valid)
+            print(f"already packed: {year}", flush=True)
+            continue
+
+        print(f"packing {year}: time indices {start}:{stop}", flush=True)
+        target, conditions = load_year(
+            era5_paths[year],
+            chirps_paths[year],
+            year,
+            valid,
+        )
+        arrays["target"][start:stop] = target
+        arrays["cond"][start:stop] = conditions
+        validate_completed_edge(arrays, start, stop, valid)
+
+        summaries[str(year)] = {
+            "days": int(stop - start),
+            "target_land_mean_mm_day": float(
+                np.nanmean(target[:, valid > 0.5])
+            ),
+            "era5_tp_land_mean_mm_day": float(
+                conditions[:, 0, valid > 0.5].mean()
+            ),
+        }
+        completed.add(year)
+        root.attrs["year_summaries_json"] = json.dumps(
+            summaries,
+            sort_keys=True,
+        )
+        root.attrs["completed_years"] = sorted(completed)
+        print(f"completed {year}", flush=True)
+
+    missing = sorted(set(years) - completed)
+    if missing:
+        raise RuntimeError(f"packed store is still missing years {missing}")
+    root.attrs["complete"] = True
+
+    try:
+        import zarr
+
+        zarr.consolidate_metadata(str(args.out))
+    except Exception as exc:
+        print(f"warning: metadata consolidation was unavailable: {exc}", flush=True)
+
+    print(
+        f"wrote {args.out}: T={len(days)}, "
+        f"ERA5 channels={len(CONDITION_CHANNELS)}, years={years[0]}-{years[-1]}",
+        flush=True,
+    )
+    print("condition channels:", CONDITION_CHANNELS, flush=True)
+    print("IMERG and gauges are not stored in the training dataset.", flush=True)
 
 
 if __name__ == "__main__":

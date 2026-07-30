@@ -7,10 +7,11 @@ Store layout (all on the 0.05 deg target grid, latitude ascending)::
       lat       (H,)  lon (W,)
       target    (T, H, W)         CHIRPS daily precip, mm/day, NaN over ocean
       cond      (T, Ccond, H, W)  ERA5 predictors only, already regridded
-      imerg     (T, H, W)         IMERG daily precip, mm/day -- an OBSERVATION,
-                                  deliberately NOT part of ``cond``
       static    (Cstat, H, W)     orography, land-sea mask, lat/lon encodings
       valid     (H, W)            1 where CHIRPS has data (land)
+
+IMERG and gauges are deliberately absent. They are observations read by the
+assimilation workflow, not part of the prior-training dataset.
 
 Random-crop augmentation: because we only have ~16k daily fields, we train on
 random 128x128 crops of the 256x256 ``wide`` domain.  Crops preserve geography
