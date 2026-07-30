@@ -142,8 +142,12 @@ class ProgressReporter:
     def _stats(self, lr: float) -> str:
         mean = self.running_sum / max(1, self.steps_this_epoch)
         smoothed = self.smoothed if self.smoothed is not None else mean
+        # Deliberately NOT called "ema": in this project EMA means the weight
+        # average controlled by train.use_ema, and seeing "(ema ...)" in the step
+        # line while use_ema was false was understandably alarming.  This is a
+        # smoothed view of the loss values only.
         return (
-            f"loss {mean:.4f} (ema {smoothed:.4f})  "
+            f"loss {mean:.4f} (smoothed {smoothed:.4f})  "
             f"lr {lr:.2e}  {self._rate():.2f} it/s"
         )
 

@@ -110,7 +110,8 @@ def test_epoch_summary_reports_mean_loss_and_epoch_number():
 
 def test_smoothed_loss_tracks_recent_steps_more_than_the_epoch_mean():
     """The whole point of showing both: when loss falls mid-epoch, the running
-    mean is dragged up by early steps while the EMA follows the current level."""
+    mean is dragged up by early steps while the smoothed value follows the
+    current level."""
     reporter, _ = _reporter(bar=False)
     reporter.begin_epoch(0)
     for _ in range(50):
@@ -556,3 +557,18 @@ def test_summary_states_when_ema_is_disabled():
     assert "DISABLED" in text
     assert "early stop" in text
     assert "retained snapshot" in text
+
+
+def test_step_line_does_not_say_ema():
+    """"EMA" in this project means the weight average (train.use_ema).
+
+    Using it for the smoothed loss made a run with use_ema=false look like EMA
+    was still active.
+    """
+    reporter, stream = _reporter(bar=False, log_every=10)
+    reporter.begin_epoch(0)
+    for _ in range(10):
+        reporter.update(0.15, 1e-4)
+    line = stream.getvalue()
+    assert "smoothed" in line
+    assert "ema" not in line.lower()
