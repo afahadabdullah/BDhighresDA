@@ -286,8 +286,11 @@ Bangladesh-domain mean CHIRPS precipitation and generates a 16-member
 ERA5-conditioned ensemble for each day. The output figure,
 `data/processed/test_prediction_panels.png`, shows ERA5 precipitation, CHIRPS,
 the ensemble-mean prediction, signed error, and ensemble spread. The companion
-JSON report contains case-level ERA5 and model metrics. These target-selected
-cases are a visual stress test, not an aggregate test-period skill estimate.
+JSON report contains case-level ERA5 and model metrics. Maps use a Cartopy
+Plate Carrée projection with labeled longitude/latitude gridlines and Natural
+Earth 10 m coastlines, national borders, and first-order boundaries. Boundary
+files are cached in `data/static/cartopy`. These target-selected cases are a
+visual stress test, not an aggregate test-period skill estimate.
 
 ## Submit assimilation
 

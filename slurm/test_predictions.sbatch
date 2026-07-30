@@ -17,8 +17,10 @@ export ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
 PYTHON_BIN="$ENV_PREFIX/bin/python"
 export PYTHONNOUSERSITE=1
 export MPLBACKEND=Agg
+export MPLCONFIGDIR="/tmp/${USER}/bdda-test-matplotlib-${SLURM_JOB_ID}"
 unset PYTHONHOME
 unset PYTHONPATH
+mkdir -p "$MPLCONFIGDIR"
 
 [[ -x "$PYTHON_BIN" ]] || {
     echo "ERROR: ARM training Python not found: $PYTHON_BIN"
@@ -45,15 +47,27 @@ export PYTHONPATH="$PWD/src"
 MEMBERS="${TEST_MEMBERS:-16}"
 FIGURE="${TEST_FIGURE:-data/processed/test_prediction_panels.png}"
 REPORT="${TEST_REPORT:-data/processed/test_prediction_panels.json}"
+CARTOPY_DIR="${CARTOPY_DATA_DIR:-data/static/cartopy}"
+mkdir -p "$CARTOPY_DIR"
+
+"$PYTHON_BIN" - <<'PY'
+import cartopy
+import matplotlib
+
+print("Cartopy:", cartopy.__version__)
+print("Matplotlib:", matplotlib.__version__)
+PY
 
 echo "Checkpoint: runs/prior_h100/best.pt"
 echo "Members: $MEMBERS"
 echo "Figure: $FIGURE"
 echo "Report: $REPORT"
+echo "Cartopy data: $CARTOPY_DIR"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_plot_test_predictions.py \
     --config configs/da.yaml \
     --ckpt runs/prior_h100/best.pt \
     --members "$MEMBERS" \
     --out-figure "$FIGURE" \
-    --out-report "$REPORT"
+    --out-report "$REPORT" \
+    --cartopy-data-dir "$CARTOPY_DIR"

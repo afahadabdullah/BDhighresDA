@@ -18,10 +18,15 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import cartopy  # noqa: E402
+import cartopy.crs as ccrs  # noqa: E402
+import cartopy.feature as cfeature  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.ticker as mticker  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
+from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -55,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-report",
         default="data/processed/test_prediction_panels.json",
+    )
+    parser.add_argument(
+        "--cartopy-data-dir",
+        default="data/static/cartopy",
+        help="Writable persistent cache for Natural Earth boundary files.",
     )
     args = parser.parse_args()
     if args.members < 2:
@@ -143,6 +153,9 @@ def main() -> None:
     checkpoint_path = Path(args.ckpt)
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"best checkpoint not found: {checkpoint_path}")
+    cartopy_data_dir = Path(args.cartopy_data_dir).resolve()
+    cartopy_data_dir.mkdir(parents=True, exist_ok=True)
+    cartopy.config["data_dir"] = cartopy_data_dir
 
     config = yaml.safe_load(config_path.read_text())
     stats = json.loads(Path(config["data"]["stats"]).read_text())
@@ -294,12 +307,14 @@ def main() -> None:
             }
         )
 
+    map_projection = ccrs.PlateCarree()
     figure, axes = plt.subplots(
         len(cases),
         5,
         figsize=(23, 4.6 * len(cases)),
         constrained_layout=True,
         squeeze=False,
+        subplot_kw={"projection": map_projection},
     )
     extent = [grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max]
     rain_cmap = plt.get_cmap("viridis").copy()
@@ -336,7 +351,8 @@ def main() -> None:
             ),
             (
                 case["target"],
-                f"CHIRPS target · {case['date']}\n"
+                f"CHIRPS target · {case['date']} · "
+                f"q{int(round(case['quantile'] * 100)):02d}\n"
                 f"domain mean {case['domain_mean_target_mm']:.2f} mm",
                 rain_cmap,
                 0.0,
@@ -384,13 +400,63 @@ def main() -> None:
                 vmin=vmin,
                 vmax=vmax,
                 interpolation="nearest",
+                transform=map_projection,
             )
+            axis.set_extent(extent, crs=map_projection)
+            axis.add_feature(
+                cfeature.COASTLINE.with_scale("10m"),
+                edgecolor="black",
+                facecolor="none",
+                linewidth=0.7,
+                zorder=4,
+            )
+            axis.add_feature(
+                cfeature.BORDERS.with_scale("10m"),
+                edgecolor="black",
+                facecolor="none",
+                linewidth=0.65,
+                zorder=4,
+            )
+            axis.add_feature(
+                cfeature.STATES.with_scale("10m"),
+                edgecolor="black",
+                facecolor="none",
+                linewidth=0.35,
+                linestyle=":",
+                alpha=0.75,
+                zorder=4,
+            )
+            gridlines = axis.gridlines(
+                crs=map_projection,
+                draw_labels=True,
+                x_inline=False,
+                y_inline=False,
+                xlocs=mticker.FixedLocator(
+                    np.arange(
+                        np.ceil(grid.lon_min),
+                        np.floor(grid.lon_max) + 1,
+                        2,
+                    )
+                ),
+                ylocs=mticker.FixedLocator(
+                    np.arange(
+                        np.ceil(grid.lat_min),
+                        np.floor(grid.lat_max) + 1,
+                        2,
+                    )
+                ),
+                linewidth=0.35,
+                color="black",
+                alpha=0.35,
+                linestyle=":",
+            )
+            gridlines.top_labels = False
+            gridlines.right_labels = False
+            gridlines.xformatter = LongitudeFormatter()
+            gridlines.yformatter = LatitudeFormatter()
+            gridlines.xlabel_style = {"size": 7}
+            gridlines.ylabel_style = {"size": 7}
             axis.set_title(title, fontsize=10)
-            axis.set_xlabel("longitude")
-            if column == 0:
-                axis.set_ylabel(
-                    f"latitude\nq{int(round(case['quantile'] * 100)):02d} case"
-                )
             figure.colorbar(
                 image,
                 ax=axis,
@@ -405,6 +471,14 @@ def main() -> None:
         f"sampler steps={base_sampler.n_steps}, temperature="
         f"{base_sampler.prior_temperature:g}",
         fontsize=15,
+    )
+    figure.text(
+        0.5,
+        0.001,
+        "Coastlines, national borders, and first-order boundaries: "
+        "Natural Earth via Cartopy (10 m)",
+        ha="center",
+        fontsize=8,
     )
     output_figure = Path(args.out_figure)
     output_figure.parent.mkdir(parents=True, exist_ok=True)
@@ -442,6 +516,9 @@ def main() -> None:
         "crop_origin_row_col": list(crop_origin),
         "grid": grid.name,
         "figure": str(output_figure),
+        "map_projection": "Cartopy PlateCarree",
+        "boundaries": "Natural Earth 10m coastline, national borders, and admin-1",
+        "cartopy_data_dir": str(cartopy_data_dir),
         "cases": report_cases,
         "note": (
             "Metrics describe target-selected example days and are diagnostic, "
