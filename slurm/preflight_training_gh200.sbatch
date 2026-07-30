@@ -27,13 +27,30 @@ unset PYTHONPATH
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
 
+PREFLIGHT_CONFIG="${PREFLIGHT_CONFIG:-configs/train_h100.yaml}"
+NORM_REPORT="${PREFLIGHT_NORM_REPORT:-data/processed/normalization_diagnostics.json}"
+
 [[ -f scripts/preflight_training.py &&
-   -f configs/train_h100.yaml &&
+   -f "$PREFLIGHT_CONFIG" &&
    -d data/processed/bd_wide.zarr &&
-   -f data/processed/stats.json &&
-   -f data/processed/normalization_diagnostics.json &&
-   -f data/processed/normalization_diagnostics.png ]] || {
-    echo "ERROR: Training code, data, statistics, or normalization diagnostics are missing."
+   -f "$NORM_REPORT" ]] || {
+    echo "ERROR: Training code, data, or normalization diagnostics are missing."
+    exit 1
+}
+
+# The statistics file is whatever the config asks for -- do NOT hardcode
+# stats.json here.  The v2 conditioning transform lives in stats_v2.json, and a
+# hardcoded check would happily pass on the stale v1 file while training read
+# the other one.
+STATS_FILE="$("$PYTHON_BIN" -c "
+import sys, yaml
+print(yaml.safe_load(open(sys.argv[1]))['data']['stats'])
+" "$PREFLIGHT_CONFIG")"
+echo "Config: $PREFLIGHT_CONFIG"
+echo "Statistics: $STATS_FILE"
+[[ -f "$STATS_FILE" ]] || {
+    echo "ERROR: statistics file named by $PREFLIGHT_CONFIG not found: $STATS_FILE"
+    echo "Run scripts/06_compute_stats.py with --out $STATS_FILE first."
     exit 1
 }
 
@@ -78,6 +95,7 @@ echo "Preflight steps: $STEPS"
 echo "Report: $OUTPUT"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/preflight_training.py \
-    --config configs/train_h100.yaml \
+    --config "$PREFLIGHT_CONFIG" \
     --steps "$STEPS" \
+    --normalization-report "$NORM_REPORT" \
     --out "$OUTPUT"

@@ -75,6 +75,34 @@ export PYTHONPATH="$PWD/src" PYTHONNOUSERSITE=1
 /home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python -m pytest tests/test_conditioning_fixes.py -q
 ```
 
+## The provenance chain — why Steps 1a-1c all have to run
+
+The repo enforces a checksum chain, and each link pins `git rev-parse HEAD`:
+
+```
+stats_v2.json
+   └─> normalization_diagnostics.{json,png}   pins stats sha256 + git HEAD
+          └─> training_preflight.json         pins normalization sha256 + git HEAD
+                 └─> train_h100.sbatch        pins preflight sha256 + git HEAD
+```
+
+So any commit invalidates everything downstream of it. Submitting training after
+a code change fails with:
+
+```
+AssertionError: repository changed after preflight; rerun the GH200 preflight
+```
+
+That is the guard working, not a bug — it is refusing to train on a repo that
+differs from the one that was validated.
+
+**Two consequences:**
+
+1. Run Steps 1a → 1c → 3 in order, and **do not commit anything between 1b and
+   3**. If you do, rerun from 1b.
+2. The chain must be rebuilt against `stats_v2.json`, not the old `stats.json` —
+   the normalization diagnostics hash the statistics file they were given.
+
 ## Step 1 — recompute statistics (~10 min)
 
 `compute_stats.sbatch` already parameterises the output path, so no edit needed:
@@ -98,6 +126,42 @@ for name, mean, sd in zip(s['cond_channels'], s['cond_mean'], s['cond_std']):
 
 `cond_transform.kinds` must read `['log1p','none','sqrt','none','none','none']`.
 `era5_tp` mean/sd should now be O(1) rather than O(0.001) with a huge spread.
+
+## Step 1b — normalization diagnostics against the new statistics
+
+```bash
+NORM_STATS=data/processed/stats_v2.json \
+NORM_FIGURE=data/processed/normalization_diagnostics_v2.png \
+NORM_REPORT=data/processed/normalization_diagnostics_v2.json \
+    bash slurm/submit_normalization_diagnostics.sh
+```
+
+This is where you get the first direct look at whether the conditioning fix
+worked: the ERA5 `tp` histogram should now be roughly symmetric instead of a
+spike at zero with a 20-sigma tail.
+
+## Step 1c — rerun the training preflight
+
+```bash
+PREFLIGHT_NORM_REPORT=data/processed/normalization_diagnostics_v2.json \
+    bash slurm/submit_preflight_training_gh200.sh
+```
+
+The preflight now reads the statistics path from the config instead of
+hardcoding `stats.json`, so it validates the file training will actually load.
+It runs two real optimiser steps on real data and records the checksums the
+training job checks.
+
+Confirm it passed before moving on:
+
+```bash
+python -c "
+import json; r = json.load(open('data/processed/training_preflight.json'))
+print('passed:', r['passed'], '| commit:', r['git_commit'][:8],
+      '| val loss:', r['validation_loss'])
+"
+git rev-parse --short HEAD     # must match the commit above
+```
 
 ## Step 2 — the free diagnostic, before spending any GPU-days
 
