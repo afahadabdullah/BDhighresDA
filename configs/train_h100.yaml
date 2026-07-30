@@ -26,32 +26,51 @@ model:
   channel_mult: [1, 2, 3, 4]
   num_res_blocks: 2
   attn_resolutions: [16, 32]
-  dropout: 0.1
+  dropout: 0.2                  # raised from 0.1: v3 overfit by epoch ~100
   num_heads: 4
 
 train:
   # New directory per parameterisation: weights are not comparable across them,
   # and keeping the old ones intact preserves the before/after baselines.
-  out_dir: runs/prior_h100_v3
+  out_dir: runs/prior_h100_v4
   # 38 train years ~ 13.9k days / batch 32 = ~433 steps/epoch.
-  # 120 epochs was only ~52k steps, which is short for a conditional flow model
-  # trained from scratch (docs/DIAGNOSIS_epoch119.md item 4).
-  # 580 epochs ~ 251k steps.
-  epochs: 580
+  #
+  # The v3 run was scheduled for 580 epochs and peaked at epoch 80-125 (35-54k
+  # steps), then degraded for 50 epochs. So the earlier "undertrained, needs
+  # 250k steps" reading was wrong: with ~14k training days this model overfits
+  # well before it underfits.
+  #
+  # Worse, cosine over 580 epochs left the learning rate at ~87% of maximum at
+  # epoch 135 -- it never annealed. 150 epochs (~65k steps) covers the observed
+  # peak with room to spare AND decays the LR properly over that range.
+  epochs: 150
   batch_size: 32
   lr: 1.5e-4
   weight_decay: 0.01
   warmup_steps: 2000
   grad_clip: 1.0
-  ema_decay: 0.9995             # ~2k-step horizon; fine at 250k steps
-  cond_dropout: 0.10            # buys the unconditional branch. Only worth it
-                                # because background_sampler.cfg_scale > 1 now
-                                # actually uses it -- keep the two in sync.
+  use_ema: false                # validate and checkpoint the online weights.
+                                # A noisier best checkpoint is acceptable; EMA
+                                # costs a full state-dict traversal per step and
+                                # smooths over the epoch-to-epoch variation we
+                                # want to see.
+  ema_decay: 0.9995             # only used when use_ema is true
+  cond_dropout: 0.0             # the CFG sweep showed w>1 DEGRADES placement
+                                # (q90 correlation 0.731 at w=1.0 -> 0.510 at
+                                # w=2.0) with no effect on bias or spread. At
+                                # w=1.0 the unconditional branch is never used,
+                                # so paying 10% of the budget for it is waste.
   logit_normal_t: true
   num_workers: 8
   seed: 0
   log_every: 50
   ckpt_every: 5                 # must divide validation.every
+  keep_every: 10                # retain epoch_XXXX.pt snapshots (no optimiser
+                                # state). v3 peaked near epoch 80 and there was
+                                # no way back to it: best.pt and last.pt are
+                                # both overwritten every ckpt_every epochs.
+  early_stop_patience: 6        # stop after 6 evaluations (30 epochs) with no
+                                # improvement in sampled CRPS
 
 # Sampled validation: runs the real sampler on two fixed held-out July days and
 # scores the ensemble in mm/day.  This is the checkpoint-selection signal --
@@ -69,7 +88,10 @@ validation:
   every: 5                      # then every 5th
   members: 8
   n_steps: 30
-  cfg_scale: 2.0                # keep in sync with background_sampler in da.yaml
+  cfg_scale: 1.0                # measured on the v3 checkpoint: w=2.0 cost
+                                # 0.22 of spatial correlation on the q90 case
+                                # while leaving bias and spread unchanged.
+                                # Keep in sync with background_sampler in da.yaml.
   month: 7                      # July -- the heart of the BD monsoon
   quantiles: [0.5, 0.99]        # a typical July day and a wet extreme
   save_maps: true

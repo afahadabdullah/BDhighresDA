@@ -468,11 +468,14 @@ def test_h100_config_pairs_its_stats_file_with_a_matching_run_dir():
     assert stats != "data/processed/stats.json", "v1 stats are absolute-target"
     assert out_dir != "runs/prior_h100", "would overwrite the v1 baseline"
 
-    version = stats.rsplit("_", 1)[-1].removesuffix(".json")   # 'v2', 'v3', ...
-    assert version.startswith("v"), stats
-    assert out_dir.endswith(version), (
-        f"stats {stats} and out_dir {out_dir} disagree on the version; "
-        f"mixing them silently trains on the wrong parameterisation"
+    # The statistics version need NOT equal the run version -- v4 legitimately
+    # reuses stats_v3 because only training settings changed, not the data
+    # parameterisation.  What must hold is that the run directory is new, so a
+    # previous run's checkpoints are never overwritten.
+    assert stats.rsplit("_", 1)[-1].removesuffix(".json").startswith("v"), stats
+    previous = {"runs/prior_h100", "runs/prior_h100_v2", "runs/prior_h100_v3"}
+    assert out_dir not in previous, (
+        f"out_dir {out_dir} would overwrite an earlier run; bump the suffix"
     )
 
 

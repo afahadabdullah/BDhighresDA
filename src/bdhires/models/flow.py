@@ -134,6 +134,27 @@ def flow_matching_loss(
     return err.mean()
 
 
+def select_weights(checkpoint: dict) -> dict:
+    """Return the state dict a checkpoint intends for inference.
+
+    Checkpoints written with ``train.use_ema: true`` carry both ``model`` (online)
+    and ``ema`` weights and mean the latter.  With ``use_ema: false`` there is no
+    EMA and ``model`` is authoritative.  The ``weights`` key records which, and
+    older checkpoints that predate the flag always carry usable EMA weights.
+    """
+    preferred = checkpoint.get("weights")
+    if preferred == "model":
+        return checkpoint["model"]
+    if preferred == "ema" or checkpoint.get("ema") is not None:
+        ema = checkpoint.get("ema")
+        if ema is None:
+            raise ValueError("checkpoint claims EMA weights but carries none")
+        return ema
+    if "model" not in checkpoint:
+        raise ValueError("checkpoint contains neither 'ema' nor 'model' weights")
+    return checkpoint["model"]
+
+
 class EMA:
     """Exponential moving average of model weights (decay 0.999 by default)."""
 

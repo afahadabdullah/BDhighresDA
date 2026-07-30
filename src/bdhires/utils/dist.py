@@ -29,6 +29,20 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def broadcast_flag(value: bool, device) -> bool:
+    """Agree on a rank-0 decision across all processes.
+
+    Early stopping is decided by the sampled-validation monitor, which only runs
+    on rank 0.  Without this every other rank would keep training and the job
+    would hang at the next collective.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return value
+    flag = torch.tensor([1 if value else 0], device=device, dtype=torch.int32)
+    dist.broadcast(flag, src=0)
+    return bool(flag.item())
+
+
 def amp_dtype(device) -> torch.dtype:
     """V100 (sm_70) has no bf16 tensor cores -- fall back to fp16 + GradScaler."""
     if device.type != "cuda":

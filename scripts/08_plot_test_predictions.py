@@ -34,7 +34,7 @@ from bdhires.da import SamplerConfig  # noqa: E402
 from bdhires.da.sampler import sample  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import RectifiedFlow, UNet  # noqa: E402
+from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     CondTransform,
     PrecipTransform,
@@ -133,8 +133,6 @@ def load_best_model(
     image_size: int,
     device: torch.device,
 ) -> tuple[UNet, dict, dict]:
-    if "ema" not in checkpoint:
-        raise ValueError("the checkpoint does not contain EMA weights")
     training_config = checkpoint["cfg"]
     model = UNet(
         in_channels=1,
@@ -143,10 +141,14 @@ def load_best_model(
         image_size=image_size,
         **training_config["model"],
     )
-    model.load_state_dict(checkpoint["ema"], strict=True)
+    # EMA when the run used it, the online weights when it did not.
+    model.load_state_dict(select_weights(checkpoint), strict=True)
     metadata = {
         key: checkpoint.get(key)
-        for key in ("epoch", "step", "val_loss", "best_val_loss")
+        for key in (
+            "epoch", "step", "val_loss", "best_val_loss",
+            "crps", "best_crps", "weights", "selected_by",
+        )
         if checkpoint.get(key) is not None
     }
     return model.to(device).eval(), training_config, metadata

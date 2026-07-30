@@ -39,7 +39,7 @@ from bdhires.da import (  # noqa: E402
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import RectifiedFlow, UNet  # noqa: E402
+from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     CondTransform,
     PrecipTransform,
@@ -52,8 +52,7 @@ def load_model(ckpt_path: str, cond_channels: int, crop: int, device):
     cfg = ck["cfg"]
     model = UNet(in_channels=1, cond_channels=cond_channels, out_channels=1,
                  image_size=crop, **cfg["model"])
-    state = ck.get("ema") or ck["model"]
-    model.load_state_dict({k: v for k, v in state.items()}, strict=True)
+    model.load_state_dict(select_weights(ck), strict=True)
     return model.to(device).eval(), cfg
 
 

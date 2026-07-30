@@ -193,12 +193,11 @@ def training_summary(
     total = model.num_parameters
     add(_sub(f"{'TOTAL':<14s} {_si(total):>10s}   "
              f"({_si(model.num_trainable_parameters)} trainable)"))
-    add(_row(
-        "weights",
-        f"{total * 4 / 2**20:.0f} MiB fp32   "
-        f"+{total * 4 / 2**20:.0f} MiB EMA shadow   "
-        f"+{total * 8 / 2**20:.0f} MiB AdamW state",
-    ))
+    memory = [f"{total * 4 / 2**20:.0f} MiB fp32"]
+    if cfg["train"].get("use_ema", True):
+        memory.append(f"+{total * 4 / 2**20:.0f} MiB EMA shadow")
+    memory.append(f"+{total * 8 / 2**20:.0f} MiB AdamW state")
+    add(_row("weights", "   ".join(memory)))
 
     # -- optimisation ------------------------------------------------------
     train = cfg["train"]
@@ -223,19 +222,40 @@ def training_summary(
         f"{train['epochs']} epochs x {steps_per_epoch:,} steps/epoch = "
         f"{total_steps:,} steps",
     ))
-    horizon = int(1 / (1 - train["ema_decay"])) if train["ema_decay"] < 1 else 0
-    add(_row("EMA", f"decay={train['ema_decay']}  (~{horizon:,} step horizon)"))
-    add(_row(
-        "cond_dropout",
-        f"{train['cond_dropout']}  -> buys the unconditional branch used by "
-        f"CFG at sampling",
-    ))
+    if train.get("use_ema", True):
+        horizon = int(1 / (1 - train["ema_decay"])) if train["ema_decay"] < 1 else 0
+        add(_row("EMA", f"decay={train['ema_decay']}  (~{horizon:,} step horizon)"))
+    else:
+        add(_row("EMA", "DISABLED - online weights are validated and saved"))
+    cfg_scale = float((cfg.get("validation") or {}).get("cfg_scale", 1.0))
+    if train["cond_dropout"] > 0:
+        note = f"buys the unconditional branch; sampling uses CFG w={cfg_scale:g}"
+        if cfg_scale == 1.0:
+            note = "WARNING: paid for but unused, sampling is at CFG w=1"
+    else:
+        note = "no unconditional branch; sampling must stay at CFG w=1"
+        if cfg_scale != 1.0:
+            note = f"ERROR: sampling asks for CFG w={cfg_scale:g} with no branch"
+    add(_row("cond_dropout", f"{train['cond_dropout']}  -> {note}"))
     add(_row(
         "loss",
         "masked flow-matching MSE"
         + ("  (logit-normal t)" if train.get("logit_normal_t", True) else "  (uniform t)"),
     ))
-    add(_row("checkpoints", f"every {train['ckpt_every']} epochs -> best.pt, last.pt"))
+    checkpoints = f"every {train['ckpt_every']} epochs -> best.pt, last.pt"
+    if train.get("keep_every"):
+        checkpoints += f"; retained snapshot every {train['keep_every']}"
+    add(_row("checkpoints", checkpoints))
+    patience = int(train.get("early_stop_patience", 0))
+    if patience:
+        every = int((cfg.get("validation") or {}).get("every", 1))
+        add(_row(
+            "early stop",
+            f"after {patience} evaluations without a CRPS improvement "
+            f"(~{patience * every} epochs)",
+        ))
+    else:
+        add(_row("early stop", "disabled - runs the full schedule"))
 
     # -- validation --------------------------------------------------------
     add("")

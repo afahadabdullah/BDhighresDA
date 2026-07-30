@@ -322,7 +322,15 @@ def test_summary_describes_the_validation_monitor():
     text = _summary(monitor=monitor)
     assert "2019-07-18" in text
     assert "q99" in text
-    assert "115 evaluations" in text       # 580 epochs, every 5, from 10
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    expected = sum(
+        1
+        for e in range(cfg["train"]["epochs"])
+        if (e + 1) >= 10 and (e + 1) % 5 == 0
+    )
+    assert f"{expected} evaluations" in text
     assert "sampled CRPS" in text
     assert "1,920 NFE" in text             # 8 x 30 x 2 (Heun) x 2 (CFG) x 2 cases
 
@@ -403,3 +411,130 @@ def test_test_prediction_column_titles_are_lettered_with_units():
         assert title.startswith(f"{letter}."), title
         assert "mm day" in title, title       # every column states its units
     assert "16-member" in titles[2]
+
+
+# --------------------------------------------------------------------------
+# v4: optional EMA, retained checkpoints, early stopping
+# --------------------------------------------------------------------------
+
+
+def _select_weights():
+    """Load select_weights without importing torch-dependent siblings."""
+    spec = importlib.util.spec_from_file_location(
+        "_bd_flow_sel", ROOT / "src" / "bdhires" / "models" / "flow.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except ImportError as exc:
+        pytest.skip(f"needs {exc.name}")
+    return module.select_weights
+
+
+def test_select_weights_prefers_ema_when_the_run_used_it():
+    select = _select_weights()
+    ckpt = {"model": {"a": 1}, "ema": {"a": 2}, "weights": "ema"}
+    assert select(ckpt) == {"a": 2}
+
+
+def test_select_weights_uses_online_weights_when_ema_is_off():
+    select = _select_weights()
+    ckpt = {"model": {"a": 1}, "ema": None, "weights": "model"}
+    assert select(ckpt) == {"a": 1}
+
+
+def test_select_weights_handles_checkpoints_written_before_the_flag():
+    """Old checkpoints have no 'weights' key but always carry usable EMA."""
+    select = _select_weights()
+    assert select({"model": {"a": 1}, "ema": {"a": 2}}) == {"a": 2}
+    assert select({"model": {"a": 1}}) == {"a": 1}
+
+
+def test_select_weights_rejects_an_inconsistent_checkpoint():
+    select = _select_weights()
+    with pytest.raises(ValueError, match="carries none"):
+        select({"model": {"a": 1}, "ema": None, "weights": "ema"})
+    with pytest.raises(ValueError, match="neither"):
+        select({"cfg": {}})
+
+
+def _early_stop(crps_series, patience, best=float("inf")):
+    """Mirror of the train.py early-stopping bookkeeping."""
+    stale, stopped_at = 0, None
+    for i, crps in enumerate(crps_series):
+        if crps < best:
+            best, stale = crps, 0
+        else:
+            stale += 1
+            if patience and stale >= patience:
+                stopped_at = i
+                break
+    return stopped_at, best
+
+
+def test_early_stop_fires_after_patience_evaluations_without_improvement():
+    improving = [10.0, 9.0, 8.0, 7.0]
+    assert _early_stop(improving, patience=3)[0] is None
+    # improves, then plateaus for exactly `patience` evaluations
+    series = [10.0, 9.0, 9.5, 9.6, 9.7]
+    stopped, best = _early_stop(series, patience=3)
+    assert stopped == 4
+    assert best == 9.0
+
+
+def test_early_stop_would_have_caught_the_v3_degradation():
+    """v3 CRPS bottomed near epoch 125 and rose for the rest of the run."""
+    # mean CRPS, evaluations every 5 epochs from epoch 90 onward
+    series = [13.1, 13.0, 12.9, 13.0, 13.2, 13.3, 13.4, 13.5, 13.6]
+    stopped, _ = _early_stop(series, patience=6)
+    assert stopped is not None and stopped < len(series)
+
+
+def test_early_stop_disabled_never_fires():
+    assert _early_stop([5.0, 6.0, 7.0, 8.0, 9.0], patience=0)[0] is None
+
+
+def test_v4_config_turns_off_ema_and_cfg_and_keeps_snapshots():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    train, validation = cfg["train"], cfg["validation"]
+    assert train["use_ema"] is False
+    assert train["cond_dropout"] == 0.0, "unused at cfg_scale 1.0"
+    assert validation["cfg_scale"] == 1.0
+    assert train["keep_every"] > 0, "v3 lost its peak to overwriting"
+    assert train["early_stop_patience"] > 0
+    assert train["keep_every"] % train["ckpt_every"] == 0, (
+        "snapshots are written from inside the checkpoint block"
+    )
+
+
+def test_cond_dropout_and_cfg_scale_stay_consistent():
+    """Paying for an unconditional branch only makes sense if sampling uses it."""
+    import yaml
+
+    train_cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    da_cfg = yaml.safe_load((ROOT / "configs" / "da.yaml").read_text())
+    dropout = train_cfg["train"]["cond_dropout"]
+    for name, block in (
+        ("validation", train_cfg["validation"]),
+        ("background_sampler", da_cfg["background_sampler"]),
+    ):
+        if block["cfg_scale"] != 1.0:
+            assert dropout > 0, (
+                f"{name} uses CFG w={block['cfg_scale']} but cond_dropout is 0, "
+                f"so there is no unconditional branch to blend with"
+            )
+    if dropout == 0.0:
+        assert train_cfg["validation"]["cfg_scale"] == 1.0
+        assert da_cfg["background_sampler"]["cfg_scale"] == 1.0
+
+
+def test_summary_states_when_ema_is_disabled():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    text = _summary(cfg=cfg)
+    assert "DISABLED" in text
+    assert "early stop" in text
+    assert "retained snapshot" in text

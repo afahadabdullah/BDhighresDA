@@ -56,10 +56,12 @@ background_sampler:
   heun: true
   schedule_power: 1.0
   noise_scale: 0.0
-  cfg_scale: 2.0                # the training run pays 10% of its budget for an
-                                # unconditional branch (train.cond_dropout); this
-                                # is what makes that purchase worth anything.
-                                # Tune over [1.0, 1.5, 2.0, 3.0] against CRPS.
+  cfg_scale: 1.0                # MEASURED, not assumed: sweeping w on the v3
+                                # checkpoint moved spatial correlation on the
+                                # 2024-08-17 case 0.731 (w=1.0) -> 0.673 (1.5)
+                                # -> 0.510 (2.0), while bias and spread barely
+                                # moved. CFG sharpens onto the wrong structures
+                                # here. Re-sweep if the model changes.
   prior_temperature: 1.0        # NO inflation without observations: tempering in
                                 # log space biases the mm-space ensemble mean high
                                 # by Jensen's inequality. T=1.25 was responsible

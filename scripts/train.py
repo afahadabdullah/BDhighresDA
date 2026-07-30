@@ -39,7 +39,7 @@ from bdhires.transforms import (  # noqa: E402
     ResidualSpec,
 )
 from bdhires.utils.dist import cleanup_distributed, is_main, setup_distributed  # noqa: E402
-from bdhires.utils.dist import amp_dtype  # noqa: E402
+from bdhires.utils.dist import amp_dtype, broadcast_flag  # noqa: E402
 from bdhires.utils.progress import ProgressReporter, format_duration  # noqa: E402
 from bdhires.utils.summary import training_summary  # noqa: E402
 
@@ -167,7 +167,12 @@ def main():
         if is_main():
             print(f"warm start: {len(missing)} missing, {len(unexpected)} unexpected keys")
 
-    ema = EMA(model, decay=cfg["train"]["ema_decay"])
+    # EMA is optional.  It costs a full state-dict traversal every step plus a
+    # second copy of the weights, and it smooths over exactly the checkpoint-to-
+    # checkpoint variation you may want to see.  With `use_ema: false` the online
+    # weights are validated and saved directly.
+    use_ema = bool(cfg["train"].get("use_ema", True))
+    ema = EMA(model, decay=cfg["train"]["ema_decay"]) if use_ema else None
     flow = RectifiedFlow()
     opt = torch.optim.AdamW(
         model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"],
@@ -190,13 +195,22 @@ def main():
     step, start_epoch = 0, 0
     best_val_loss = float("inf")
     best_crps = float("inf")
+    # Evaluations since the sampled CRPS last improved.  The v3 run peaked around
+    # epoch 80-125 and then degraded for 50 epochs; nothing stopped it.
+    stale_evaluations = 0
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
-        ema.shadow = {
-            key: value.to(device=ema.shadow[key].device)
-            for key, value in ck["ema"].items()
-        }
+        if ema is not None:
+            if ck.get("ema") is None:
+                raise ValueError(
+                    f"{args.resume} carries no EMA weights but this config sets "
+                    f"use_ema: true; resume with use_ema: false or start fresh"
+                )
+            ema.shadow = {
+                key: value.to(device=ema.shadow[key].device)
+                for key, value in ck["ema"].items()
+            }
         opt.load_state_dict(ck["opt"])
         step, start_epoch = ck["step"], ck["epoch"] + 1
         # New checkpoints carry the global best.  Falling back to val_loss
@@ -274,7 +288,8 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["train"]["grad_clip"])
             scaler.step(opt)
             scaler.update()
-            ema.update(model)
+            if ema is not None:
+                ema.update(model)
             run += loss.item()
             step += 1
             if reporter is not None:
@@ -288,6 +303,7 @@ def main():
                 )
             print(reporter.end_epoch(peak), flush=True)
 
+        stop_now = False
         if is_main() and (epoch + 1) % cfg["train"]["ckpt_every"] == 0:
             val = evaluate_ema_loss(
                 model,
@@ -323,7 +339,8 @@ def main():
                             f"cov90 {case['interval_90_coverage'] * 100:5.1f}%",
                             flush=True,
                         )
-            print(f"    val_ema (flow-matching loss) {val:.4f}", flush=True)
+            label = "val_ema" if ema is not None else "val"
+            print(f"    {label} (flow-matching loss) {val:.4f}", flush=True)
 
             # Prefer CRPS whenever we have it; fall back to the FM loss on the
             # epochs in between so early checkpoints are still ranked somehow.
@@ -331,6 +348,18 @@ def main():
                 improved = crps < best_crps
                 if improved:
                     best_crps = crps
+                    stale_evaluations = 0
+                else:
+                    stale_evaluations += 1
+                    patience = int(cfg["train"].get("early_stop_patience", 0))
+                    if patience and stale_evaluations >= patience:
+                        print(
+                            f"    early stop: sampled CRPS has not improved in "
+                            f"{stale_evaluations} evaluations "
+                            f"(best {best_crps:.4f} mm)",
+                            flush=True,
+                        )
+                        stop_now = True
             else:
                 improved = False
             if val < best_val_loss:
@@ -339,7 +368,8 @@ def main():
                     improved = True     # no sampled score yet
             state = dict(
                 model=model.state_dict(),
-                ema=ema.state_dict(),
+                ema=ema.state_dict() if ema is not None else None,
+                weights="ema" if ema is not None else "model",
                 opt=opt.state_dict(),
                 step=step,
                 epoch=epoch,
@@ -348,6 +378,7 @@ def main():
                 best_val_loss=best_val_loss,
                 crps=crps,
                 best_crps=best_crps,
+                stale_evaluations=stale_evaluations,
                 selected_by="sampled_crps" if best_crps < float("inf") else "fm_loss",
             )
             # Write the new best first.  If the allocation ends between the
@@ -367,11 +398,34 @@ def main():
             save_checkpoint(state, out_dir / "last.pt")
             print(f"saved latest checkpoint: {out_dir / 'last.pt'}", flush=True)
 
+            # Retained snapshots.  best.pt and last.pt are both overwritten every
+            # ckpt_every epochs, so when the v3 run peaked near epoch 80 there was
+            # no way to get back to it.  These keep the optimiser state out to
+            # stay small -- they are for evaluation, not for resuming.
+            keep_every = int(cfg["train"].get("keep_every", 0))
+            if keep_every and (epoch + 1) % keep_every == 0:
+                snapshot = {
+                    key: value for key, value in state.items() if key != "opt"
+                }
+                path = out_dir / f"epoch_{epoch + 1:04d}.pt"
+                save_checkpoint(snapshot, path)
+                print(f"retained snapshot: {path}", flush=True)
+
+        # Every rank must agree, or the others hang at the next collective.
+        if broadcast_flag(stop_now, device):
+            if is_main():
+                print(
+                    f"stopping at epoch {epoch + 1} of {cfg['train']['epochs']}",
+                    flush=True,
+                )
+            break
+
     if is_main():
         save_checkpoint(
             dict(
                 model=model.state_dict(),
-                ema=ema.state_dict(),
+                ema=ema.state_dict() if ema is not None else None,
+                weights="ema" if ema is not None else "model",
                 cfg=cfg,
                 epoch=cfg["train"]["epochs"] - 1,
                 best_val_loss=best_val_loss,
@@ -431,7 +485,14 @@ def evaluate_loss(model, dl, flow, device, dtype, seed: int | None = None) -> fl
 
 @torch.no_grad()
 def evaluate_ema_loss(model, ema, dl, flow, device, dtype, seed: int) -> float:
-    """Validate the EMA weights used by testing and production."""
+    """Validate the weights that testing and production will use.
+
+    ``ema=None`` validates the online weights directly, which is the whole point
+    of ``use_ema: false`` -- otherwise the reported score would not describe the
+    weights actually written to the checkpoint.
+    """
+    if ema is None:
+        return evaluate_loss(model, dl, flow, device, dtype, seed=seed)
     online_state = {
         key: value.detach().clone() for key, value in model.state_dict().items()
     }

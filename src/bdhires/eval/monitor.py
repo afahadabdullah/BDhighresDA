@@ -251,9 +251,15 @@ class ValidationMonitor:
         from ..models.flow import RectifiedFlow
 
         started = time.time()
-        online = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        # ``ema=None`` samples the online weights directly (train.use_ema=false).
+        online = (
+            {k: v.detach().clone() for k, v in model.state_dict().items()}
+            if ema is not None
+            else None
+        )
         try:
-            ema.copy_to(model)
+            if ema is not None:
+                ema.copy_to(model)
             model.eval()
 
             residual = self.ds.residual
@@ -304,7 +310,8 @@ class ValidationMonitor:
                     }
                 )
         finally:
-            model.load_state_dict(online)
+            if online is not None:
+                model.load_state_dict(online)
             model.train()
 
         summary = {
