@@ -45,8 +45,8 @@ slurm/setup_pytorch_gh200.sh
 
 This modifies the existing `bdda-gh200` environment; it does not create a new
 Conda environment. The setup follows the NCCS Grace Hopper example and
-defaults to PyTorch 2.7.1 from the CUDA 12.9 wheel index. It verifies CUDA and
-Hopper compute capability before reporting `PYTORCH SETUP PASSED`. See the
+defaults to PyTorch 2.9.1 from the ARM CUDA 12.9 wheel index. It verifies CUDA
+and Hopper compute capability before reporting `PYTORCH SETUP PASSED`. See the
 [NCCS Prism ARM/PyTorch guidance](https://www.nccs.nasa.gov/using-prism/).
 
 ## Download CHIRPS

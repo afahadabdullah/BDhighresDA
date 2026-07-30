@@ -15,7 +15,7 @@ module purge 2>/dev/null || true
 
 ENV_PREFIX="${GH200_ENV_PREFIX:-/home/afahad/nb/project/BDDA/envs/bdda-gh200}"
 PYTHON_BIN="$ENV_PREFIX/bin/python"
-TORCH_VERSION="${GH200_TORCH_VERSION:-2.7.1}"
+TORCH_VERSION="${GH200_TORCH_VERSION:-2.9.1}"
 TORCH_INDEX="${GH200_TORCH_INDEX:-https://download.pytorch.org/whl/cu129}"
 
 export PYTHONNOUSERSITE=1
