@@ -44,6 +44,8 @@ export PYTHONPATH="$PWD/src"
     exit 1
 }
 
+CKPT="${TEST_CKPT:-runs/prior_h100/best.pt}"
+CONFIG="${TEST_CONFIG:-configs/da.yaml}"
 MEMBERS="${TEST_MEMBERS:-16}"
 FIGURE="${TEST_MAP_FIGURE:-data/processed/test_prediction_maps.png}"
 METRICS_FIGURE="${TEST_METRICS_FIGURE:-data/processed/test_prediction_metrics.png}"
@@ -60,7 +62,13 @@ print("Cartopy:", cartopy.__version__)
 print("Matplotlib:", matplotlib.__version__)
 PY
 
-echo "Checkpoint: runs/prior_h100/best.pt"
+[[ -f "$CKPT" ]] || {
+    echo "ERROR: checkpoint not found: $CKPT"
+    exit 1
+}
+
+echo "Checkpoint: $CKPT"
+echo "Config: $CONFIG"
 echo "Members: $MEMBERS"
 echo "Figure: $FIGURE"
 echo "Metrics figure: $METRICS_FIGURE"
@@ -69,8 +77,8 @@ echo "Report: $REPORT"
 echo "Cartopy data: $CARTOPY_DIR"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_plot_test_predictions.py \
-    --config configs/da.yaml \
-    --ckpt runs/prior_h100/best.pt \
+    --config "$CONFIG" \
+    --ckpt "$CKPT" \
     --members "$MEMBERS" \
     --out-figure "$FIGURE" \
     --out-metrics-figure "$METRICS_FIGURE" \

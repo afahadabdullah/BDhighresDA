@@ -25,43 +25,69 @@ time, so ERA5 stays in raw physical units on disk. That saves a multi-day repack
 
 ---
 
+## Architecture note — read this before running anything
+
+`bdda-gh200` is an **aarch64** build and lives on the `grace` partition.
+`gpulogin1` is **x86_64**. Running the env's interpreter on the login node fails
+with:
+
+```
+cannot execute binary file: Exec format error
+```
+
+So every step that needs torch must go through SLURM to a Grace node, even
+though the test suite itself is CPU-only. Steps 1 and 2 below need torch and/or
+the packed store, so they are batch jobs too.
+
 ## Step 0 — pull and verify
 
 ```bash
 cd /panfs/ccds02/nobackup/people/afahad/project/BDDA/BDhighresDA
 git pull
 
-export PYTHONPATH="$PWD/src"
-ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
-
-"$ENV_PREFIX/bin/python" -m pytest tests/test_conditioning_fixes.py -q
-"$ENV_PREFIX/bin/python" scripts/smoke_test.py
+bash slurm/submit_run_tests_gh200.sh
 ```
 
-Expect 26 passing tests. The 10 numpy-only ones already pass; the 16 needing
-torch have not been executed anywhere yet, so **this is the first real check** —
-do not skip it.
+Then watch it:
+
+```bash
+squeue -u "$USER"
+tail -f logs/bdhires-tests-*.out
+```
+
+Expect **26 passed** from `tests/test_conditioning_fixes.py`. The 10 numpy-only
+tests already pass; the 16 requiring torch have not been executed anywhere yet,
+so **this is the first real check** — do not skip it.
+
+The job also runs the full suite and the smoke test. Full-suite failures in
+`test_era5_earthmover.py` / `test_pack_alignment.py` / `test_dem_download.py`
+are pre-existing dependency gaps, not regressions; the v2 suite result is the
+one that matters.
+
+If you prefer an interactive shell:
+
+```bash
+srun --partition=grace --gres=gpu:1 --cpus-per-task=8 --mem=32G \
+     --time=00:30:00 --pty bash
+# then, on the compute node:
+cd "$SLURM_SUBMIT_DIR" 2>/dev/null || cd /panfs/ccds02/nobackup/people/afahad/project/BDDA/BDhighresDA
+export PYTHONPATH="$PWD/src" PYTHONNOUSERSITE=1
+/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python -m pytest tests/test_conditioning_fixes.py -q
+```
 
 ## Step 1 — recompute statistics (~10 min)
 
+`compute_stats.sbatch` already parameterises the output path, so no edit needed:
+
 ```bash
-"$ENV_PREFIX/bin/python" scripts/06_compute_stats.py \
-    --zarr data/processed/bd_wide.zarr \
-    --train-years 1981 2018 \
-    --transform log1p \
-    --out data/processed/stats_v2.json
+STATS_OUT=data/processed/stats_v2.json bash slurm/submit_compute_stats.sh
+tail -f logs/*compute*stats*.out
 ```
 
-Or via SLURM, editing `--out` in `slurm/compute_stats.sbatch` first:
+**Check it worked** (pure stdlib, so the login node is fine here):
 
 ```bash
-bash slurm/submit_compute_stats.sh
-```
-
-**Check it worked:**
-
-```bash
-"$ENV_PREFIX/bin/python" -c "
+python -c "
 import json
 s = json.load(open('data/processed/stats_v2.json'))
 print('transform:', s['cond_transform'])
@@ -79,13 +105,16 @@ Re-plot the **old** checkpoint through the neutral background sampler. This
 isolates how much of the bad figure was sampler settings versus training.
 
 ```bash
-"$ENV_PREFIX/bin/python" scripts/08_plot_test_predictions.py \
-    --ckpt runs/prior_h100/best.pt \
-    --config configs/da.yaml \
-    --out-figure data/processed/test_prediction_maps_neutral.png \
-    --out-metrics-figure data/processed/test_prediction_metrics_neutral.png \
-    --out-report data/processed/test_prediction_report_neutral.json
+TEST_CKPT=runs/prior_h100/best.pt \
+TEST_MAP_FIGURE=data/processed/test_prediction_maps_neutral.png \
+TEST_METRICS_FIGURE=data/processed/test_prediction_metrics_neutral.png \
+TEST_CASE_DIR=data/processed/test_prediction_cases_neutral \
+TEST_REPORT=data/processed/test_prediction_report_neutral.json \
+    bash slurm/submit_test_predictions.sh
 ```
+
+(`test_predictions.sbatch` now takes `TEST_CKPT` / `TEST_CONFIG` instead of
+hardcoding `runs/prior_h100/best.pt`.)
 
 `configs/da.yaml` now has a `background_sampler` block (T=1.0, no correctors,
 `schedule_power=1.0`) which this script picks up automatically.
@@ -141,10 +170,10 @@ Live:
 tail -f logs/bdhires-gh200-*.out | grep -E "sampled validation|new best"
 ```
 
-Metric history without opening images:
+Metric history without opening images (stdlib only, so the login node is fine):
 
 ```bash
-"$ENV_PREFIX/bin/python" -c "
+python -c "
 import json
 for line in open('runs/prior_h100_v2/validation/history.jsonl'):
     r = json.loads(line)
@@ -177,14 +206,17 @@ disable, set `validation.enabled: false`.
 
 ## Step 5 — score the new checkpoint
 
-```bash
-"$ENV_PREFIX/bin/python" scripts/08_plot_test_predictions.py \
-    --ckpt runs/prior_h100_v2/best.pt \
-    --config configs/da.yaml
-```
-
 First update `configs/da.yaml:data.stats` to `data/processed/stats_v2.json` — the
 v2 checkpoint needs the v2 conditioning. Revert it if you re-score the old run.
+
+```bash
+TEST_CKPT=runs/prior_h100_v2/best.pt \
+TEST_MAP_FIGURE=data/processed/test_prediction_maps_v2.png \
+TEST_METRICS_FIGURE=data/processed/test_prediction_metrics_v2.png \
+TEST_CASE_DIR=data/processed/test_prediction_cases_v2 \
+TEST_REPORT=data/processed/test_prediction_report_v2.json \
+    bash slurm/submit_test_predictions.sh
+```
 
 ---
 
