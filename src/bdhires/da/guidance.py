@@ -80,18 +80,24 @@ def guidance_grad(
     R: torch.Tensor,
     cfg: GuidanceConfig,
     mask: torch.Tensor | None = None,
+    mask_fill: float = 0.0,
 ):
     """Return ``(velocity, grad_x log p(y|x_t))``.
 
     The unguided velocity is returned alongside so the caller does not pay for
     a second network evaluation.
+
+    ``mask_fill`` is the transformed-space value of 0 mm.  It matters here because
+    the block-average observation operator averages over 2x2 cells that may
+    straddle the coast: pinning the ocean half to a literal 0.0 would inject a
+    spurious rain rate into the modelled satellite observation.
     """
     with torch.enable_grad():
         x = x_t.detach().requires_grad_(True)
         u = model(x, t, cond)
         x1_hat = flow.x1_hat(x, t, u)
         if mask is not None:
-            x1_hat = x1_hat * mask
+            x1_hat = x1_hat * mask + mask_fill * (1.0 - mask)
         hx = H(x1_hat)
         ll = obs_log_likelihood(y, hx, R, t, cfg).sum()
         (grad,) = torch.autograd.grad(ll, x)

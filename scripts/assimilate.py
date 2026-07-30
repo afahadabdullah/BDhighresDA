@@ -20,6 +20,7 @@ docs/METHODOLOGY.md Section 6):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -39,7 +40,7 @@ from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 
 
 def load_model(ckpt_path: str, cond_channels: int, crop: int, device):
@@ -176,6 +177,7 @@ def main():
         tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
+        cond_transform=CondTransform.from_stats(stats),
     )
     times = ds.time
     sel = np.where((times >= np.datetime64(args.start)) & (times <= np.datetime64(args.end)))[0]
@@ -184,7 +186,16 @@ def main():
     model, _ = load_model(args.ckpt, ds.total_cond_channels, grid.nlon, device)
     flow = RectifiedFlow()
 
-    scfg = SamplerConfig(**cfg["sampler"])
+    # `background` runs unguided, so it takes the uninflated sampler block:
+    # without observations to pull members back, prior tempering is pure error.
+    sampler_key = (
+        "background_sampler"
+        if args.mode == "background" and "background_sampler" in cfg
+        else "sampler"
+    )
+    scfg = SamplerConfig(**cfg[sampler_key])
+    scfg = dataclasses.replace(scfg, mask_fill=ds.mask_fill)
+    print(f"sampler block: {sampler_key} (mode={args.mode})")
     gcfg = GuidanceConfig(**cfg["guidance"])
     n_members = args.members or cfg["ensemble"]["members"]
 

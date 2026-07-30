@@ -109,12 +109,48 @@ fi
 
 TRAIN_ARGS=()
 
-if [[ "${RESUME_IF_AVAILABLE:-1}" == "1" &&
-      -f runs/prior_h100/last.pt ]]; then
-    echo "Resuming from runs/prior_h100/last.pt"
-    TRAIN_ARGS+=(--resume runs/prior_h100/last.pt)
+CONFIG="${CONFIG:-configs/train_h100.yaml}"
+
+# Read out_dir from the config rather than hardcoding it.  The old hardcoded
+# runs/prior_h100 path was a live footgun: after the conditioning-transform
+# change, a stale last.pt in that directory would have been silently resumed
+# into a run whose input channels no longer mean the same thing.
+OUT_DIR="$("$PYTHON_BIN" -c "
+import sys, yaml
+print(yaml.safe_load(open(sys.argv[1]))['train']['out_dir'])
+" "$CONFIG")"
+echo "Config:  $CONFIG"
+echo "Out dir: $OUT_DIR"
+
+# Guard against resuming across a change in input semantics: the checkpoint
+# records the stats file it was trained with.
+if [[ -f "$OUT_DIR/last.pt" ]]; then
+    "$PYTHON_BIN" - "$OUT_DIR/last.pt" "$CONFIG" <<'PY'
+import sys
+import torch
+import yaml
+
+ckpt = torch.load(sys.argv[1], map_location="cpu")
+want = yaml.safe_load(open(sys.argv[2]))["data"]["stats"]
+have = ckpt.get("cfg", {}).get("data", {}).get("stats")
+if have != want:
+    raise SystemExit(
+        f"REFUSING TO RESUME: {sys.argv[1]} was trained with stats={have!r} but "
+        f"the config asks for {want!r}. The conditioning transform differs, so "
+        f"the weights expect different input distributions. Use a fresh "
+        f"train.out_dir, or set RESUME_IF_AVAILABLE=0 to start from scratch."
+    )
+print(f"Resume check passed: stats={have!r}")
+PY
+fi
+
+if [[ "${RESUME_IF_AVAILABLE:-1}" == "1" && -f "$OUT_DIR/last.pt" ]]; then
+    echo "Resuming from $OUT_DIR/last.pt"
+    TRAIN_ARGS+=(--resume "$OUT_DIR/last.pt")
+else
+    echo "Starting from scratch (no checkpoint, or RESUME_IF_AVAILABLE=0)"
 fi
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/train.py \
-    --config configs/train_h100.yaml \
+    --config "$CONFIG" \
     "${TRAIN_ARGS[@]}"

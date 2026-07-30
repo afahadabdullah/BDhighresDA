@@ -6,3 +6,4 @@ from .calibration import rank_histogram  # noqa: F401
 from .metrics import (  # noqa: F401
     bias, categorical, crps_ensemble, fss, fss_series, mae, rmse, sal, summarize,
 )
+from .monitor import MonitorConfig, ValidationMonitor  # noqa: F401

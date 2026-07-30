@@ -4,9 +4,12 @@
 # V100 is sm_70: no bf16 tensor cores, so utils/dist.amp_dtype falls back to fp16 + GradScaler.
 data:
   zarr: data/processed/bd_wide.zarr
-  stats: data/processed/stats.json
+  stats: data/processed/stats_v2.json   # v2 conditioning transform; see train_h100.yaml
   crop: 128                 # random 128x128 crops of the 256x256 wide domain
   seasonal_encoding: true
+  min_valid_fraction: 0.3   # skip crops that land in the open Bay of Bengal
+  monitor_grid: bd
+  era5_tp_cond_index: 0
   years:
     train: [1981, 2018]
     val:   [2019, 2020]
@@ -34,4 +37,15 @@ train:
   num_workers: 4
   seed: 0
   log_every: 50
-  ckpt_every: 5
+  ckpt_every: 5                 # must divide validation.every
+
+validation:
+  enabled: true
+  start_epoch: 10
+  every: 5
+  members: 8
+  n_steps: 30
+  cfg_scale: 2.0
+  month: 7
+  quantiles: [0.5, 0.99]
+  save_maps: true

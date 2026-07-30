@@ -1,9 +1,18 @@
 # Single H100 (80 GB) -- bigger batch, bf16 autocast selected automatically.
 data:
   zarr: data/processed/bd_wide.zarr
-  stats: data/processed/stats.json
+  # v2: ERA5 tp is log1p'd and cape sqrt'd before standardisation, so these
+  # constants are NOT interchangeable with the old stats.json.  The epoch-119
+  # checkpoint must keep using stats.json; anything trained here uses stats_v2.
+  stats: data/processed/stats_v2.json
   crop: 128
   seasonal_encoding: true
+  min_valid_fraction: 0.3       # reject random crops that land in the open Bay of
+                                # Bengal, where CHIRPS is absent and the loss mask
+                                # is empty (docs/DIAGNOSIS_epoch119.md item 6)
+  monitor_grid: bd              # fixed 128x128 production grid for the sampled
+                                # validation panels (must match data.crop)
+  era5_tp_cond_index: 0
   years:
     train: [1981, 2018]
     val:   [2019, 2020]
@@ -18,17 +27,46 @@ model:
   num_heads: 4
 
 train:
-  out_dir: runs/prior_h100
-  epochs: 120
+  # New directory: the v2 conditioning makes these weights incomparable with the
+  # old run, and it keeps runs/prior_h100 intact as the before/after baseline.
+  out_dir: runs/prior_h100_v2
+  # 38 train years ~ 13.9k days / batch 32 = ~433 steps/epoch.
+  # 120 epochs was only ~52k steps, which is short for a conditional flow model
+  # trained from scratch (docs/DIAGNOSIS_epoch119.md item 4).
+  # 580 epochs ~ 251k steps.
+  epochs: 580
   batch_size: 32
   lr: 1.5e-4
   weight_decay: 0.01
-  warmup_steps: 1500
+  warmup_steps: 2000
   grad_clip: 1.0
-  ema_decay: 0.9995
-  cond_dropout: 0.10
+  ema_decay: 0.9995             # ~2k-step horizon; fine at 250k steps
+  cond_dropout: 0.10            # buys the unconditional branch. Only worth it
+                                # because background_sampler.cfg_scale > 1 now
+                                # actually uses it -- keep the two in sync.
   logit_normal_t: true
   num_workers: 8
   seed: 0
   log_every: 50
-  ckpt_every: 5
+  ckpt_every: 5                 # must divide validation.every
+
+# Sampled validation: runs the real sampler on two fixed held-out July days and
+# scores the ensemble in mm/day.  This is the checkpoint-selection signal --
+# the flow-matching val loss is too noisy to choose on
+# (docs/DIAGNOSIS_epoch119.md item 4).
+#
+# Cost: members x n_steps x 2 (Heun) x 2 (CFG) NFE per case.  At the defaults
+# that is ~2k forward passes at 128x128 per evaluation, a few tens of seconds on
+# an H100, ~115 times over a 580-epoch run.
+#
+# Writes runs/<name>/validation/{history.jsonl, epoch_XXXX.png, progress.png}.
+validation:
+  enabled: true
+  start_epoch: 10               # counted in COMPLETED epochs; first run at 10
+  every: 5                      # then every 5th
+  members: 8
+  n_steps: 30
+  cfg_scale: 2.0                # keep in sync with background_sampler in da.yaml
+  month: 7                      # July -- the heart of the BD monsoon
+  quantiles: [0.5, 0.99]        # a typical July day and a wet extreme
+  save_maps: true

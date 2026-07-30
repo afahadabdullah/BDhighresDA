@@ -1,0 +1,397 @@
+"""Regression tests for the epoch-119 diagnosis fixes.
+
+Covers the four changes in docs/DIAGNOSIS_epoch119.md that can be checked
+without a GPU or the packed Zarr store:
+
+1. conditioning-channel variance stabilisation (log1p tp, sqrt cape)
+2. classifier-free guidance in the sampler
+3. masked cells filled with transform(0 mm), not a literal 0.0
+4. random crops rejected when they carry too little land
+
+The numpy-only tests run anywhere; the sampler tests need torch.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+
+# The transform tests are pure numpy and must run anywhere.  Only the sampler and
+# dataset tests need torch, so guard those individually rather than skipping the
+# whole module on a machine without it.
+try:  # pragma: no cover
+    import torch
+
+    from bdhires.data import DatasetConfig, PrecipDataset
+    from bdhires.da.sampler import SamplerConfig, apply_mask, sample
+except ImportError:  # pragma: no cover
+    torch = None
+
+needs_torch = pytest.mark.skipif(torch is None, reason="needs torch")
+
+CHANNELS = ["era5_tp", "era5_tcwv", "era5_cape", "era5_u10", "era5_v10", "era5_msl"]
+
+
+def _skew(a: np.ndarray) -> float:
+    a = np.asarray(a).ravel()
+    return float((((a - a.mean()) / a.std()) ** 3).mean())
+
+
+def _fake_cond(rng, n=8, h=16, w=16) -> np.ndarray:
+    """ERA5-like predictors: heavy-tailed tp and cape, near-Gaussian rest."""
+    return np.stack(
+        [
+            rng.gamma(0.2, 40.0, (n, h, w)),        # tp, mm/day
+            rng.normal(50.0, 10.0, (n, h, w)),      # tcwv
+            rng.gamma(1.5, 600.0, (n, h, w)),       # cape
+            rng.normal(0.0, 4.0, (n, h, w)),        # u10
+            rng.normal(0.0, 4.0, (n, h, w)),        # v10
+            rng.normal(101000.0, 400.0, (n, h, w)),  # msl
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 1. conditioning transforms
+# --------------------------------------------------------------------------
+
+
+def test_default_spec_targets_only_the_skewed_channels():
+    ctf = CondTransform.for_channels(CHANNELS)
+    assert ctf.kinds == ("log1p", "none", "sqrt", "none", "none", "none")
+
+
+def test_transform_stabilises_variance():
+    """The point of the change: tp must stop being a +20 sigma outlier field."""
+    cond = _fake_cond(np.random.default_rng(0))
+    out = CondTransform.for_channels(CHANNELS).forward(cond, channel_axis=1)
+    assert _skew(cond[:, 0]) > 3.0          # raw tp is badly skewed
+    assert abs(_skew(out[:, 0])) < 1.0      # transformed tp is not
+    assert abs(_skew(out[:, 2])) < 1.0      # ditto cape
+
+
+def test_transform_leaves_other_channels_untouched_and_does_not_mutate():
+    cond = _fake_cond(np.random.default_rng(1))
+    original = cond.copy()
+    out = CondTransform.for_channels(CHANNELS).forward(cond, channel_axis=1)
+    for i in (1, 3, 4, 5):
+        assert np.array_equal(out[:, i], original[:, i])
+    assert np.array_equal(cond, original), "forward() mutated its input"
+
+
+def test_chw_and_nchw_paths_agree():
+    """PrecipDataset passes (C,H,W); 06_compute_stats.py passes (N,C,H,W)."""
+    cond = _fake_cond(np.random.default_rng(2))
+    ctf = CondTransform.for_channels(CHANNELS)
+    assert np.allclose(
+        ctf.forward(cond[0], channel_axis=0),
+        ctf.forward(cond, channel_axis=1)[0],
+    )
+
+
+@pytest.mark.parametrize("channel", [0, 2])
+def test_inverse_round_trip(channel):
+    cond = _fake_cond(np.random.default_rng(3))
+    ctf = CondTransform.for_channels(CHANNELS)
+    out = ctf.forward(cond, channel_axis=1)
+    assert np.allclose(
+        ctf.inverse_channel(out[:, channel], channel),
+        cond[:, channel],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+
+def test_channel_count_mismatch_raises():
+    ctf = CondTransform.for_channels(CHANNELS)
+    with pytest.raises(ValueError, match="channels"):
+        ctf.forward(_fake_cond(np.random.default_rng(4))[:, :3], channel_axis=1)
+
+
+def test_from_stats_defaults_to_identity_for_old_files():
+    """Statistics written before this change must still load and be a no-op."""
+    old = {"cond_mean": [0.0] * 6, "cond_std": [1.0] * 6}
+    assert CondTransform.from_stats(old).kinds == ("none",) * 6
+    cond = _fake_cond(np.random.default_rng(5))
+    assert np.array_equal(
+        CondTransform.from_stats(old).forward(cond, channel_axis=1), cond
+    )
+
+
+def test_from_stats_round_trips_through_json():
+    import json
+
+    ctf = CondTransform.for_channels(CHANNELS)
+    stats = json.loads(
+        json.dumps({"cond_transform": ctf.to_dict(), "cond_mean": [0.0] * 6})
+    )
+    assert CondTransform.from_stats(stats) == ctf
+
+
+@needs_torch
+def test_torch_and_numpy_backends_agree():
+    cond = _fake_cond(np.random.default_rng(6))
+    ctf = CondTransform.for_channels(CHANNELS)
+    np_out = ctf.forward(cond.astype(np.float64), channel_axis=1)
+    pt_out = ctf.forward(torch.from_numpy(cond).double(), channel_axis=1)
+    assert np.allclose(np_out, pt_out.numpy(), rtol=1e-9, atol=1e-9)
+
+
+# --------------------------------------------------------------------------
+# 3. mask fill
+# --------------------------------------------------------------------------
+
+
+def test_literal_zero_fill_would_encode_rain():
+    """Documents the bug: 0.0 in transformed space is not 0 mm."""
+    tf = PrecipTransform(kind="log1p", eps=0.1, mu=1.2, sd=0.9)
+    assert float(tf.inverse(np.float32(0.0))) > 0.1     # the leak
+    fill = float(np.asarray(tf.forward(np.float32(0.0))))
+    assert abs(float(tf.inverse(np.float32(fill)))) < 1e-6
+
+
+@needs_torch
+def test_apply_mask_holds_masked_cells_at_fill():
+    x = torch.randn(2, 1, 8, 8)
+    mask = torch.zeros(1, 1, 8, 8)
+    mask[..., :4, :] = 1.0
+    out = apply_mask(x, mask, fill=-1.3333)
+    assert torch.allclose(out[..., :4, :], x[..., :4, :])
+    assert torch.allclose(out[..., 4:, :], torch.full_like(out[..., 4:, :], -1.3333))
+    assert apply_mask(x, None, fill=-1.0) is x
+
+
+# --------------------------------------------------------------------------
+# 2. classifier-free guidance
+# --------------------------------------------------------------------------
+
+
+class _LinearVelocity(torch.nn.Module if torch is not None else object):
+    """u = a*x + b*mean(cond). Conditional and unconditional branches differ."""
+
+    def __init__(self):
+        super().__init__()
+        self.a = torch.nn.Parameter(torch.tensor(0.5), requires_grad=False)
+        self.b = torch.nn.Parameter(torch.tensor(2.0), requires_grad=False)
+
+    def forward(self, x, t, cond=None):
+        out = self.a * x
+        if cond is not None:
+            out = out + self.b * cond.mean(dim=1, keepdim=True)
+        return out
+
+
+def _run(cfg_scale, cond, seed=0):
+    model = _LinearVelocity().eval()
+    cfg = SamplerConfig(
+        n_steps=8, heun=True, schedule_power=1.0, n_corrections=0,
+        prior_temperature=1.0, cfg_scale=cfg_scale, seed=seed,
+    )
+    with torch.no_grad():
+        return sample(model, cond, (3, 1, 8, 8), torch.device("cpu"), cfg=cfg)
+
+
+@needs_torch
+def test_cfg_scale_one_is_plain_conditional_sampling():
+    cond = torch.randn(1, 4, 8, 8)
+    assert torch.allclose(_run(1.0, cond), _run(1.0, cond))
+
+
+@needs_torch
+def test_cfg_amplifies_the_conditional_signal():
+    """w>1 must push the sample further from the unconditional result."""
+    cond = torch.randn(1, 4, 8, 8)
+    uncond = _run(1.0, torch.zeros_like(cond))
+    near = (_run(1.0, cond) - uncond).abs().mean()
+    far = (_run(3.0, cond) - uncond).abs().mean()
+    assert far > near * 1.5, (float(near), float(far))
+
+
+@needs_torch
+def test_cfg_is_a_noop_without_conditioning():
+    assert torch.allclose(_run(1.0, None), _run(3.0, None))
+
+
+@needs_torch
+def test_sampler_defaults_are_the_neutral_background():
+    """Guard against the epoch-119 settings creeping back in as defaults."""
+    cfg = SamplerConfig()
+    assert cfg.prior_temperature == 1.0
+    assert cfg.n_corrections == 0
+    assert cfg.schedule_power <= 1.0
+    assert cfg.cfg_scale == 1.0
+
+
+@needs_torch
+def test_config_blocks_construct_and_background_is_uninflated():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "da.yaml").read_text())
+    background = SamplerConfig(**cfg["background_sampler"])
+    analysis = SamplerConfig(**cfg["sampler"])
+    assert background.prior_temperature == 1.0, "unguided background must not inflate"
+    assert background.n_corrections == 0
+    assert background.cfg_scale > 1.0, "cond_dropout is paid for but unused"
+    assert analysis.prior_temperature >= 1.0
+
+
+# --------------------------------------------------------------------------
+# 4. crop rejection
+# --------------------------------------------------------------------------
+
+
+class _FakeStore(dict):
+    """Minimal mapping standing in for the packed Zarr store."""
+
+
+def _fake_store(n_days=4, size=64, land_rows=slice(32, 64)):
+    valid = np.zeros((size, size), np.float32)
+    valid[land_rows] = 1.0                       # northern half is land
+    target = np.random.default_rng(0).gamma(
+        0.3, 8.0, (n_days, size, size)
+    ).astype(np.float32)
+    target[:, valid == 0] = np.nan               # CHIRPS is land-only
+    return _FakeStore(
+        time=np.array(
+            ["2000-01-01", "2000-04-01", "2000-07-01", "2000-10-01"][:n_days],
+            dtype="datetime64[ns]",
+        ),
+        valid=valid,
+        static=np.zeros((7, size, size), np.float32),
+        target=target,
+        cond=_fake_cond(np.random.default_rng(1), n=n_days, h=size, w=size),
+    )
+
+
+def _dataset(**kwargs):
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=True, **kwargs)
+    return PrecipDataset(
+        cfg,
+        PrecipTransform(kind="log1p", eps=0.1, mu=1.2, sd=0.9),
+        store=store,
+        cond_transform=CondTransform.for_channels(CHANNELS),
+    )
+
+
+@needs_torch
+def test_crop_rejection_raises_the_land_fraction():
+    """Half the fake domain is ocean, as the real wide grid's south third is."""
+    strict = _dataset(min_valid_fraction=0.9)
+    loose = _dataset(min_valid_fraction=0.0, max_crop_tries=1)
+    strict_land = np.mean([strict[i % 4]["mask"].mean().item() for i in range(64)])
+    loose_land = np.mean([loose[i % 4]["mask"].mean().item() for i in range(64)])
+    assert strict_land > loose_land + 0.15, (strict_land, loose_land)
+
+
+@needs_torch
+def test_masked_cells_carry_the_transform_of_zero_not_zero():
+    ds = _dataset(min_valid_fraction=0.0)
+    item = ds[0]
+    x1, mask = item["x1"].numpy(), item["mask"].numpy()
+    assert (mask == 0).any(), "test needs at least one masked cell"
+    assert np.allclose(x1[mask == 0], ds.mask_fill)
+    assert not np.allclose(ds.mask_fill, 0.0)
+
+
+@needs_torch
+def test_dataset_applies_the_conditioning_transform():
+    ds = _dataset(min_valid_fraction=0.0)
+    raw_tp = np.asarray(ds.z["cond"][0][0])
+    seen_tp = ds[0]["cond"].numpy()[0]
+    assert _skew(raw_tp) > 2.0
+    assert abs(_skew(seen_tp)) < abs(_skew(raw_tp))
+
+
+# --------------------------------------------------------------------------
+# 5. sampled-validation monitor cadence
+# --------------------------------------------------------------------------
+
+
+def _monitor_cfg(**kwargs):
+    from bdhires.eval.monitor import MonitorConfig
+
+    return MonitorConfig(**kwargs)
+
+
+class _CadenceOnly:
+    """Exercise should_run/validate_cadence without building a dataset."""
+
+    def __init__(self, cfg):
+        from bdhires.eval.monitor import ValidationMonitor
+
+        self.cfg = cfg
+        self.cases = [object()]
+        self.should_run = ValidationMonitor.should_run.__get__(self)
+        self.validate_cadence = ValidationMonitor.validate_cadence.__get__(self)
+
+
+def test_monitor_fires_at_epoch_10_then_every_fifth():
+    """The requested schedule: first at 10 completed epochs, then every 5."""
+    m = _CadenceOnly(_monitor_cfg(start_epoch=10, every=5))
+    fired = [e for e in range(60) if m.should_run(e)]
+    # epoch index is 0-based, so "10 completed epochs" is index 9
+    assert fired[:5] == [9, 14, 19, 24, 29]
+    assert all((e + 1) % 5 == 0 for e in fired)
+    assert not any(m.should_run(e) for e in range(9))
+
+
+def test_monitor_cadence_must_divide_ckpt_every():
+    """A silent never-fires was the trap here; it must raise instead."""
+    m = _CadenceOnly(_monitor_cfg(start_epoch=10, every=5))
+    m.validate_cadence(5)          # 5 % 5 == 0, fine
+    m.validate_cadence(1)
+    with pytest.raises(ValueError, match="never fire"):
+        m.validate_cadence(10)     # monitor every 5 but checkpoints every 10
+
+
+def test_monitor_disabled_never_runs():
+    m = _CadenceOnly(_monitor_cfg(enabled=False))
+    assert not any(m.should_run(e) for e in range(100))
+    m.validate_cadence(999)        # disabled: no cadence complaint
+
+
+def test_monitor_config_from_dict_ignores_unknown_keys():
+    from bdhires.eval.monitor import MonitorConfig
+
+    cfg = MonitorConfig.from_dict(
+        {"every": 20, "quantiles": [0.5, 0.9], "not_a_real_key": 1}
+    )
+    assert cfg.every == 20
+    assert cfg.quantiles == (0.5, 0.9)
+    assert MonitorConfig.from_dict(None).enabled is True
+
+
+def test_training_configs_have_a_consistent_monitor_cadence():
+    """Guards the real configs, not just the code."""
+    import yaml
+
+    from bdhires.eval.monitor import MonitorConfig
+
+    for name in ("train_h100.yaml", "train_v100.yaml"):
+        cfg = yaml.safe_load((ROOT / "configs" / name).read_text())
+        monitor = MonitorConfig.from_dict(cfg.get("validation"))
+        if not monitor.enabled:
+            continue
+        ckpt_every = cfg["train"]["ckpt_every"]
+        assert monitor.every % ckpt_every == 0, name
+        assert cfg["data"]["monitor_grid"] == "bd"
+        # the monitor builds a UNet-sized fixed crop, so these must agree
+        assert cfg["data"]["crop"] == 128, name
+
+
+def test_h100_config_points_at_v2_stats_and_a_fresh_run_dir():
+    """The retrain must not land on top of the old, incomparable run."""
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    assert cfg["data"]["stats"].endswith("stats_v2.json")
+    assert cfg["train"]["out_dir"] != "runs/prior_h100"

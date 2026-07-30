@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..transforms import PrecipTransform
+from ..transforms import CondTransform, PrecipTransform
 
 
 @dataclass
@@ -42,6 +42,9 @@ class DatasetConfig:
     seasonal_encoding: bool = True
     era5_member: int | None = None   # ERA5-EDA member index, or None for the
                                      # deterministic HRES analysis
+    min_valid_fraction: float = 0.3  # reject random crops with less land than
+                                     # this (see _crop_box)
+    max_crop_tries: int = 32
 
 
 class PrecipDataset(Dataset):
@@ -53,6 +56,7 @@ class PrecipDataset(Dataset):
         cond_std: np.ndarray | None = None,
         split_index: np.ndarray | None = None,
         store=None,
+        cond_transform: CondTransform | None = None,
     ):
         self.cfg = cfg
         if store is not None:
@@ -78,6 +82,13 @@ class PrecipDataset(Dataset):
         self.static = np.asarray(self.z["static"][:], dtype=np.float32)
         self.H, self.W = self.valid.shape
         self.n_cond = self.z["cond"].shape[1]
+        self.cond_transform = cond_transform or CondTransform.identity(self.n_cond)
+
+        # Zero is not "no rain" in transformed space: forward(0 mm) is -mu/sd.
+        # Filling masked cells with a literal 0.0 would encode a moderate rain
+        # rate over the Bay of Bengal, which the global attention blocks then mix
+        # into the land field (docs/DIAGNOSIS_epoch119.md item 5).
+        self.mask_fill = float(np.asarray(self.transform.forward(np.float32(0.0))))
 
     def __len__(self) -> int:
         return len(self.index)
@@ -89,8 +100,23 @@ class PrecipDataset(Dataset):
         if self.cfg.random_crop:
             if self.cfg.crop_origin is not None:
                 raise ValueError("crop_origin cannot be combined with random_crop=True")
-            r0 = int(rng.integers(0, self.H - c + 1))
-            c0 = int(rng.integers(0, self.W - c + 1))
+            # The wide domain reaches down to 16 N, so its southern third is open
+            # Bay of Bengal where CHIRPS is entirely absent.  A crop landing there
+            # has a near-empty loss mask and contributes essentially no gradient
+            # while still costing a full forward/backward.  Resample until the
+            # crop carries enough land (docs/DIAGNOSIS_epoch119.md item 6).
+            best = None
+            for _ in range(max(1, self.cfg.max_crop_tries)):
+                r0 = int(rng.integers(0, self.H - c + 1))
+                c0 = int(rng.integers(0, self.W - c + 1))
+                fraction = float(
+                    self.valid[r0 : r0 + c, c0 : c0 + c].mean()
+                )
+                if best is None or fraction > best[0]:
+                    best = (fraction, r0, c0)
+                if fraction >= self.cfg.min_valid_fraction:
+                    break
+            _, r0, c0 = best
         elif self.cfg.crop_origin is not None:
             r0, c0 = self.cfg.crop_origin
             if r0 < 0 or c0 < 0 or r0 + c > self.H or c0 + c > self.W:
@@ -133,13 +159,16 @@ class PrecipDataset(Dataset):
         static = self.static[(slice(None), *sl)]
         valid = self.valid[sl]
 
-        # NaNs (ocean / CHIRPS fill) -> 0 in transformed space, excluded by mask
+        # NaNs (ocean / CHIRPS fill) are excluded by the mask, and filled with
+        # the transform of 0 mm rather than a literal 0.0 -- see self.mask_fill.
         finite = np.isfinite(target)
         target = np.where(finite, target, 0.0)
         mask = (valid * finite).astype(np.float32)
 
-        x1 = self.transform.forward(target)[None] * mask[None]
+        x1 = np.where(mask > 0, self.transform.forward(target), self.mask_fill)
+        x1 = x1.astype(np.float32)[None]
 
+        cond = self.cond_transform.forward(cond, channel_axis=0)
         if self.cond_mean is not None:
             cond = (cond - self.cond_mean[:, None, None]) / self.cond_std[:, None, None]
         cond = np.nan_to_num(cond, nan=0.0, posinf=0.0, neginf=0.0)

@@ -28,14 +28,39 @@ PRIOR TEMPERATURE  (``prior_temperature = T > 1``)
         u_T = u + (1 - 1/T) * x0_hat / t
 
     one extra term, monotone in T.  Measured on the toy prior in
-    ``scripts/smoke_test.py`` (true sd 0.50): T=1.0 -> 0.43, T=1.25 -> 0.56,
-    T=1.6 -> 0.71, T=2.0 -> 0.84.
+    ``scripts/smoke_test.py`` (true sd 0.50, ``schedule_power=2.0``): T=1.0 ->
+    0.43, T=1.25 -> 0.56, T=1.6 -> 0.71, T=2.0 -> 0.84.  Those figures are
+    schedule-dependent, so the smoke test pins the schedule to keep them
+    comparable across changes to the sampler defaults.
 
     Inflating the *prior* rather than the analysis is the right place to do it:
     observations then pull the ensemble back where they exist, so spread grows
     where the field is unconstrained and stays tight where it is observed --
     which is the behaviour you actually want from a reanalysis.  The 1/t factor
     is gated below ``temperature_t_start``.
+
+    CRUCIAL CAVEAT: that argument holds only when observations are present.  For
+    the UNGUIDED background nothing pulls members back, and because the prior is
+    inflated in *transformed* space, Jensen's inequality biases the mm-space
+    ensemble mean high -- T=1.25 produced a +6.4 mm bias on a 1.7 mm day
+    (docs/DIAGNOSIS_epoch119.md item 2).  Hence T defaults to 1.0 here and
+    configs/da.yaml carries a separate ``background_sampler`` block.
+
+CLASSIFIER-FREE GUIDANCE  (``cfg_scale = w > 1``)
+    Training drops the whole conditioning stack to zero with probability
+    ``train.cond_dropout`` (models/flow.py), which buys an unconditional branch
+    from the same weights.  That branch is only worth paying for if sampling
+    actually uses it:
+
+        u_w = u(x_t, 0) + w * ( u(x_t, cond) - u(x_t, 0) )
+
+    w = 1 recovers plain conditional sampling and costs one network evaluation;
+    w > 1 sharpens adherence to the ERA5 conditioning at the cost of a second
+    evaluation per step and some ensemble spread.  This is the direct remedy when
+    samples track the conditioning too weakly -- the epoch-119 background scored a
+    *lower* pattern correlation against CHIRPS than the raw ERA5 field it was
+    conditioned on (docs/DIAGNOSIS_epoch119.md item 3).  Start around w = 1.5-3
+    and tune it against CRPS, not against ensemble-mean RMSE.
 
 Langevin corrector steps (Rozet & Louppe 2024, Alg. 4) run on top of any mode.
 """
@@ -54,14 +79,31 @@ from .guidance import GuidanceConfig, guidance_grad, guided_velocity
 class SamplerConfig:
     n_steps: int = 50            # ODE/SDE steps (2 NFE each with Heun)
     heun: bool = True            # ignored when noise_scale > 0 (Euler-Maruyama)
-    schedule_power: float = 2.0  # t_i = 1 - (1 - i/n)^p ; p = 1 is uniform
+    schedule_power: float = 1.0  # t_i = 1 - (1 - i/n)^p ; p = 1 is uniform.
+                                 # p > 1 back-loads steps into t -> 1, where the
+                                 # field is already decided; prefer p <= 1.
     noise_scale: float = 0.0     # eta: 0 = probability-flow ODE, >0 = SDE
+    cfg_scale: float = 1.0       # w: classifier-free guidance (1 = off)
     prior_temperature: float = 1.0   # T > 1 broadens the prior (see below)
     temperature_t_start: float = 0.15
-    n_corrections: int = 2       # Langevin corrector steps per level (C in SDA)
+    n_corrections: int = 0       # Langevin corrector steps per level (C in SDA)
     corrector_tau: float = 0.3   # tau~ ; step size delta = tau~ * dim(s)/||s||^2
     t_noise_end: float = 0.98    # stop injecting noise near t = 1 (avoids grain)
+    mask_fill: float = 0.0       # value held at masked cells; must be the
+                                 # transform of 0 mm, not a literal 0.0
     seed: int | None = None
+
+
+def apply_mask(x, mask, fill: float = 0.0):
+    """Hold masked-out cells at ``fill`` rather than at zero.
+
+    ``PrecipTransform.forward(0 mm)`` is ``-mu/sd``, not 0, so pinning ocean
+    cells to a literal 0.0 pins them to a moderate rain rate and lets the global
+    attention blocks leak it into the land field.
+    """
+    if mask is None:
+        return x
+    return x * mask + fill * (1.0 - mask)
 
 
 def make_schedule(cfg: SamplerConfig, device) -> torch.Tensor:
@@ -70,12 +112,12 @@ def make_schedule(cfg: SamplerConfig, device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _langevin_correct(x, t, model, flow, cond, cfg: SamplerConfig, guide=None):
+def _langevin_correct(x, t, prior_velocity, flow, cfg: SamplerConfig, guide=None):
     """C steps of Langevin MC at fixed t using the (possibly guided) score."""
     for _ in range(cfg.n_corrections):
         tb = torch.full((x.shape[0],), float(t), device=x.device)
         if guide is None:
-            u = model(x, tb, cond)
+            u = prior_velocity(x, tb)
             s = flow.score(x, tb, u)
         else:
             u, g = guide(x, tb)
@@ -145,8 +187,28 @@ def assimilate(
     if guided and y.shape[0] == 1 and n > 1:
         y = y.expand(n, -1, -1)
 
+    use_cfg = cond is not None and cfg.cfg_scale != 1.0
+    cond_null = torch.zeros_like(cond) if use_cfg else None
+
+    def combine(u_cond, xx, tt):
+        """Blend in the unconditional branch -- classifier-free guidance."""
+        if not use_cfg:
+            return u_cond
+        with torch.no_grad():
+            u_uncond = model(xx, tt, cond_null)
+        return u_uncond + cfg.cfg_scale * (u_cond - u_uncond)
+
+    def prior_velocity(xx, tt):
+        with torch.no_grad():
+            u = model(xx, tt, cond)
+        return combine(u, xx, tt)
+
     def guide(xx, tt):
-        return guidance_grad(xx, tt, model, flow, cond, H, y, R, gcfg, mask=mask)
+        u, g = guidance_grad(
+            xx, tt, model, flow, cond, H, y, R, gcfg,
+            mask=mask, mask_fill=cfg.mask_fill,
+        )
+        return combine(u, xx, tt), g
 
     stochastic = cfg.noise_scale > 0.0
     ts = make_schedule(cfg, device)
@@ -160,8 +222,7 @@ def assimilate(
             u, g = guide(x, tb)
             v = guided_velocity(u, g, tb, flow, gcfg, x)
         else:
-            with torch.no_grad():
-                u = model(x, tb, cond)
+            u = prior_velocity(x, tb)
             v = u
 
         if cfg.prior_temperature != 1.0 and t0 >= cfg.temperature_t_start:
@@ -183,19 +244,17 @@ def assimilate(
                 u1, g1 = guide(x_eul, tb1)
                 v1 = guided_velocity(u1, g1, tb1, flow, gcfg, x_eul)
             else:
-                with torch.no_grad():
-                    v1 = model(x_eul, tb1, cond)
+                v1 = prior_velocity(x_eul, tb1)
             x = x + dt * 0.5 * (v + v1)
         else:
             x = x + dt * v
 
         if cfg.n_corrections and 0.0 < t1 < 1.0:
             x = _langevin_correct(
-                x, t1, model, flow, cond, cfg, guide=guide if guided else None
+                x, t1, prior_velocity, flow, cfg, guide=guide if guided else None
             )
 
-        if mask is not None:
-            x = x * mask
+        x = apply_mask(x, mask, cfg.mask_fill)
 
     return x
 

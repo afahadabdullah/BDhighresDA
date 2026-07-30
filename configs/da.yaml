@@ -28,18 +28,44 @@ observations:
                                 # REQUIRED before trusting the analysis: a Gaussian
                                 # likelihood assumes an unbiased observation
 
+# Two sampler blocks, because the background and the analysis want opposite
+# things.  `sampler` is the GUIDED analysis: observations are present to pull
+# members back, so prior inflation is safe and useful there.  `background_sampler`
+# is the UNGUIDED first guess, where nothing pulls members back and inflation is
+# pure error -- see docs/DIAGNOSIS_epoch119.md item 2.
 sampler:
   n_steps: 50
   heun: true                    # ignored when noise_scale > 0
-  schedule_power: 2.0
+  schedule_power: 1.0           # p > 1 back-loads steps into t -> 1, where the
+                                # field is already decided. Keep p <= 1.
   noise_scale: 0.0              # eta: SDE noise. Has the SAME marginals as the
                                 # ODE by construction -- it is NOT a spread knob.
                                 # Tune it, but do not rely on it for dispersion.
+  cfg_scale: 1.0                # classifier-free guidance weight; see below
   prior_temperature: 1.25       # T > 1 broadens the prior: the real spread knob.
                                 # Inflating the prior (not the analysis) lets the
                                 # observations pull members back where they exist.
   temperature_t_start: 0.15
   n_corrections: 2              # Langevin correctors (SDA Alg. 4)
+  corrector_tau: 0.3
+  t_noise_end: 0.98
+  seed: null
+
+background_sampler:
+  n_steps: 50
+  heun: true
+  schedule_power: 1.0
+  noise_scale: 0.0
+  cfg_scale: 2.0                # the training run pays 10% of its budget for an
+                                # unconditional branch (train.cond_dropout); this
+                                # is what makes that purchase worth anything.
+                                # Tune over [1.0, 1.5, 2.0, 3.0] against CRPS.
+  prior_temperature: 1.0        # NO inflation without observations: tempering in
+                                # log space biases the mm-space ensemble mean high
+                                # by Jensen's inequality. T=1.25 was responsible
+                                # for the +6.4 mm bias on a 1.7 mm day.
+  temperature_t_start: 0.15
+  n_corrections: 0              # correctors only earn their cost under guidance
   corrector_tau: 0.3
   t_noise_end: 0.98
   seed: null
@@ -76,6 +102,7 @@ tuning:
   imerg_sigma_obs: [0.20, 0.35, 0.60, 1.00]
   noise_scale: [0.0, 0.15, 0.30]
   prior_temperature: [1.0, 1.15, 1.25, 1.5, 2.0]
+  cfg_scale: [1.0, 1.5, 2.0, 3.0]
 
 verification:
   thresholds: [1, 10, 20, 50, 100]

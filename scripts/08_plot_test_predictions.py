@@ -35,7 +35,7 @@ from bdhires.da.sampler import sample  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -656,6 +656,7 @@ def main() -> None:
         transform,
         cond_mean=np.asarray(stats["cond_mean"], dtype=np.float32),
         cond_std=np.asarray(stats["cond_std"], dtype=np.float32),
+        cond_transform=CondTransform.from_stats(stats),
     )
     valid = dataset.fixed_valid > 0
     if valid.shape != grid.shape:
@@ -697,10 +698,17 @@ def main() -> None:
         device,
     )
     del checkpoint
-    base_sampler = SamplerConfig(**config["sampler"])
+    # The background is UNGUIDED: no observations exist to pull inflated members
+    # back, so it uses its own sampler block with prior_temperature = 1 and no
+    # Langevin correctors.  Fall back to `sampler` only for old configs.
+    base_sampler = SamplerConfig(
+        **config.get("background_sampler", config["sampler"])
+    )
+    base_sampler = replace(base_sampler, mask_fill=dataset.mask_fill)
     flow = RectifiedFlow()
     mask = torch.from_numpy(valid.astype(np.float32)[None, None]).to(device)
     era5_tp_index = int(config["data"].get("era5_tp_cond_index", 0))
+    condition_transform = CondTransform.from_stats(stats)
     condition_mean = np.asarray(stats["cond_mean"], dtype=np.float32)
     condition_std = np.asarray(stats["cond_std"], dtype=np.float32)
 
@@ -723,6 +731,9 @@ def main() -> None:
             standardized_era5 * condition_std[era5_tp_index]
             + condition_mean[era5_tp_index]
         )
+        # Undo the variance-stabilising transform as well, or panel A plots
+        # log-space numbers on an axis labelled mm/day.
+        era5_input = condition_transform.inverse_channel(era5_input, era5_tp_index)
         era5_input = np.where(valid, era5_input, np.nan)
 
         sampler = replace(base_sampler, seed=args.seed + case_number)
@@ -901,7 +912,8 @@ def main() -> None:
         f"Best EMA checkpoint; test period {start} to {end}; "
         f"{args.members}-member ensemble; "
         f"sampler steps={base_sampler.n_steps}, temperature="
-        f"{base_sampler.prior_temperature:g}\n"
+        f"{base_sampler.prior_temperature:g}, "
+        f"CFG w={base_sampler.cfg_scale:g}\n"
         "Rainfall panels share a row scale; error panels share a symmetric row "
         "scale; Natural Earth 10 m boundaries",
         fontsize=15,

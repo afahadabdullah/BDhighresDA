@@ -264,8 +264,11 @@ def test_prior_temperature_controls_spread():
         opt.step()
 
     def spread(T=1.0, eta=0.0):
+        # schedule_power is pinned to the value these reference numbers were
+        # measured at, so this stays a test of the temperature knob rather than
+        # of whatever the sampler default happens to be.
         cfg = SamplerConfig(n_steps=24, n_corrections=0, prior_temperature=T,
-                            noise_scale=eta, seed=0)
+                            schedule_power=2.0, noise_scale=eta, seed=0)
         e = assimilate(net, None, (10, 1, 32, 32), torch.device("cpu"), cfg=cfg, flow=flow)
         return float(e.numpy().std(axis=0).mean()), e
 

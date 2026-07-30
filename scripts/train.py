@@ -30,8 +30,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
+from bdhires.eval import MonitorConfig, ValidationMonitor  # noqa: E402
+from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 from bdhires.utils.dist import cleanup_distributed, is_main, setup_distributed  # noqa: E402
 from bdhires.utils.dist import amp_dtype  # noqa: E402
 
@@ -57,10 +59,59 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         random_crop=(split == "train"),
         years=tuple(cfg["data"]["years"][split]),
         seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
+        min_valid_fraction=cfg["data"].get("min_valid_fraction", 0.3),
     )
     return PrecipDataset(
         dcfg,
         tf,
+        cond_mean=np.asarray(stats["cond_mean"], np.float32),
+        cond_std=np.asarray(stats["cond_std"], np.float32),
+        cond_transform=CondTransform.from_stats(stats),
+    )
+
+
+def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
+    """Build the sampled-validation monitor, or None if it is switched off.
+
+    Uses a FIXED crop on the production grid (not the random training crops), so
+    the same geography is re-sampled at every epoch and the panels are directly
+    comparable across the run.
+    """
+    mcfg = MonitorConfig.from_dict(cfg.get("validation"))
+    if not mcfg.enabled:
+        return None
+    stats = json.loads(Path(cfg["data"]["stats"]).read_text())
+    tf = PrecipTransform.from_dict(stats["precip_transform"])
+    grid = get_grid(cfg["data"].get("monitor_grid", "bd"))
+    if grid.nlon != cfg["data"]["crop"]:
+        print(
+            f"[validation monitor] disabled: grid {grid.name} is {grid.nlon} wide "
+            f"but the model was built for {cfg['data']['crop']}",
+            flush=True,
+        )
+        return None
+    dataset = PrecipDataset(
+        DatasetConfig(
+            root=cfg["data"]["zarr"],
+            crop=grid.nlon,
+            random_crop=False,
+            crop_origin=crop_offsets(WIDE, grid),
+            years=tuple(cfg["data"]["years"]["val"]),
+            seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
+        ),
+        tf,
+        cond_mean=np.asarray(stats["cond_mean"], np.float32),
+        cond_std=np.asarray(stats["cond_std"], np.float32),
+        cond_transform=CondTransform.from_stats(stats),
+    )
+    return ValidationMonitor(
+        dataset,
+        tf,
+        device,
+        out_dir / "validation",
+        cfg=mcfg,
+        era5_tp_index=int(cfg["data"].get("era5_tp_cond_index", 0)),
+        cond_transform=CondTransform.from_stats(stats),
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
     )
@@ -125,8 +176,16 @@ def main():
 
     out_dir = Path(cfg["train"]["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Sampled validation runs on rank 0 only: it is a diagnostic, not a reduction.
+    monitor = build_monitor(cfg, device, out_dir) if is_main() else None
+    if monitor is not None:
+        monitor.validate_cadence(cfg["train"]["ckpt_every"])
+        print(f"[validation monitor] {monitor.describe()}", flush=True)
+
     step, start_epoch = 0, 0
     best_val_loss = float("inf")
+    best_crps = float("inf")
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
@@ -141,6 +200,7 @@ def main():
         best_val_loss = float(
             ck.get("best_val_loss", ck.get("val_loss", float("inf")))
         )
+        best_crps = float(ck.get("best_crps", float("inf")))
         if is_main():
             print(
                 f"resumed epoch {ck['epoch']} step {step}; "
@@ -199,14 +259,43 @@ def main():
                 dtype,
                 seed=cfg["train"]["seed"] + 10_000,
             )
+            # Sampled validation: the selection signal that actually tracks
+            # forecast quality.  The flow-matching loss above is kept for
+            # continuity but is too noisy to choose a checkpoint with
+            # (docs/DIAGNOSIS_epoch119.md item 4).
+            crps = None
+            if monitor is not None and monitor.should_run(epoch):
+                summary = monitor.run(model, ema, epoch, step)
+                if summary is not None:
+                    crps = summary["mean_crps_mm"]
+                    cases = "  ".join(
+                        f"{c['date']} CRPS {c['crps_mm']:.2f} "
+                        f"bias {c['bias_mm']:+.2f} r {c['spatial_correlation']:.2f}"
+                        for c in summary["cases"]
+                    )
+                    print(
+                        f"[epoch {epoch}] sampled validation ({summary['seconds']}s): "
+                        f"mean CRPS {crps:.3f} mm | {cases}",
+                        flush=True,
+                    )
             print(
                 f"[epoch {epoch}] train {run/max(1,len(dl)):.4f}  "
                 f"val_ema {val:.4f}",
                 flush=True,
             )
-            improved = val < best_val_loss
-            if improved:
+
+            # Prefer CRPS whenever we have it; fall back to the FM loss on the
+            # epochs in between so early checkpoints are still ranked somehow.
+            if crps is not None:
+                improved = crps < best_crps
+                if improved:
+                    best_crps = crps
+            else:
+                improved = False
+            if val < best_val_loss:
                 best_val_loss = val
+                if best_crps == float("inf"):
+                    improved = True     # no sampled score yet
             state = dict(
                 model=model.state_dict(),
                 ema=ema.state_dict(),
@@ -216,15 +305,22 @@ def main():
                 cfg=cfg,
                 val_loss=val,
                 best_val_loss=best_val_loss,
+                crps=crps,
+                best_crps=best_crps,
+                selected_by="sampled_crps" if best_crps < float("inf") else "fm_loss",
             )
             # Write the new best first.  If the allocation ends between the
             # two atomic writes, production still has the best model and
             # resume falls back safely to the preceding latest checkpoint.
             if improved:
                 save_checkpoint(state, out_dir / "best.pt")
+                criterion = (
+                    f"sampled CRPS={best_crps:.4f} mm"
+                    if best_crps < float("inf")
+                    else f"val={best_val_loss:.6f}"
+                )
                 print(
-                    f"saved new best checkpoint: {out_dir / 'best.pt'} "
-                    f"(val={best_val_loss:.6f})",
+                    f"saved new best checkpoint: {out_dir / 'best.pt'} ({criterion})",
                     flush=True,
                 )
             save_checkpoint(state, out_dir / "last.pt")
@@ -238,6 +334,7 @@ def main():
                 cfg=cfg,
                 epoch=cfg["train"]["epochs"] - 1,
                 best_val_loss=best_val_loss,
+                best_crps=best_crps,
             ),
             out_dir / "final.pt",
         )

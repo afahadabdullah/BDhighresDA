@@ -19,7 +19,7 @@ import numpy as np
 import zarr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 
 
 def main():
@@ -29,6 +29,13 @@ def main():
     ap.add_argument("--transform", default="log1p", choices=["log1p", "sqrt", "cbrt", "none"])
     ap.add_argument("--eps", type=float, default=0.1)
     ap.add_argument("--sample-days", type=int, default=1500)
+    ap.add_argument(
+        "--no-cond-transform",
+        action="store_true",
+        help="reproduce pre-2026 statistics: standardise raw ERA5 channels with "
+             "no variance stabilisation (not recommended; see "
+             "docs/DIAGNOSIS_epoch119.md item 1)",
+    )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     if args.train_years[0] > args.train_years[1]:
@@ -61,19 +68,33 @@ def main():
     cond = np.stack([np.asarray(z["cond"][int(i)]) for i in sub])   # (N, C, H, W)
     if not np.isfinite(cond).all():
         raise ValueError("the sampled ERA5 conditions contain non-finite values")
-    cm = np.mean(cond, axis=(0, 2, 3), dtype=np.float64)
-    cs = np.std(cond, axis=(0, 2, 3), dtype=np.float64) + 1e-6
     channels = list(z.attrs.get("cond_channels", []))
     if len(channels) != cond.shape[1]:
         raise ValueError(
             f"condition metadata lists {len(channels)} channels but the array "
             f"contains {cond.shape[1]}"
         )
+
+    # Variance-stabilise the skewed predictors BEFORE standardising, so that
+    # cond_mean/cond_std describe the values the network actually sees.  The
+    # spec is written into the output; PrecipDataset reads it back.
+    ctf = (
+        CondTransform.identity(len(channels))
+        if args.no_cond_transform
+        else CondTransform.for_channels(channels, eps=args.eps)
+    )
+    cond = ctf.forward(cond.astype(np.float64), channel_axis=1)
+    if not np.isfinite(cond).all():
+        raise ValueError("the conditioning transform produced non-finite values")
+
+    cm = np.mean(cond, axis=(0, 2, 3), dtype=np.float64)
+    cs = np.std(cond, axis=(0, 2, 3), dtype=np.float64) + 1e-6
     if not np.isfinite(cm).all() or not np.isfinite(cs).all() or np.any(cs <= 0):
         raise ValueError("computed condition statistics are invalid")
 
     stats = dict(
         precip_transform=tf.to_dict(),
+        cond_transform=ctf.to_dict(),
         cond_mean=cm.tolist(),
         cond_std=cs.tolist(),
         cond_channels=channels,

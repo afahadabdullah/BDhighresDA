@@ -122,3 +122,146 @@ def standardize(x, mu, sd):
 
 def unstandardize(x, mu, sd):
     return x * sd + mu
+
+
+# ---------------------------------------------------------------------------
+# Conditioning-channel transforms
+# ---------------------------------------------------------------------------
+#
+# The ERA5 predictors are stored in the Zarr in raw physical units, which is the
+# right thing for a data store.  They must NOT be handed to the network that way.
+#
+# Daily ERA5 ``tp`` has a skewness of roughly 10: a global z-score puts ~95% of
+# days in a sliver just below zero and turns monsoon days into +20 sigma
+# outliers.  A single input convolution cannot extract a usable signal from that,
+# so the network falls back on climatology -- which is exactly the failure mode
+# seen in the epoch-119 diagnostics (docs/DIAGNOSIS_epoch119.md, item 1).
+#
+# The fix is to give the *predictor* the same treatment as the target: compress
+# the tail first, standardise second.  ``cape`` is likewise strongly right-skewed
+# and gets a square root.  Everything else is near-Gaussian and passes through.
+#
+# This is applied at load time rather than at pack time, so changing it costs a
+# ``06_compute_stats.py`` rerun rather than a full multi-decade ERA5 repack.  The
+# chosen spec is written into ``stats.json`` so training and inference cannot
+# silently disagree about it.
+
+DEFAULT_COND_TRANSFORMS: dict[str, str] = {
+    "era5_tp": "log1p",
+    "era5_cape": "sqrt",
+}
+
+
+@dataclass(frozen=True)
+class CondTransform:
+    """Per-channel variance-stabilising transform for the ERA5 predictors.
+
+    ``kinds`` is one transform name per conditioning channel, in channel order,
+    drawn from the same vocabulary as :class:`PrecipTransform` (``log1p``,
+    ``sqrt``, ``cbrt``, ``none``).  Applied *before* standardisation.
+
+    Unlike :class:`PrecipTransform` this carries no ``mu``/``sd``: standardisation
+    of the conditioning stack stays where it already lives, in ``cond_mean`` and
+    ``cond_std``.  Those constants must therefore be recomputed whenever ``kinds``
+    changes -- :func:`from_stats` enforces the pairing by reading both from the
+    same ``stats.json``.
+    """
+
+    kinds: tuple[str, ...] = ()
+    eps: float = 0.1
+
+    @classmethod
+    def for_channels(
+        cls,
+        channels: "list[str] | tuple[str, ...]",
+        spec: "dict[str, str] | None" = None,
+        eps: float = 0.1,
+    ) -> "CondTransform":
+        """Build a transform for named channels using ``spec`` (default: module default)."""
+        spec = DEFAULT_COND_TRANSFORMS if spec is None else spec
+        return cls(kinds=tuple(spec.get(name, "none") for name in channels), eps=eps)
+
+    @classmethod
+    def identity(cls, n_channels: int) -> "CondTransform":
+        return cls(kinds=("none",) * n_channels)
+
+    def forward(self, cond, channel_axis: int = -3):
+        """Transform ``cond`` in place-safe fashion along ``channel_axis``.
+
+        Accepts ``(C, H, W)`` or ``(N, C, H, W)``; the default ``channel_axis``
+        of -3 covers both.
+        """
+        if not self.kinds:
+            return cond
+        xp = _backend(cond)
+        n = cond.shape[channel_axis]
+        if n != len(self.kinds):
+            raise ValueError(
+                f"CondTransform has {len(self.kinds)} channels but the array "
+                f"has {n} along axis {channel_axis}"
+            )
+        if all(kind == "none" for kind in self.kinds):
+            return cond
+
+        axis = channel_axis % cond.ndim
+        out = xp.moveaxis(cond, axis, 0) if xp is np else cond.movedim(axis, 0)
+        out = out.copy() if xp is np else out.clone()
+        for i, kind in enumerate(self.kinds):
+            if kind == "none":
+                continue
+            channel = out[i]
+            channel = (
+                xp.clip(channel, 0.0, None) if xp is np else channel.clamp_min(0.0)
+            )
+            if kind == "log1p":
+                out[i] = xp.log1p(channel / self.eps)
+            elif kind == "sqrt":
+                out[i] = xp.sqrt(channel)
+            elif kind == "cbrt":
+                out[i] = channel ** (1.0 / 3.0)
+            else:
+                raise ValueError(f"unknown conditioning transform {kind!r}")
+        return xp.moveaxis(out, 0, axis) if xp is np else out.movedim(0, axis)
+
+    def inverse_channel(self, values, channel: int):
+        """Invert a single channel back to physical units.
+
+        Needed by the diagnostics: once ``era5_tp`` is stored transformed, undoing
+        only the standardisation leaves log-space numbers that would be plotted
+        and scored as if they were mm.
+        """
+        if not self.kinds:
+            return values
+        kind = self.kinds[channel]
+        if kind == "none":
+            return values
+        xp = _backend(values)
+        if kind == "log1p":
+            z = xp.clip(values, None, 30.0) if xp is np else values.clamp_max(30.0)
+            out = self.eps * xp.expm1(z)
+        elif kind == "sqrt":
+            z = xp.clip(values, 0.0, None) if xp is np else values.clamp_min(0.0)
+            out = z**2
+        elif kind == "cbrt":
+            out = values**3
+        else:
+            raise ValueError(f"unknown conditioning transform {kind!r}")
+        return xp.clip(out, 0.0, None) if xp is np else out.clamp_min(0.0)
+
+    def to_dict(self) -> dict:
+        return dict(kinds=list(self.kinds), eps=self.eps)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CondTransform":
+        return cls(kinds=tuple(d["kinds"]), eps=float(d.get("eps", 0.1)))
+
+    @classmethod
+    def from_stats(cls, stats: dict) -> "CondTransform":
+        """Read the transform recorded in ``stats.json``.
+
+        Falls back to the identity for statistics files written before
+        conditioning transforms existed, so old checkpoints stay reproducible.
+        """
+        if "cond_transform" in stats:
+            return cls.from_dict(stats["cond_transform"])
+        return cls.identity(len(stats["cond_mean"]))
