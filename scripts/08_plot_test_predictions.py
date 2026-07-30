@@ -55,11 +55,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260730)
     parser.add_argument(
         "--out-figure",
-        default="data/processed/test_prediction_panels.png",
+        default="data/processed/test_prediction_maps.png",
+        help="Map-comparison suite.",
+    )
+    parser.add_argument(
+        "--out-metrics-figure",
+        default="data/processed/test_prediction_metrics.png",
+        help="Case-metric comparison suite.",
+    )
+    parser.add_argument(
+        "--out-case-dir",
+        default="data/processed/test_prediction_cases",
+        help="Directory for one high-resolution spatial figure per case.",
     )
     parser.add_argument(
         "--out-report",
-        default="data/processed/test_prediction_panels.json",
+        default="data/processed/test_prediction_report.json",
     )
     parser.add_argument(
         "--cartopy-data-dir",
@@ -145,6 +156,473 @@ def git_commit() -> str | None:
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def add_map_context(
+    axis,
+    projection,
+    extent: list[float],
+    longitude_ticks: np.ndarray,
+    latitude_ticks: np.ndarray,
+    *,
+    label_left: bool,
+    label_bottom: bool,
+) -> None:
+    """Add consistent boundaries and geographic labels to one map panel."""
+    axis.set_extent(extent, crs=projection)
+    axis.add_feature(
+        cfeature.COASTLINE.with_scale("10m"),
+        edgecolor="black",
+        facecolor="none",
+        linewidth=0.65,
+        zorder=4,
+    )
+    axis.add_feature(
+        cfeature.BORDERS.with_scale("10m"),
+        edgecolor="black",
+        facecolor="none",
+        linewidth=0.60,
+        zorder=4,
+    )
+    axis.add_feature(
+        cfeature.STATES.with_scale("10m"),
+        edgecolor="black",
+        facecolor="none",
+        linewidth=0.30,
+        linestyle=":",
+        alpha=0.70,
+        zorder=4,
+    )
+    gridlines = axis.gridlines(
+        crs=projection,
+        draw_labels=True,
+        x_inline=False,
+        y_inline=False,
+        xlocs=mticker.FixedLocator(longitude_ticks),
+        ylocs=mticker.FixedLocator(latitude_ticks),
+        linewidth=0.30,
+        color="black",
+        alpha=0.28,
+        linestyle=":",
+    )
+    gridlines.top_labels = False
+    gridlines.right_labels = False
+    gridlines.left_labels = label_left
+    gridlines.bottom_labels = label_bottom
+    gridlines.xformatter = LongitudeFormatter()
+    gridlines.yformatter = LatitudeFormatter()
+    gridlines.xlabel_style = {"size": 8}
+    gridlines.ylabel_style = {"size": 8}
+
+
+def add_metric_annotation(axis, text: str) -> None:
+    axis.text(
+        0.02,
+        0.02,
+        text,
+        transform=axis.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        zorder=6,
+        bbox={
+            "facecolor": "white",
+            "edgecolor": "none",
+            "alpha": 0.82,
+            "pad": 2.5,
+        },
+    )
+
+
+def map_column_titles(members: int) -> list[str]:
+    return [
+        "A. ERA5 input\nDaily precipitation",
+        "B. CHIRPS target\nDaily precipitation",
+        f"C. Model prediction\n{members}-member ensemble mean",
+        "D. ERA5 error\nInput − CHIRPS target",
+        "E. Model error\nPrediction mean − CHIRPS target",
+        "F. Predictive uncertainty\nEnsemble standard deviation",
+    ]
+
+
+def case_map_panels(
+    case: dict,
+    rain_cmap,
+    error_cmap,
+    spread_cmap,
+) -> list[tuple[np.ndarray, object, float, float, str]]:
+    """Return six consistently scaled spatial panels for one held-out case."""
+    pooled = np.concatenate(
+        [
+            case["era5_input"][case["valid"]],
+            case["target"][case["valid"]],
+            case["prediction"][case["valid"]],
+        ]
+    )
+    rain_max = max(5.0, float(np.percentile(pooled, 99.0)))
+    error_limit = max(
+        2.0,
+        float(
+            np.percentile(
+                np.abs(
+                    np.concatenate(
+                        [
+                            case["era5_error"][case["valid"]],
+                            case["error"][case["valid"]],
+                        ]
+                    )
+                ),
+                99.0,
+            )
+        ),
+    )
+    spread_max = max(
+        1.0,
+        float(np.percentile(case["spread"][case["valid"]], 99.0)),
+    )
+    return [
+        (
+            case["era5_input"],
+            rain_cmap,
+            0.0,
+            rain_max,
+            f"RMSE {case['input_metrics']['rmse_mm']:.2f} mm day$^{{-1}}$\n"
+            f"Spatial r {case['input_metrics']['spatial_correlation']:.2f}",
+        ),
+        (
+            case["target"],
+            rain_cmap,
+            0.0,
+            rain_max,
+            f"Domain mean {case['domain_mean_target_mm']:.2f} mm day$^{{-1}}$\n"
+            f"Maximum {case['prediction_metrics']['target_max_mm']:.1f} mm day$^{{-1}}$",
+        ),
+        (
+            case["prediction"],
+            rain_cmap,
+            0.0,
+            rain_max,
+            f"RMSE {case['prediction_metrics']['rmse_mm']:.2f} mm day$^{{-1}}$\n"
+            f"Spatial r {case['prediction_metrics']['spatial_correlation']:.2f}",
+        ),
+        (
+            case["era5_error"],
+            error_cmap,
+            -error_limit,
+            error_limit,
+            f"Bias {case['input_metrics']['bias_mm']:+.2f} mm day$^{{-1}}$\n"
+            f"MAE {case['input_metrics']['mae_mm']:.2f} mm day$^{{-1}}$",
+        ),
+        (
+            case["error"],
+            error_cmap,
+            -error_limit,
+            error_limit,
+            f"Bias {case['prediction_metrics']['bias_mm']:+.2f} mm day$^{{-1}}$\n"
+            f"MAE {case['prediction_metrics']['mae_mm']:.2f} mm day$^{{-1}}$",
+        ),
+        (
+            case["spread"],
+            spread_cmap,
+            0.0,
+            spread_max,
+            f"Mean spread {case['prediction_metrics']['mean_spread_mm']:.2f} "
+            "mm day$^{-1}$\n"
+            f"90% coverage "
+            f"{case['prediction_metrics']['interval_90_coverage'] * 100:.1f}%",
+        ),
+    ]
+
+
+def save_individual_case_figures(
+    cases: list[dict],
+    output_dir: Path,
+    members: int,
+    grid,
+    map_projection,
+    rain_cmap,
+    error_cmap,
+    spread_cmap,
+) -> list[Path]:
+    """Write one large 2x3 spatial diagnostic for every selected case."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    extent = [grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max]
+    longitude_ticks = np.arange(
+        np.ceil(grid.lon_min),
+        np.floor(grid.lon_max) + 1,
+        2,
+    )
+    latitude_ticks = np.arange(
+        np.ceil(grid.lat_min),
+        np.floor(grid.lat_max) + 1,
+        2,
+    )
+    titles = map_column_titles(members)
+    outputs = []
+    for case in cases:
+        panels = case_map_panels(case, rain_cmap, error_cmap, spread_cmap)
+        figure, axes = plt.subplots(
+            2,
+            3,
+            figsize=(19, 12),
+            constrained_layout=True,
+            squeeze=False,
+            subplot_kw={"projection": map_projection},
+        )
+        images = []
+        for index, (values, cmap, vmin, vmax, annotation) in enumerate(panels):
+            row, column = divmod(index, 3)
+            axis = axes[row, column]
+            image = axis.imshow(
+                values,
+                origin="lower",
+                extent=extent,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                interpolation="nearest",
+                transform=map_projection,
+            )
+            add_map_context(
+                axis,
+                map_projection,
+                extent,
+                longitude_ticks,
+                latitude_ticks,
+                label_left=True,
+                label_bottom=True,
+            )
+            axis.set_title(titles[index], fontsize=12, pad=9)
+            add_metric_annotation(axis, annotation)
+            images.append(image)
+
+        rainfall_colorbar = figure.colorbar(
+            images[0],
+            ax=axes[0, :].tolist(),
+            orientation="horizontal",
+            shrink=0.72,
+            aspect=38,
+            pad=0.035,
+        )
+        rainfall_colorbar.set_label(
+            "Daily precipitation (mm day$^{-1}$)",
+            fontsize=10,
+        )
+        error_colorbar = figure.colorbar(
+            images[3],
+            ax=axes[1, 0:2].tolist(),
+            orientation="horizontal",
+            shrink=0.72,
+            aspect=28,
+            pad=0.035,
+        )
+        error_colorbar.set_label(
+            "Signed error: forecast − CHIRPS (mm day$^{-1}$)",
+            fontsize=10,
+        )
+        spread_colorbar = figure.colorbar(
+            images[5],
+            ax=axes[1, 2],
+            orientation="horizontal",
+            shrink=0.86,
+            aspect=18,
+            pad=0.035,
+        )
+        spread_colorbar.set_label(
+            "Ensemble standard deviation (mm day$^{-1}$)",
+            fontsize=10,
+        )
+        quantile_label = int(round(case["quantile"] * 100))
+        figure.suptitle(
+            f"BDhighresDA held-out q{quantile_label:02d} rainfall case · "
+            f"{case['date']}\n"
+            f"ERA5-conditioned best-EMA background; {members}-member ensemble; "
+            "errors are forecast − CHIRPS\n"
+            "Rainfall fields share one scale; both errors share one symmetric scale",
+            fontsize=15,
+        )
+        output = output_dir / f"{case['date']}_q{quantile_label:02d}.png"
+        partial = output.with_suffix(output.suffix + ".part")
+        figure.savefig(partial, format="png", dpi=200)
+        plt.close(figure)
+        partial.replace(output)
+        outputs.append(output)
+    return outputs
+
+
+def save_metrics_figure(cases: list[dict], output: Path, members: int) -> None:
+    """Create a second figure with directly comparable case metrics."""
+    labels = [
+        f"q{int(round(case['quantile'] * 100)):02d}\n{case['date']}"
+        for case in cases
+    ]
+    positions = np.arange(len(cases), dtype=np.float64)
+    width = 0.36
+    era5_color = "#3b78b4"
+    model_color = "#e07a3f"
+    ensemble_color = "#2a9d78"
+    target_color = "#555555"
+
+    figure, axes = plt.subplots(
+        2,
+        3,
+        figsize=(17, 10),
+        constrained_layout=True,
+    )
+
+    def grouped_bars(
+        axis,
+        first: list[float],
+        second: list[float],
+        first_label: str,
+        second_label: str,
+        ylabel: str,
+        title: str,
+    ) -> None:
+        first_bars = axis.bar(
+            positions - width / 2,
+            first,
+            width,
+            color=era5_color,
+            label=first_label,
+        )
+        second_bars = axis.bar(
+            positions + width / 2,
+            second,
+            width,
+            color=model_color,
+            label=second_label,
+        )
+        axis.bar_label(first_bars, fmt="%.2f", padding=2, fontsize=8)
+        axis.bar_label(second_bars, fmt="%.2f", padding=2, fontsize=8)
+        axis.set_xticks(positions, labels)
+        axis.set_ylabel(ylabel)
+        axis.set_title(title)
+        axis.grid(axis="y", alpha=0.25)
+        axis.legend(frameon=False)
+        axis.margins(y=0.16)
+
+    grouped_bars(
+        axes[0, 0],
+        [case["input_metrics"]["rmse_mm"] for case in cases],
+        [case["prediction_metrics"]["rmse_mm"] for case in cases],
+        "ERA5 input",
+        "Model ensemble mean",
+        "RMSE (mm day$^{-1}$)",
+        "A. Deterministic grid-cell RMSE",
+    )
+    grouped_bars(
+        axes[0, 1],
+        [case["input_metrics"]["mae_mm"] for case in cases],
+        [case["prediction_metrics"]["crps_mm"] for case in cases],
+        "ERA5 deterministic CRPS (= MAE)",
+        f"Model ensemble CRPS ({members} members)",
+        "CRPS (mm day$^{-1}$)",
+        "B. Probabilistic error (lower is better)",
+    )
+    grouped_bars(
+        axes[0, 2],
+        [case["input_metrics"]["bias_mm"] for case in cases],
+        [case["prediction_metrics"]["bias_mm"] for case in cases],
+        "ERA5 input",
+        "Model ensemble mean",
+        "Mean error (mm day$^{-1}$)",
+        "C. Domain-mean bias",
+    )
+    axes[0, 2].axhline(0.0, color="black", linewidth=0.8)
+
+    grouped_bars(
+        axes[1, 0],
+        [
+            case["input_metrics"]["spatial_correlation"]
+            for case in cases
+        ],
+        [
+            case["prediction_metrics"]["spatial_correlation"]
+            for case in cases
+        ],
+        "ERA5 input",
+        "Model ensemble mean",
+        "Pearson correlation",
+        "D. Spatial pattern correlation",
+    )
+    axes[1, 0].set_ylim(-0.1, 1.0)
+
+    coverage = [
+        case["prediction_metrics"]["interval_90_coverage"] for case in cases
+    ]
+    coverage_bars = axes[1, 1].bar(
+        positions,
+        coverage,
+        width=0.55,
+        color=ensemble_color,
+        label="Observed coverage",
+    )
+    axes[1, 1].bar_label(
+        coverage_bars,
+        labels=[f"{value * 100:.1f}%" for value in coverage],
+        padding=2,
+        fontsize=8,
+    )
+    axes[1, 1].axhline(
+        0.90,
+        color="black",
+        linestyle="--",
+        linewidth=1.0,
+        label="Nominal 90%",
+    )
+    axes[1, 1].set_xticks(positions, labels)
+    axes[1, 1].set_ylim(0.0, 1.0)
+    axes[1, 1].set_ylabel("Fraction of valid grid cells")
+    axes[1, 1].set_title("E. Ensemble 90% interval coverage")
+    axes[1, 1].grid(axis="y", alpha=0.25)
+    axes[1, 1].legend(frameon=False)
+
+    max_width = 0.24
+    target_bars = axes[1, 2].bar(
+        positions - max_width,
+        [case["prediction_metrics"]["target_max_mm"] for case in cases],
+        max_width,
+        color=target_color,
+        label="CHIRPS target",
+    )
+    input_bars = axes[1, 2].bar(
+        positions,
+        [case["input_metrics"]["prediction_max_mm"] for case in cases],
+        max_width,
+        color=era5_color,
+        label="ERA5 input",
+    )
+    model_bars = axes[1, 2].bar(
+        positions + max_width,
+        [
+            case["prediction_metrics"]["prediction_max_mm"]
+            for case in cases
+        ],
+        max_width,
+        color=model_color,
+        label="Model ensemble mean",
+    )
+    for bars in (target_bars, input_bars, model_bars):
+        axes[1, 2].bar_label(bars, fmt="%.1f", padding=2, fontsize=7)
+    axes[1, 2].set_xticks(positions, labels)
+    axes[1, 2].set_ylabel("Maximum (mm day$^{-1}$)")
+    axes[1, 2].set_title("F. Maximum daily precipitation")
+    axes[1, 2].grid(axis="y", alpha=0.25)
+    axes[1, 2].legend(frameon=False)
+    axes[1, 2].margins(y=0.16)
+
+    figure.suptitle(
+        "BDhighresDA held-out case metrics\n"
+        "ERA5-conditioned background versus CHIRPS; "
+        "target-selected cases are diagnostic, not an aggregate test score",
+        fontsize=15,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    partial = output.with_suffix(output.suffix + ".part")
+    figure.savefig(partial, format="png", dpi=190)
+    plt.close(figure)
+    partial.replace(output)
 
 
 def main() -> None:
@@ -299,6 +777,7 @@ def main() -> None:
                 "era5_input": era5_input,
                 "target": target,
                 "prediction": prediction,
+                "era5_error": era5_input - target,
                 "error": prediction - target,
                 "spread": spread,
                 "valid": case_valid,
@@ -310,8 +789,8 @@ def main() -> None:
     map_projection = ccrs.PlateCarree()
     figure, axes = plt.subplots(
         len(cases),
-        5,
-        figsize=(23, 4.6 * len(cases)),
+        6,
+        figsize=(27, 5.2 * len(cases)),
         constrained_layout=True,
         squeeze=False,
         subplot_kw={"projection": map_projection},
@@ -321,76 +800,24 @@ def main() -> None:
     rain_cmap.set_bad("white")
     error_cmap = plt.get_cmap("RdBu_r").copy()
     error_cmap.set_bad("white")
+    spread_cmap = plt.get_cmap("magma").copy()
+    spread_cmap.set_bad("white")
+    column_titles = map_column_titles(args.members)
+    longitude_ticks = np.arange(
+        np.ceil(grid.lon_min),
+        np.floor(grid.lon_max) + 1,
+        2,
+    )
+    latitude_ticks = np.arange(
+        np.ceil(grid.lat_min),
+        np.floor(grid.lat_max) + 1,
+        2,
+    )
 
     for row, case in enumerate(cases):
-        pooled = np.concatenate(
-            [
-                case["era5_input"][case["valid"]],
-                case["target"][case["valid"]],
-                case["prediction"][case["valid"]],
-            ]
-        )
-        rain_max = max(5.0, float(np.percentile(pooled, 99.0)))
-        error_limit = max(
-            2.0,
-            float(np.percentile(np.abs(case["error"][case["valid"]]), 99.0)),
-        )
-        spread_max = max(
-            1.0,
-            float(np.percentile(case["spread"][case["valid"]], 99.0)),
-        )
-        panels = [
-            (
-                case["era5_input"],
-                "ERA5 precipitation input\n"
-                f"RMSE {case['input_metrics']['rmse_mm']:.2f} mm",
-                rain_cmap,
-                0.0,
-                rain_max,
-                "mm day$^{-1}$",
-            ),
-            (
-                case["target"],
-                f"CHIRPS target · {case['date']} · "
-                f"q{int(round(case['quantile'] * 100)):02d}\n"
-                f"domain mean {case['domain_mean_target_mm']:.2f} mm",
-                rain_cmap,
-                0.0,
-                rain_max,
-                "mm day$^{-1}$",
-            ),
-            (
-                case["prediction"],
-                f"Prediction mean · {args.members} members\n"
-                f"RMSE {case['prediction_metrics']['rmse_mm']:.2f} mm; "
-                f"r {case['prediction_metrics']['spatial_correlation']:.2f}",
-                rain_cmap,
-                0.0,
-                rain_max,
-                "mm day$^{-1}$",
-            ),
-            (
-                case["error"],
-                "Prediction − target\n"
-                f"bias {case['prediction_metrics']['bias_mm']:+.2f} mm",
-                error_cmap,
-                -error_limit,
-                error_limit,
-                "mm day$^{-1}$",
-            ),
-            (
-                case["spread"],
-                "Ensemble standard deviation\n"
-                f"mean {case['prediction_metrics']['mean_spread_mm']:.2f} mm",
-                rain_cmap,
-                0.0,
-                spread_max,
-                "mm day$^{-1}$",
-            ),
-        ]
-        for column, (values, title, cmap, vmin, vmax, colorbar_label) in enumerate(
-            panels
-        ):
+        panels = case_map_panels(case, rain_cmap, error_cmap, spread_cmap)
+        row_images = []
+        for column, (values, cmap, vmin, vmax, annotation) in enumerate(panels):
             axis = axes[row, column]
             image = axis.imshow(
                 values,
@@ -402,83 +829,82 @@ def main() -> None:
                 interpolation="nearest",
                 transform=map_projection,
             )
-            axis.set_extent(extent, crs=map_projection)
-            axis.add_feature(
-                cfeature.COASTLINE.with_scale("10m"),
-                edgecolor="black",
-                facecolor="none",
-                linewidth=0.7,
-                zorder=4,
+            add_map_context(
+                axis,
+                map_projection,
+                extent,
+                longitude_ticks,
+                latitude_ticks,
+                label_left=column == 0,
+                label_bottom=row == len(cases) - 1,
             )
-            axis.add_feature(
-                cfeature.BORDERS.with_scale("10m"),
-                edgecolor="black",
-                facecolor="none",
-                linewidth=0.65,
-                zorder=4,
-            )
-            axis.add_feature(
-                cfeature.STATES.with_scale("10m"),
-                edgecolor="black",
-                facecolor="none",
-                linewidth=0.35,
-                linestyle=":",
-                alpha=0.75,
-                zorder=4,
-            )
-            gridlines = axis.gridlines(
-                crs=map_projection,
-                draw_labels=True,
-                x_inline=False,
-                y_inline=False,
-                xlocs=mticker.FixedLocator(
-                    np.arange(
-                        np.ceil(grid.lon_min),
-                        np.floor(grid.lon_max) + 1,
-                        2,
-                    )
-                ),
-                ylocs=mticker.FixedLocator(
-                    np.arange(
-                        np.ceil(grid.lat_min),
-                        np.floor(grid.lat_max) + 1,
-                        2,
-                    )
-                ),
-                linewidth=0.35,
-                color="black",
-                alpha=0.35,
-                linestyle=":",
-            )
-            gridlines.top_labels = False
-            gridlines.right_labels = False
-            gridlines.xformatter = LongitudeFormatter()
-            gridlines.yformatter = LatitudeFormatter()
-            gridlines.xlabel_style = {"size": 7}
-            gridlines.ylabel_style = {"size": 7}
-            axis.set_title(title, fontsize=10)
-            figure.colorbar(
-                image,
-                ax=axis,
-                fraction=0.046,
-                pad=0.03,
-                label=colorbar_label,
-            )
+            if row == 0:
+                axis.set_title(column_titles[column], fontsize=11, pad=10)
+            if column == 0:
+                axis.text(
+                    0.02,
+                    0.98,
+                    f"{case['date']}\n"
+                    f"q{int(round(case['quantile'] * 100)):02d} rainfall case",
+                    transform=axis.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=10,
+                    zorder=6,
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "black",
+                        "linewidth": 0.4,
+                        "alpha": 0.88,
+                        "pad": 3.0,
+                    },
+                )
+            add_metric_annotation(axis, annotation)
+            row_images.append(image)
+
+        rain_colorbar = figure.colorbar(
+            row_images[0],
+            ax=axes[row, 0:3].tolist(),
+            orientation="horizontal",
+            shrink=0.76,
+            aspect=35,
+            pad=0.035,
+        )
+        rain_colorbar.set_label("Daily precipitation (mm day$^{-1}$)", fontsize=9)
+        error_colorbar = figure.colorbar(
+            row_images[3],
+            ax=axes[row, 3:5].tolist(),
+            orientation="horizontal",
+            shrink=0.72,
+            aspect=28,
+            pad=0.035,
+        )
+        error_colorbar.set_label(
+            "Signed error: forecast − CHIRPS (mm day$^{-1}$)",
+            fontsize=9,
+        )
+        spread_colorbar = figure.colorbar(
+            row_images[5],
+            ax=axes[row, 5],
+            orientation="horizontal",
+            shrink=0.88,
+            aspect=18,
+            pad=0.035,
+        )
+        spread_colorbar.set_label(
+            "Ensemble standard deviation (mm day$^{-1}$)",
+            fontsize=9,
+        )
 
     figure.suptitle(
-        "BDhighresDA held-out best-checkpoint background predictions\n"
-        f"{start} to {end}; EMA checkpoint; {args.members}-member ensemble; "
+        "BDhighresDA held-out ERA5-conditioned background comparison\n"
+        f"Best EMA checkpoint; test period {start} to {end}; "
+        f"{args.members}-member ensemble; "
         f"sampler steps={base_sampler.n_steps}, temperature="
-        f"{base_sampler.prior_temperature:g}",
+        f"{base_sampler.prior_temperature:g}\n"
+        "Rainfall panels share a row scale; error panels share a symmetric row "
+        "scale; Natural Earth 10 m boundaries",
         fontsize=15,
-    )
-    figure.text(
-        0.5,
-        0.001,
-        "Coastlines, national borders, and first-order boundaries: "
-        "Natural Earth via Cartopy (10 m)",
-        ha="center",
-        fontsize=8,
     )
     output_figure = Path(args.out_figure)
     output_figure.parent.mkdir(parents=True, exist_ok=True)
@@ -486,6 +912,18 @@ def main() -> None:
     figure.savefig(partial_figure, format="png", dpi=180)
     plt.close(figure)
     partial_figure.replace(output_figure)
+    output_metrics_figure = Path(args.out_metrics_figure)
+    save_metrics_figure(cases, output_metrics_figure, args.members)
+    case_figure_paths = save_individual_case_figures(
+        cases,
+        Path(args.out_case_dir),
+        args.members,
+        grid,
+        map_projection,
+        rain_cmap,
+        error_cmap,
+        spread_cmap,
+    )
 
     report_cases = []
     for case in cases:
@@ -498,6 +936,7 @@ def main() -> None:
                     "era5_input",
                     "target",
                     "prediction",
+                    "era5_error",
                     "error",
                     "spread",
                     "valid",
@@ -516,6 +955,11 @@ def main() -> None:
         "crop_origin_row_col": list(crop_origin),
         "grid": grid.name,
         "figure": str(output_figure),
+        "figures": {
+            "map_comparison": str(output_figure),
+            "metric_summary": str(output_metrics_figure),
+            "individual_cases": [str(path) for path in case_figure_paths],
+        },
         "map_projection": "Cartopy PlateCarree",
         "boundaries": "Natural Earth 10m coastline, national borders, and admin-1",
         "cartopy_data_dir": str(cartopy_data_dir),
@@ -531,9 +975,15 @@ def main() -> None:
     partial_report.write_text(json.dumps(report, indent=2) + "\n")
     partial_report.replace(output_report)
 
-    if output_figure.stat().st_size < 100_000:
-        raise ValueError(f"diagnostic figure is unexpectedly small: {output_figure}")
+    for figure_path in (output_figure, output_metrics_figure, *case_figure_paths):
+        if figure_path.stat().st_size < 100_000:
+            raise ValueError(
+                f"diagnostic figure is unexpectedly small: {figure_path}"
+            )
     print(f"TEST PREDICTION DIAGNOSTICS PASSED; wrote {output_figure}")
+    print(f"wrote {output_metrics_figure}")
+    for case_figure_path in case_figure_paths:
+        print(f"wrote {case_figure_path}")
     print(f"wrote {output_report}")
 
 

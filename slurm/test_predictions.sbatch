@@ -45,8 +45,10 @@ export PYTHONPATH="$PWD/src"
 }
 
 MEMBERS="${TEST_MEMBERS:-16}"
-FIGURE="${TEST_FIGURE:-data/processed/test_prediction_panels.png}"
-REPORT="${TEST_REPORT:-data/processed/test_prediction_panels.json}"
+FIGURE="${TEST_MAP_FIGURE:-data/processed/test_prediction_maps.png}"
+METRICS_FIGURE="${TEST_METRICS_FIGURE:-data/processed/test_prediction_metrics.png}"
+CASE_DIR="${TEST_CASE_DIR:-data/processed/test_prediction_cases}"
+REPORT="${TEST_REPORT:-data/processed/test_prediction_report.json}"
 CARTOPY_DIR="${CARTOPY_DATA_DIR:-data/static/cartopy}"
 mkdir -p "$CARTOPY_DIR"
 
@@ -61,6 +63,8 @@ PY
 echo "Checkpoint: runs/prior_h100/best.pt"
 echo "Members: $MEMBERS"
 echo "Figure: $FIGURE"
+echo "Metrics figure: $METRICS_FIGURE"
+echo "Individual case figures: $CASE_DIR"
 echo "Report: $REPORT"
 echo "Cartopy data: $CARTOPY_DIR"
 
@@ -69,5 +73,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_plot_test_predictions.py \
     --ckpt runs/prior_h100/best.pt \
     --members "$MEMBERS" \
     --out-figure "$FIGURE" \
+    --out-metrics-figure "$METRICS_FIGURE" \
+    --out-case-dir "$CASE_DIR" \
     --out-report "$REPORT" \
     --cartopy-data-dir "$CARTOPY_DIR"

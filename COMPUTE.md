@@ -283,14 +283,25 @@ diagnostic:
 
 It selects held-out days nearest the 50th, 90th, and 99th percentiles of
 Bangladesh-domain mean CHIRPS precipitation and generates a 16-member
-ERA5-conditioned ensemble for each day. The output figure,
-`data/processed/test_prediction_panels.png`, shows ERA5 precipitation, CHIRPS,
-the ensemble-mean prediction, signed error, and ensemble spread. The companion
-JSON report contains case-level ERA5 and model metrics. Maps use a Cartopy
-Plate Carrée projection with labeled longitude/latitude gridlines and Natural
-Earth 10 m coastlines, national borders, and first-order boundaries. Boundary
-files are cached in `data/static/cartopy`. These target-selected cases are a
-visual stress test, not an aggregate test-period skill estimate.
+ERA5-conditioned ensemble for each day. It writes these diagnostic products:
+
+- `data/processed/test_prediction_maps.png` contains clearly titled ERA5 input,
+  CHIRPS target, ensemble-mean prediction, ERA5 error, model error, and
+  ensemble-spread maps. Rainfall fields share a scale within each case, and
+  both errors use the same symmetric scale.
+- `data/processed/test_prediction_metrics.png` compares RMSE, deterministic
+  versus ensemble CRPS, bias, spatial correlation, interval coverage, and
+  maximum intensity.
+- `data/processed/test_prediction_cases/DATE_qNN.png` provides a large 2x3
+  spatial figure for every selected case, with longitude/latitude labels on
+  every panel and the same six input/target/prediction/error/spread fields.
+
+The companion `data/processed/test_prediction_report.json` contains the
+underlying case metrics. Maps use a Cartopy Plate Carrée projection with
+labeled longitude/latitude gridlines and Natural Earth 10 m coastlines,
+national borders, and first-order boundaries. Boundary files are cached in
+`data/static/cartopy`. These target-selected cases are a visual stress test,
+not an aggregate test-period skill estimate.
 
 ## Submit assimilation
 
