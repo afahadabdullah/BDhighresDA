@@ -104,14 +104,14 @@ slurm/submit_preflight_training_gh200.sh
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
        --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
 
 # 5. produce the product
 slurm/submit_assimilate_gh200.sh          # array job, one year per task
 
 # 6. verify against withheld gauges (3-fold CV) + baselines
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/final.pt \
+python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
        --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv.json
 ```
 

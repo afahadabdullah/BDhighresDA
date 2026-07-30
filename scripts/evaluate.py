@@ -2,11 +2,11 @@
 """Verification against withheld stations and against CHIRPS, plus baselines.
 
     # cross-validated station scores (3-fold rotation of the gauge network)
-    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
+    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
         --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv2021_2023.json
 
     # tune Gamma / sigma_obs on pseudo-observations before touching real gauges
-    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_v100/final.pt \
+    python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
         --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
 """
 from __future__ import annotations

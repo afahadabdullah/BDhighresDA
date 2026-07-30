@@ -41,6 +41,13 @@ def load_cfg(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def save_checkpoint(state: dict, path: Path) -> None:
+    """Atomically replace a checkpoint so an interrupted write cannot corrupt it."""
+    partial = path.with_suffix(path.suffix + ".part")
+    torch.save(state, partial)
+    partial.replace(path)
+
+
 def build_dataset(cfg: dict, split: str) -> PrecipDataset:
     stats = json.loads(Path(cfg["data"]["stats"]).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
@@ -119,12 +126,27 @@ def main():
     out_dir = Path(cfg["train"]["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     step, start_epoch = 0, 0
+    best_val_loss = float("inf")
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
-        ema.shadow = {k: v for k, v in ck["ema"].items()}
+        ema.shadow = {
+            key: value.to(device=ema.shadow[key].device)
+            for key, value in ck["ema"].items()
+        }
         opt.load_state_dict(ck["opt"])
         step, start_epoch = ck["step"], ck["epoch"] + 1
+        # New checkpoints carry the global best.  Falling back to val_loss
+        # keeps checkpoints written by older versions resumable.
+        best_val_loss = float(
+            ck.get("best_val_loss", ck.get("val_loss", float("inf")))
+        )
+        if is_main():
+            print(
+                f"resumed epoch {ck['epoch']} step {step}; "
+                f"best validation loss={best_val_loss:.6f}",
+                flush=True,
+            )
 
     total_steps = cfg["train"]["epochs"] * max(1, len(dl))
     warmup = cfg["train"]["warmup_steps"]
@@ -168,35 +190,108 @@ def main():
                       f"{(time.time()-t0)/(i+1):.2f}s/it", flush=True)
 
         if is_main() and (epoch + 1) % cfg["train"]["ckpt_every"] == 0:
-            val = evaluate_loss(model, val_dl, flow, device, dtype)
-            print(f"[epoch {epoch}] train {run/max(1,len(dl)):.4f}  val {val:.4f}", flush=True)
-            torch.save(
-                dict(model=model.state_dict(), ema=ema.state_dict(), opt=opt.state_dict(),
-                     step=step, epoch=epoch, cfg=cfg, val_loss=val),
-                out_dir / "last.pt",
+            val = evaluate_ema_loss(
+                model,
+                ema,
+                val_dl,
+                flow,
+                device,
+                dtype,
+                seed=cfg["train"]["seed"] + 10_000,
             )
+            print(
+                f"[epoch {epoch}] train {run/max(1,len(dl)):.4f}  "
+                f"val_ema {val:.4f}",
+                flush=True,
+            )
+            improved = val < best_val_loss
+            if improved:
+                best_val_loss = val
+            state = dict(
+                model=model.state_dict(),
+                ema=ema.state_dict(),
+                opt=opt.state_dict(),
+                step=step,
+                epoch=epoch,
+                cfg=cfg,
+                val_loss=val,
+                best_val_loss=best_val_loss,
+            )
+            # Write the new best first.  If the allocation ends between the
+            # two atomic writes, production still has the best model and
+            # resume falls back safely to the preceding latest checkpoint.
+            if improved:
+                save_checkpoint(state, out_dir / "best.pt")
+                print(
+                    f"saved new best checkpoint: {out_dir / 'best.pt'} "
+                    f"(val={best_val_loss:.6f})",
+                    flush=True,
+                )
+            save_checkpoint(state, out_dir / "last.pt")
+            print(f"saved latest checkpoint: {out_dir / 'last.pt'}", flush=True)
 
     if is_main():
-        torch.save(dict(model=model.state_dict(), ema=ema.state_dict(), cfg=cfg),
-                   out_dir / "final.pt")
+        save_checkpoint(
+            dict(
+                model=model.state_dict(),
+                ema=ema.state_dict(),
+                cfg=cfg,
+                epoch=cfg["train"]["epochs"] - 1,
+                best_val_loss=best_val_loss,
+            ),
+            out_dir / "final.pt",
+        )
     cleanup_distributed()
 
 
 @torch.no_grad()
-def evaluate_loss(model, dl, flow, device, dtype) -> float:
+def evaluate_loss(model, dl, flow, device, dtype, seed: int | None = None) -> float:
     model.eval()
-    tot, n = 0.0, 0
-    for batch in dl:
-        x1 = batch["x1"].to(device)
-        cond = batch["cond"].to(device)
-        mask = batch["mask"].to(device)
-        with torch.autocast("cuda", dtype=dtype, enabled=device.type == "cuda"):
-            tot += flow_matching_loss(model, x1, cond, flow, mask=mask, cond_dropout=0.0).item()
-        n += 1
-        if n >= 50:
-            break
-    model.train()
-    return tot / max(1, n)
+    fork_devices = (
+        [device.index if device.index is not None else torch.cuda.current_device()]
+        if device.type == "cuda"
+        else []
+    )
+    try:
+        with torch.random.fork_rng(devices=fork_devices):
+            if seed is not None:
+                torch.manual_seed(seed)
+            tot, n = 0.0, 0
+            for batch in dl:
+                x1 = batch["x1"].to(device)
+                cond = batch["cond"].to(device)
+                mask = batch["mask"].to(device)
+                with torch.autocast(
+                    "cuda", dtype=dtype, enabled=device.type == "cuda"
+                ):
+                    tot += flow_matching_loss(
+                        model,
+                        x1,
+                        cond,
+                        flow,
+                        mask=mask,
+                        cond_dropout=0.0,
+                    ).item()
+                n += 1
+                if n >= 50:
+                    break
+            return tot / max(1, n)
+    finally:
+        model.train()
+
+
+@torch.no_grad()
+def evaluate_ema_loss(model, ema, dl, flow, device, dtype, seed: int) -> float:
+    """Validate the EMA weights used by testing and production."""
+    online_state = {
+        key: value.detach().clone() for key, value in model.state_dict().items()
+    }
+    try:
+        ema.copy_to(model)
+        return evaluate_loss(model, dl, flow, device, dtype, seed=seed)
+    finally:
+        model.load_state_dict(online_state)
+        model.train()
 
 
 if __name__ == "__main__":

@@ -65,16 +65,16 @@ print(
 )
 PY
 
-[[ -f runs/prior_h100/final.pt ]] || {
-    echo "ERROR: Missing runs/prior_h100/final.pt"
+[[ -f runs/prior_h100/best.pt ]] || {
+    echo "ERROR: Missing runs/prior_h100/best.pt"
     exit 1
 }
 
 Y="$SLURM_ARRAY_TASK_ID"
 
-srun --ntasks=1 python -u scripts/assimilate.py \
+srun --ntasks=1 "$PYTHON_BIN" -u scripts/assimilate.py \
     --config configs/da.yaml \
-    --ckpt runs/prior_h100/final.pt \
+    --ckpt runs/prior_h100/best.pt \
     --start "${Y}-01-01" \
     --end "${Y}-12-31" \
     --mode analysis \

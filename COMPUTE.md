@@ -262,11 +262,19 @@ with unchanged training configuration and statistics. The guard can be
 disabled explicitly with `REQUIRE_TRAINING_PREFLIGHT=0`, but doing so is not
 recommended.
 
-The completed checkpoint is `runs/prior_h100/final.pt`.
+Every validation cycle atomically updates `runs/prior_h100/last.pt` with the
+latest model, EMA, optimizer, epoch, step, and global best validation score.
+Use that checkpoint only to resume training. When validation improves,
+`runs/prior_h100/best.pt` is atomically updated with the same complete state;
+use its EMA weights for testing and production. The best score is computed
+with those EMA weights and a fixed validation random seed, making scores
+comparable across validation cycles. A successfully completed run also writes
+`runs/prior_h100/final.pt`, which is the final epoch rather than necessarily
+the best validation epoch.
 
 ## Submit assimilation
 
-After training has produced `runs/prior_h100/final.pt`, submit:
+After training has produced `runs/prior_h100/best.pt`, submit:
 
 ```bash
 /path/to/BDhighresDA/slurm/submit_assimilate_gh200.sh

@@ -19,7 +19,7 @@ model:
 
 train:
   out_dir: runs/prior_h100
-  epochs: 600
+  epochs: 120
   batch_size: 32
   lr: 1.5e-4
   weight_decay: 0.01

@@ -2,7 +2,7 @@
 """Produce the analysis: ERA5 + IMERG downscaled to 5 km and corrected by BMD gauges.
 
     python scripts/assimilate.py --config configs/da.yaml \
-        --ckpt runs/prior_v100/final.pt --start 2021-01-01 --end 2021-12-31 \
+        --ckpt runs/prior_h100/best.pt --start 2021-01-01 --end 2021-12-31 \
         --out data/processed/bdhires_2021.nc
 
 Modes (``--mode``):
