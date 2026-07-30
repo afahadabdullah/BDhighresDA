@@ -509,6 +509,24 @@ def test_v4_config_turns_off_ema_and_cfg_and_keeps_snapshots():
     )
 
 
+def test_background_sampler_stays_uninflated():
+    """Config-only mirror of the SamplerConfig test in test_conditioning_fixes.
+
+    That one is @needs_torch and so never runs in an environment without torch,
+    which is exactly how a stale assertion (cfg_scale > 1.0) survived until it
+    hit the cluster. These are plain YAML checks, so they run everywhere.
+    """
+    import yaml
+
+    da = yaml.safe_load((ROOT / "configs" / "da.yaml").read_text())
+    background = da["background_sampler"]
+    assert background["prior_temperature"] == 1.0, "no inflation without obs"
+    assert background["n_corrections"] == 0
+    assert background["schedule_power"] <= 1.0
+    assert background["cfg_scale"] >= 1.0
+    assert da["sampler"]["prior_temperature"] >= 1.0
+
+
 def test_cond_dropout_and_cfg_scale_stay_consistent():
     """Paying for an unconditional branch only makes sense if sampling uses it."""
     import yaml

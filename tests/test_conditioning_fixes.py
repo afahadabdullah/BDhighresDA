@@ -302,8 +302,23 @@ def test_config_blocks_construct_and_background_is_uninflated():
     analysis = SamplerConfig(**cfg["sampler"])
     assert background.prior_temperature == 1.0, "unguided background must not inflate"
     assert background.n_corrections == 0
-    assert background.cfg_scale > 1.0, "cond_dropout is paid for but unused"
     assert analysis.prior_temperature >= 1.0
+
+    # This originally asserted cfg_scale > 1.0, on the assumption that CFG was
+    # worth having because cond_dropout had already paid for it.  Measured on the
+    # v3 checkpoint that assumption is false -- w=2.0 cost 0.22 of spatial
+    # correlation on the 2024-08-17 case while leaving bias and spread untouched.
+    # The invariant that actually holds is consistency: CFG above 1 requires an
+    # unconditional branch to blend with, and that branch only exists if
+    # cond_dropout > 0.
+    train_cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    cond_dropout = train_cfg["train"]["cond_dropout"]
+    assert background.cfg_scale >= 1.0
+    if background.cfg_scale > 1.0:
+        assert cond_dropout > 0, (
+            f"background_sampler.cfg_scale={background.cfg_scale} needs an "
+            f"unconditional branch, but train.cond_dropout is {cond_dropout}"
+        )
 
 
 # --------------------------------------------------------------------------
