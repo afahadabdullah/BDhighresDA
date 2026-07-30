@@ -37,7 +37,7 @@ from bdhires.da import (  # noqa: E402
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
-from bdhires.grids import get_grid  # noqa: E402
+from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
 from bdhires.transforms import PrecipTransform  # noqa: E402
 
@@ -91,11 +91,17 @@ def build_observations(cfg, ds, grid, tf, times, device, assim_stations=None):
 
     if obs_cfg["imerg"]["enabled"]:
         f = obs_cfg["imerg"]["factor"]
-        op = BlockAverageObsOperator(f, valid=ds.valid).to(device)
+        op = BlockAverageObsOperator(f, valid=ds.fixed_valid).to(device)
         keep = op.valid_mask()
         # IMERG lives on the model grid but was regridded conservatively, so its
         # 2x2 block mean IS the native 0.1 deg footprint value.
-        raw = np.stack([np.asarray(ds.z["imerg"][int(j)]) for j in range(len(times))])
+        spatial_slices = ds.fixed_spatial_slices()
+        raw = np.stack(
+            [
+                np.asarray(ds.z["imerg"][int(j)][spatial_slices])
+                for j in range(len(times))
+            ]
+        )
         if obs_cfg["imerg"].get("bias_correction"):
             raw = apply_qm(raw, obs_cfg["imerg"]["bias_correction"], times)
         nlat, nlon = grid.nlat // f, grid.nlon // f
@@ -161,7 +167,12 @@ def main():
     tf = PrecipTransform.from_dict(stats["precip_transform"])
 
     ds = PrecipDataset(
-        DatasetConfig(root=cfg["data"]["zarr"], crop=grid.nlon, random_crop=False),
+        DatasetConfig(
+            root=cfg["data"]["zarr"],
+            crop=grid.nlon,
+            random_crop=False,
+            crop_origin=crop_offsets(WIDE, grid),
+        ),
         tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
@@ -185,7 +196,8 @@ def main():
             cfg, ds, grid, tf, times, device, assim_stations=args.assim_stations)
     perturb = bool(cfg["ensemble"].get("perturb_observations", True))
 
-    mask = torch.from_numpy(ds.valid[None, None]).to(device)
+    valid = ds.fixed_valid
+    mask = torch.from_numpy(valid[None, None]).to(device)
 
     out = np.full((len(sel), n_members, grid.nlat, grid.nlon), np.nan, np.float32)
     for k, j in enumerate(sel):
@@ -212,7 +224,7 @@ def main():
             print(f"  {k}/{len(sel)}  {str(times[j])[:10]}", flush=True)
 
     precip = tf.inverse(out)                     # back to mm/day
-    precip = np.where(ds.valid[None, None] > 0, precip, np.nan)
+    precip = np.where(valid[None, None] > 0, precip, np.nan)
 
     da = xr.DataArray(
         precip,

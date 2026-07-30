@@ -272,6 +272,23 @@ comparable across validation cycles. A successfully completed run also writes
 `runs/prior_h100/final.pt`, which is the final epoch rather than necessarily
 the best validation epoch.
 
+## Plot held-out predictions
+
+After `runs/prior_h100/best.pt` exists, submit the held-out background
+diagnostic:
+
+```bash
+/path/to/BDhighresDA/slurm/submit_test_predictions.sh
+```
+
+It selects held-out days nearest the 50th, 90th, and 99th percentiles of
+Bangladesh-domain mean CHIRPS precipitation and generates a 16-member
+ERA5-conditioned ensemble for each day. The output figure,
+`data/processed/test_prediction_panels.png`, shows ERA5 precipitation, CHIRPS,
+the ensemble-mean prediction, signed error, and ensemble spread. The companion
+JSON report contains case-level ERA5 and model metrics. These target-selected
+cases are a visual stress test, not an aggregate test-period skill estimate.
+
 ## Submit assimilation
 
 After training has produced `runs/prior_h100/best.pt`, submit:

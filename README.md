@@ -103,6 +103,9 @@ slurm/submit_preflight_training_gh200.sh
 # 3. after PREFLIGHT PASSED, train on PRISM GH200:
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
 
+# Held-out best-checkpoint input/target/prediction/error/spread diagnostic:
+slurm/submit_test_predictions.sh
+
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
 python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
        --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json

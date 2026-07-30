@@ -37,6 +37,7 @@ class DatasetConfig:
     root: str
     crop: int = 128
     random_crop: bool = True
+    crop_origin: tuple[int, int] | None = None  # (row, column) for fixed crops
     years: tuple[int, int] | None = None      # inclusive
     seasonal_encoding: bool = True
     era5_member: int | None = None   # ERA5-EDA member index, or None for the
@@ -86,12 +87,33 @@ class PrecipDataset(Dataset):
         if c >= self.H:
             return 0, 0, self.H, self.W
         if self.cfg.random_crop:
+            if self.cfg.crop_origin is not None:
+                raise ValueError("crop_origin cannot be combined with random_crop=True")
             r0 = int(rng.integers(0, self.H - c + 1))
             c0 = int(rng.integers(0, self.W - c + 1))
+        elif self.cfg.crop_origin is not None:
+            r0, c0 = self.cfg.crop_origin
+            if r0 < 0 or c0 < 0 or r0 + c > self.H or c0 + c > self.W:
+                raise ValueError(
+                    f"fixed crop {(r0, c0, c, c)} is outside "
+                    f"the dataset grid {(self.H, self.W)}"
+                )
         else:
             r0 = (self.H - c) // 2
             c0 = (self.W - c) // 2
         return r0, c0, c, c
+
+    def fixed_spatial_slices(self) -> tuple[slice, slice]:
+        """Return the spatial slices used by a deterministic crop."""
+        if self.cfg.random_crop:
+            raise ValueError("random-crop datasets do not have fixed spatial slices")
+        r0, c0, ch, cw = self._crop_box(np.random.default_rng(0))
+        return slice(r0, r0 + ch), slice(c0, c0 + cw)
+
+    @property
+    def fixed_valid(self) -> np.ndarray:
+        """Land-validity mask on the deterministic output crop."""
+        return self.valid[self.fixed_spatial_slices()]
 
     def _seasonal(self, t: np.datetime64, h: int, w: int) -> np.ndarray:
         doy = (t.astype("datetime64[D]") - t.astype("datetime64[Y]")).astype(int)

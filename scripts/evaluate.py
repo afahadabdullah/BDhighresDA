@@ -27,7 +27,7 @@ from bdhires.da import BilinearObsOperator, GuidanceConfig, SamplerConfig, build
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
 from bdhires.eval import calibration_report, crps_ensemble, fss_series, summarize  # noqa: E402
-from bdhires.grids import get_grid  # noqa: E402
+from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
 from bdhires.transforms import PrecipTransform  # noqa: E402
 
@@ -76,7 +76,13 @@ def main():
     tf = PrecipTransform.from_dict(stats["precip_transform"])
 
     ds = PrecipDataset(
-        DatasetConfig(root=cfg["data"]["zarr"], crop=grid.nlon, random_crop=False), tf,
+        DatasetConfig(
+            root=cfg["data"]["zarr"],
+            crop=grid.nlon,
+            random_crop=False,
+            crop_origin=crop_offsets(WIDE, grid),
+        ),
+        tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
     )
@@ -86,7 +92,7 @@ def main():
         sel = sel[:: max(1, len(sel) // args.max_days)][: args.max_days]
 
     model, _ = load_model(args.ckpt, ds.total_cond_channels, grid.nlon, device)
-    mask = torch.from_numpy(ds.valid[None, None]).to(device)
+    mask = torch.from_numpy(ds.fixed_valid[None, None]).to(device)
 
     ss, values = load_stations(cfg["observations"]["gauges"]["csv"], times, grid=grid,
                                min_coverage=cfg["observations"]["gauges"]["min_coverage"])

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.da import BilinearObsOperator, GuidanceConfig, SamplerConfig, build_R
 from bdhires.da.sampler import assimilate
-from bdhires.grids import BD, Grid
+from bdhires.grids import BD, WIDE, Grid, crop_offsets
 from bdhires.models import RectifiedFlow, UNet, flow_matching_loss
 from bdhires.transforms import PrecipTransform
 
@@ -167,6 +167,29 @@ def test_dataset_roundtrip():
           np.allclose(tf.inverse(item["x1"].numpy()) * item["mask"].numpy(),
                       np.nan_to_num(ds.transform.inverse(item["x1"].numpy())) * item["mask"].numpy(),
                       atol=1e-4))
+
+    fixed = PrecipDataset(
+        DatasetConfig(root="", crop=32, random_crop=False, crop_origin=(7, 11)),
+        tf,
+        cond_mean=np.zeros(C, "f4"),
+        cond_std=np.ones(C, "f4"),
+        store=store,
+    )
+    fixed_item = fixed[0]
+    check("fixed crop uses requested row/column", fixed_item["crop"].tolist() == [7, 11])
+    check("fixed validity mask has output shape", fixed.fixed_valid.shape == (32, 32))
+    check(
+        "fixed crop target is spatially aligned",
+        np.allclose(
+            fixed_item["target_mm"].numpy()[0],
+            np.nan_to_num(tgt[0, 7:39, 11:43]),
+        ),
+    )
+    check(
+        "Bangladesh crop offsets match declared coordinates",
+        crop_offsets(WIDE, BD) == (86, 72),
+        f"got {crop_offsets(WIDE, BD)}",
+    )
 
 
 def test_block_average_operator():

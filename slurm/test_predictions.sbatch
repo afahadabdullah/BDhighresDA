@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=test-predictions
+#SBATCH --partition=grace
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=96G
+#SBATCH --time=01:00:00
+#SBATCH --output=logs/%x-%j.out
+
+set -euo pipefail
+
+module purge 2>/dev/null || true
+
+export ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
+PYTHON_BIN="$ENV_PREFIX/bin/python"
+export PYTHONNOUSERSITE=1
+export MPLBACKEND=Agg
+unset PYTHONHOME
+unset PYTHONPATH
+
+[[ -x "$PYTHON_BIN" ]] || {
+    echo "ERROR: ARM training Python not found: $PYTHON_BIN"
+    exit 1
+}
+
+cd "$SLURM_SUBMIT_DIR"
+export PYTHONPATH="$PWD/src"
+
+[[ -f scripts/08_plot_test_predictions.py &&
+   -f configs/da.yaml &&
+   -f runs/prior_h100/best.pt &&
+   -d data/processed/bd_wide.zarr &&
+   -f data/processed/stats.json ]] || {
+    echo "ERROR: Test script, best checkpoint, data, config, or statistics are missing."
+    exit 1
+}
+
+[[ "$(uname -m)" == "aarch64" ]] || {
+    echo "ERROR: This job must run on an aarch64 Grace node."
+    exit 1
+}
+
+MEMBERS="${TEST_MEMBERS:-16}"
+FIGURE="${TEST_FIGURE:-data/processed/test_prediction_panels.png}"
+REPORT="${TEST_REPORT:-data/processed/test_prediction_panels.json}"
+
+echo "Checkpoint: runs/prior_h100/best.pt"
+echo "Members: $MEMBERS"
+echo "Figure: $FIGURE"
+echo "Report: $REPORT"
+
+srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_plot_test_predictions.py \
+    --config configs/da.yaml \
+    --ckpt runs/prior_h100/best.pt \
+    --members "$MEMBERS" \
+    --out-figure "$FIGURE" \
+    --out-report "$REPORT"
