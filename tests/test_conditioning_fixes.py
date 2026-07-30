@@ -21,7 +21,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+from bdhires.transforms import (  # noqa: E402
+    CondTransform,
+    PrecipTransform,
+    ResidualSpec,
+)
 
 # The transform tests are pure numpy and must run anywhere.  Only the sampler and
 # dataset tests need torch, so guard those individually rather than skipping the
@@ -447,10 +451,185 @@ def test_training_configs_have_a_consistent_monitor_cadence():
         assert cfg["data"]["crop"] == 128, name
 
 
-def test_h100_config_points_at_v2_stats_and_a_fresh_run_dir():
-    """The retrain must not land on top of the old, incomparable run."""
+def test_h100_config_pairs_its_stats_file_with_a_matching_run_dir():
+    """Statistics files and run directories must move together.
+
+    Each parameterisation produces checkpoints that are not interchangeable:
+      v1  absolute target, raw z-scored conditioning
+      v2  absolute target, transformed conditioning
+      v3  residual target, transformed conditioning
+    A retrain must never land on top of a previous run's directory, and the two
+    settings must not drift apart.
+    """
     import yaml
 
     cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
-    assert cfg["data"]["stats"].endswith("stats_v2.json")
-    assert cfg["train"]["out_dir"] != "runs/prior_h100"
+    stats, out_dir = cfg["data"]["stats"], cfg["train"]["out_dir"]
+    assert stats != "data/processed/stats.json", "v1 stats are absolute-target"
+    assert out_dir != "runs/prior_h100", "would overwrite the v1 baseline"
+
+    version = stats.rsplit("_", 1)[-1].removesuffix(".json")   # 'v2', 'v3', ...
+    assert version.startswith("v"), stats
+    assert out_dir.endswith(version), (
+        f"stats {stats} and out_dir {out_dir} disagree on the version; "
+        f"mixing them silently trains on the wrong parameterisation"
+    )
+
+
+# --------------------------------------------------------------------------
+# 6. residual target parameterisation
+# --------------------------------------------------------------------------
+
+TF = PrecipTransform(kind="log1p", eps=0.1, mu=1.2, sd=0.9)
+
+
+def _spec(**kwargs):
+    return ResidualSpec(enabled=True, mean=0.3, std=1.4, **kwargs)
+
+
+def test_residual_encode_decode_round_trips():
+    """The only property that really matters: decode(encode(x)) == x."""
+    rng = np.random.default_rng(0)
+    chirps = rng.gamma(0.4, 12.0, (32, 32))
+    era5 = rng.gamma(0.5, 9.0, (32, 32))
+    spec = _spec()
+    target_t, base_t = TF.forward(chirps), TF.forward(era5)
+    encoded = spec.encode(target_t, base_t)
+    assert np.allclose(spec.decode(encoded, base_t), target_t, atol=1e-6)
+    # and all the way back to mm
+    assert np.allclose(TF.inverse(spec.decode(encoded, base_t)), chirps, rtol=1e-5)
+
+
+def test_disabled_spec_is_the_identity():
+    """Absolute-target checkpoints must be unaffected by the new code path."""
+    spec = ResidualSpec()
+    values = np.linspace(-3, 3, 25)
+    base = np.full_like(values, 7.7)
+    assert np.array_equal(spec.encode(values, base), values)
+    assert np.array_equal(spec.decode(values, base), values)
+    assert spec.fill == 0.0
+
+
+def test_zero_residual_reproduces_era5_exactly():
+    """The skill floor: the model can always fall back to its own conditioning."""
+    rng = np.random.default_rng(1)
+    era5 = rng.gamma(0.5, 9.0, (16, 16))
+    base_t = TF.forward(era5)
+    spec = _spec()
+    # a network output of `fill` means "no correction"
+    prediction = np.full_like(base_t, spec.fill)
+    assert np.allclose(TF.inverse(spec.decode(prediction, base_t)), era5, rtol=1e-5)
+
+
+def test_residual_output_can_never_be_negative():
+    """Non-negativity is automatic because reconstruction goes through inverse()."""
+    rng = np.random.default_rng(2)
+    era5 = rng.gamma(0.5, 9.0, (64, 64))
+    base_t = TF.forward(era5)
+    spec = _spec()
+    # even a wildly negative residual cannot produce negative rainfall
+    extreme = np.full_like(base_t, -50.0)
+    recovered = TF.inverse(spec.decode(extreme, base_t))
+    assert np.isfinite(recovered).all()
+    assert (recovered >= 0).all()
+
+
+def test_residual_is_better_conditioned_than_an_mm_space_residual():
+    """Why log space: an mm-space residual is heteroscedastic, log space is not.
+
+    Split the domain into light and heavy rain and compare the spread of the
+    residual in each. In mm space the heavy half is far noisier; in transformed
+    space the two are comparable, which is what an MSE loss needs.
+    """
+    rng = np.random.default_rng(3)
+    chirps = rng.gamma(0.4, 12.0, 20000)
+    era5 = chirps * rng.lognormal(0.0, 0.5, 20000)      # multiplicative error
+    light, heavy = chirps < np.median(chirps), chirps >= np.median(chirps)
+
+    mm_ratio = (chirps - era5)[heavy].std() / ((chirps - era5)[light].std() + 1e-9)
+    log_residual = TF.forward(chirps) - TF.forward(era5)
+    log_ratio = log_residual[heavy].std() / (log_residual[light].std() + 1e-9)
+
+    assert mm_ratio > 5.0, mm_ratio          # mm space: wildly heteroscedastic
+    assert log_ratio < 2.0, log_ratio        # log space: roughly homoscedastic
+
+
+def test_residual_spec_round_trips_through_json():
+    import json
+
+    spec = _spec(base_channel=0)
+    restored = ResidualSpec.from_stats(
+        json.loads(json.dumps({"residual": spec.to_dict()}))
+    )
+    assert restored == spec
+
+
+def test_from_stats_defaults_to_absolute_for_older_files():
+    assert ResidualSpec.from_stats({"cond_mean": [0.0]}).enabled is False
+
+
+@needs_torch
+def test_encode_decode_agree_between_numpy_and_torch():
+    spec = _spec()
+    values = np.linspace(-2.0, 2.0, 40).astype(np.float32)
+    base = np.linspace(0.0, 3.0, 40).astype(np.float32)
+    np_out = spec.decode(values, base)
+    pt_out = spec.decode(torch.from_numpy(values), torch.from_numpy(base))
+    assert np.allclose(np_out, pt_out.numpy(), atol=1e-6)
+
+
+@needs_torch
+def test_dataset_in_residual_mode_masks_to_no_correction():
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=True, min_valid_fraction=0.0)
+    spec = _spec()
+    ds = PrecipDataset(
+        cfg, TF, store=store,
+        cond_transform=CondTransform.for_channels(CHANNELS),
+        residual=spec,
+    )
+    assert ds.mask_fill == pytest.approx(spec.fill)
+    item = ds[0]
+    x1, mask, base = (
+        item["x1"].numpy(), item["mask"].numpy(), item["base"].numpy()
+    )
+    assert base.shape == x1.shape
+    assert np.allclose(x1[mask == 0], spec.fill)
+    # decoding the masked cells reproduces the ERA5 base there
+    decoded = spec.decode(x1, base)
+    assert np.allclose(decoded[mask == 0], base[mask == 0], atol=1e-5)
+
+
+@needs_torch
+def test_dataset_residual_decodes_back_to_the_stored_target():
+    """End-to-end: what the network is asked to learn must reconstruct CHIRPS."""
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=False, crop_origin=(32, 0))
+    ds = PrecipDataset(
+        cfg, TF, store=store,
+        cond_transform=CondTransform.for_channels(CHANNELS),
+        residual=_spec(),
+    )
+    item = ds[0]
+    x1, base, mask = (
+        item["x1"].numpy(), item["base"].numpy(), item["mask"].numpy()
+    )
+    recovered = TF.inverse(ds.residual.decode(x1, base))
+    expected = item["target_mm"].numpy()
+    assert np.allclose(recovered[mask > 0], expected[mask > 0], rtol=1e-4, atol=1e-4)
+
+
+@needs_torch
+def test_absolute_mode_dataset_is_unchanged_by_the_residual_code():
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=False, crop_origin=(32, 0))
+    kwargs = dict(
+        store=store, cond_transform=CondTransform.for_channels(CHANNELS)
+    )
+    absolute = PrecipDataset(cfg, TF, **kwargs)[0]
+    explicit = PrecipDataset(cfg, TF, residual=ResidualSpec(), **kwargs)[0]
+    assert np.allclose(absolute["x1"].numpy(), explicit["x1"].numpy())
+    # x1 is still the plain transformed target
+    mask = absolute["mask"].numpy()
+    direct = TF.forward(absolute["target_mm"].numpy())
+    assert np.allclose(absolute["x1"].numpy()[mask > 0], direct[mask > 0], atol=1e-5)

@@ -1,14 +1,14 @@
-# Runbook: the v2 training run
+# Runbook: the v3 training run (residual target)
 
 Everything from `git pull` to a scored checkpoint. Companion to
 `docs/DIAGNOSIS_epoch119.md`.
 
 ## The three questions up front
 
-**Do I need to retrain from scratch?** Yes. The conditioning transform changes
-what the ERA5 input channels *mean*, so the epoch-119 weights are fitted to a
-different input distribution. Warm-starting would be worse than useless.
-`configs/train_h100.yaml` now writes to `runs/prior_h100_v2`, so this happens
+**Do I need to retrain from scratch?** Yes. v3 changes both what the ERA5 input
+channels *mean* (conditioning transform) and what the network *predicts* (the
+residual target). No previous checkpoint is compatible with either.
+`configs/train_h100.yaml` now writes to `runs/prior_h100_v3`, so this happens
 automatically and `runs/prior_h100` survives as the before/after baseline.
 
 **Do I delete the old scripts?** No. Nothing is superseded — the changes are edits
@@ -16,10 +16,10 @@ to existing files and are all in git. Do **not** delete `runs/prior_h100/` eithe
 Step 2 uses it to measure how much of the damage was the sampler alone.
 
 **Do I rerun stats?** Yes — `06_compute_stats.py` only, writing to a **new file**
-`stats_v2.json`. You do **not** repack the Zarr: the transform is applied at load
+`stats_v3.json`. You do **not** repack the Zarr: the transform is applied at load
 time, so ERA5 stays in raw physical units on disk. That saves a multi-day repack.
 
-> ⚠️ Keep `stats.json` and `stats_v2.json` side by side. The old checkpoint needs
+> ⚠️ Keep `stats.json` and `stats_v3.json` side by side. The old checkpoint needs
 > the old file. `CondTransform.from_stats` returns the identity for statistics
 > written before this change, so `runs/prior_h100` stays exactly reproducible.
 
@@ -55,13 +55,14 @@ squeue -u "$USER"
 tail -f logs/bdhires-tests-*.out
 ```
 
-Expect **26 passed** from `tests/test_conditioning_fixes.py`. The 10 numpy-only
-tests already pass; the 16 requiring torch have not been executed anywhere yet,
-so **this is the first real check** — do not skip it.
+Expect **52 passed, 15 skipped** from `tests/test_conditioning_fixes.py` and
+`tests/test_progress_and_summary.py`. The skips are torch-dependent tests that
+cannot run in the authoring environment, so on the cluster they should all
+execute — **this is the first real check** of the residual code path.
 
 The job also runs the full suite and the smoke test. Full-suite failures in
 `test_era5_earthmover.py` / `test_pack_alignment.py` / `test_dem_download.py`
-are pre-existing dependency gaps, not regressions; the v2 suite result is the
+are pre-existing dependency gaps, not regressions; the v3 suite result is the
 one that matters.
 
 If you prefer an interactive shell:
@@ -80,7 +81,7 @@ export PYTHONPATH="$PWD/src" PYTHONNOUSERSITE=1
 The repo enforces a checksum chain, and each link pins `git rev-parse HEAD`:
 
 ```
-stats_v2.json
+stats_v3.json
    └─> normalization_diagnostics.{json,png}   pins stats sha256 + git HEAD
           └─> training_preflight.json         pins normalization sha256 + git HEAD
                  └─> train_h100.sbatch        pins preflight sha256 + git HEAD
@@ -100,7 +101,7 @@ differs from the one that was validated.
 
 1. Run Steps 1a → 1c → 3 in order, and **do not commit anything between 1b and
    3**. If you do, rerun from 1b.
-2. The chain must be rebuilt against `stats_v2.json`, not the old `stats.json` —
+2. The chain must be rebuilt against `stats_v3.json`, not the old `stats.json` —
    the normalization diagnostics hash the statistics file they were given.
 
 ## Step 1 — recompute statistics (~10 min)
@@ -108,16 +109,23 @@ differs from the one that was validated.
 `compute_stats.sbatch` already parameterises the output path, so no edit needed:
 
 ```bash
-STATS_OUT=data/processed/stats_v2.json bash slurm/submit_compute_stats.sh
+STATS_OUT=data/processed/stats_v3.json \
+STATS_RESIDUAL=1 \
+    bash slurm/submit_compute_stats.sh
 tail -f logs/*compute*stats*.out
 ```
+
+`STATS_RESIDUAL=1` switches the target to `T(CHIRPS) - T(ERA5_tp)` in
+transformed space. The job prints a `residual target:` block; check
+`encoded_std` is near 1 and `base_correlation` is sensible (that is how much of
+CHIRPS the ERA5 base already explains).
 
 **Check it worked** (pure stdlib, so the login node is fine here):
 
 ```bash
 python -c "
 import json
-s = json.load(open('data/processed/stats_v2.json'))
+s = json.load(open('data/processed/stats_v3.json'))
 print('transform:', s['cond_transform'])
 for name, mean, sd in zip(s['cond_channels'], s['cond_mean'], s['cond_std']):
     print(f'  {name:12s} mean={mean:12.4f} sd={sd:12.4f}')
@@ -130,9 +138,9 @@ for name, mean, sd in zip(s['cond_channels'], s['cond_mean'], s['cond_std']):
 ## Step 1b — normalization diagnostics against the new statistics
 
 ```bash
-NORM_STATS=data/processed/stats_v2.json \
-NORM_FIGURE=data/processed/normalization_diagnostics_v2.png \
-NORM_REPORT=data/processed/normalization_diagnostics_v2.json \
+NORM_STATS=data/processed/stats_v3.json \
+NORM_FIGURE=data/processed/normalization_diagnostics_v3.png \
+NORM_REPORT=data/processed/normalization_diagnostics_v3.json \
     bash slurm/submit_normalization_diagnostics.sh
 ```
 
@@ -143,7 +151,7 @@ spike at zero with a 20-sigma tail.
 ## Step 1c — rerun the training preflight
 
 ```bash
-PREFLIGHT_NORM_REPORT=data/processed/normalization_diagnostics_v2.json \
+PREFLIGHT_NORM_REPORT=data/processed/normalization_diagnostics_v3.json \
     bash slurm/submit_preflight_training_gh200.sh
 ```
 
@@ -191,7 +199,7 @@ separate change. Then rerun at 1.5, 2.0, 3.0 and watch `spatial_correlation`.
 term.
 
 > This step uses the OLD `stats.json`, which `configs/da.yaml` still points at.
-> Leave it that way until the v2 checkpoint exists.
+> Leave it that way until the v3 checkpoint exists.
 
 ## Step 3 — launch the 250k-step run
 
@@ -220,7 +228,7 @@ The sampled validation runs on two fixed held-out **July** days — a typical on
 Same dates every time, so the curves are directly comparable.
 
 ```
-runs/prior_h100_v2/validation/
+runs/prior_h100_v3/validation/
   history.jsonl      one JSON row per evaluation, append-only
   epoch_0010.png     map panel: ERA5 | CHIRPS | ens mean | single member | error
   epoch_0015.png
@@ -239,7 +247,7 @@ Metric history without opening images (stdlib only, so the login node is fine):
 ```bash
 python -c "
 import json
-for line in open('runs/prior_h100_v2/validation/history.jsonl'):
+for line in open('runs/prior_h100_v3/validation/history.jsonl'):
     r = json.loads(line)
     print(f\"epoch {r['epoch']:4d}  CRPS {r['mean_crps_mm']:6.3f}  \" +
           '  '.join(f\"{c['date']}: bias {c['bias_mm']:+6.2f} r {c['spatial_correlation']:.2f}\"
@@ -270,15 +278,15 @@ disable, set `validation.enabled: false`.
 
 ## Step 5 — score the new checkpoint
 
-First update `configs/da.yaml:data.stats` to `data/processed/stats_v2.json` — the
+First update `configs/da.yaml:data.stats` to `data/processed/stats_v3.json` — the
 v2 checkpoint needs the v2 conditioning. Revert it if you re-score the old run.
 
 ```bash
-TEST_CKPT=runs/prior_h100_v2/best.pt \
-TEST_MAP_FIGURE=data/processed/test_prediction_maps_v2.png \
-TEST_METRICS_FIGURE=data/processed/test_prediction_metrics_v2.png \
-TEST_CASE_DIR=data/processed/test_prediction_cases_v2 \
-TEST_REPORT=data/processed/test_prediction_report_v2.json \
+TEST_CKPT=runs/prior_h100_v3/best.pt \
+TEST_MAP_FIGURE=data/processed/test_prediction_maps_v3.png \
+TEST_METRICS_FIGURE=data/processed/test_prediction_metrics_v3.png \
+TEST_CASE_DIR=data/processed/test_prediction_cases_v3 \
+TEST_REPORT=data/processed/test_prediction_report_v3.json \
     bash slurm/submit_test_predictions.sh
 ```
 
@@ -288,8 +296,8 @@ TEST_REPORT=data/processed/test_prediction_report_v2.json \
 
 | File | Key | Was | Now |
 |---|---|---|---|
-| `train_h100.yaml` | `data.stats` | `stats.json` | `stats_v2.json` |
-| | `train.out_dir` | `runs/prior_h100` | `runs/prior_h100_v2` |
+| `train_h100.yaml` | `data.stats` | `stats.json` | `stats_v3.json` |
+| | `train.out_dir` | `runs/prior_h100` | `runs/prior_h100_v3` |
 | | `train.epochs` | 120 | 580 |
 | | `train.ckpt_every` | 5 | 5 (must divide `validation.every`) |
 | | `data.min_valid_fraction` | — | 0.3 |

@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..transforms import CondTransform, PrecipTransform
+from ..transforms import CondTransform, PrecipTransform, ResidualSpec
 
 
 @dataclass
@@ -57,6 +57,7 @@ class PrecipDataset(Dataset):
         split_index: np.ndarray | None = None,
         store=None,
         cond_transform: CondTransform | None = None,
+        residual: ResidualSpec | None = None,
     ):
         self.cfg = cfg
         if store is not None:
@@ -83,12 +84,17 @@ class PrecipDataset(Dataset):
         self.H, self.W = self.valid.shape
         self.n_cond = self.z["cond"].shape[1]
         self.cond_transform = cond_transform or CondTransform.identity(self.n_cond)
+        self.residual = residual or ResidualSpec()
 
         # Zero is not "no rain" in transformed space: forward(0 mm) is -mu/sd.
         # Filling masked cells with a literal 0.0 would encode a moderate rain
         # rate over the Bay of Bengal, which the global attention blocks then mix
         # into the land field (docs/DIAGNOSIS_epoch119.md item 5).
         self.mask_fill = float(np.asarray(self.transform.forward(np.float32(0.0))))
+        if self.residual.enabled:
+            # In residual mode the masked value means "no correction to ERA5",
+            # which is both finite and the least informative thing to say.
+            self.mask_fill = float(self.residual.fill)
 
     def __len__(self) -> int:
         return len(self.index)
@@ -165,7 +171,18 @@ class PrecipDataset(Dataset):
         target = np.where(finite, target, 0.0)
         mask = (valid * finite).astype(np.float32)
 
-        x1 = np.where(mask > 0, self.transform.forward(target), self.mask_fill)
+        # The residual base is ERA5 tp in the SAME transformed space as the
+        # target, taken from the raw (untransformed, unstandardised) cond array
+        # before the conditioning transform is applied to it.
+        base = self.transform.forward(
+            np.clip(cond[self.residual.base_channel], 0.0, None)
+        ).astype(np.float32)
+
+        x1 = np.where(
+            mask > 0,
+            self.residual.encode(self.transform.forward(target), base),
+            self.mask_fill,
+        )
         x1 = x1.astype(np.float32)[None]
 
         cond = self.cond_transform.forward(cond, channel_axis=0)
@@ -185,6 +202,10 @@ class PrecipDataset(Dataset):
             "time": torch.tensor(self.time[j].astype("datetime64[s]").astype(np.int64)),
             "target_mm": torch.from_numpy(target[None]),
             "crop": torch.tensor([r0, c0]),
+            # Transformed ERA5 tp.  Needed to turn a residual prediction back
+            # into precipitation; harmless (and still useful as a baseline) when
+            # the residual parameterisation is off.
+            "base": torch.from_numpy(base[None]),
         }
 
     @property

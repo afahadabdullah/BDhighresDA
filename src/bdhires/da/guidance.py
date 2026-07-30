@@ -81,6 +81,7 @@ def guidance_grad(
     cfg: GuidanceConfig,
     mask: torch.Tensor | None = None,
     mask_fill: float = 0.0,
+    to_precip=None,
 ):
     """Return ``(velocity, grad_x log p(y|x_t))``.
 
@@ -91,6 +92,13 @@ def guidance_grad(
     the block-average observation operator averages over 2x2 cells that may
     straddle the coast: pinning the ocean half to a literal 0.0 would inject a
     spurious rain rate into the modelled satellite observation.
+
+    ``to_precip`` maps the network's variable into transformed-precipitation
+    space.  It is the identity for an absolute target and adds the ERA5 base for
+    a residual target -- the observation operator compares against measured
+    rainfall either way, so the likelihood must always be evaluated on the
+    reconstructed field, never on a bare residual.  The gradient still flows back
+    through it to ``x_t`` because the mapping is affine and differentiable.
     """
     with torch.enable_grad():
         x = x_t.detach().requires_grad_(True)
@@ -98,6 +106,8 @@ def guidance_grad(
         x1_hat = flow.x1_hat(x, t, u)
         if mask is not None:
             x1_hat = x1_hat * mask + mask_fill * (1.0 - mask)
+        if to_precip is not None:
+            x1_hat = to_precip(x1_hat)
         hx = H(x1_hat)
         ll = obs_log_likelihood(y, hx, R, t, cfg).sum()
         (grad,) = torch.autograd.grad(ll, x)

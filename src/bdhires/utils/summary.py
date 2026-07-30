@@ -124,6 +124,28 @@ def training_summary(
         add(_row("cond transform", "  ".join(applied) if applied else "identity"))
     else:
         add(_row("cond transform", "identity (pre-v2 stats file)"))
+    residual = stats.get("residual", {})
+    if residual.get("enabled"):
+        summary = stats.get("residual_summary") or {}
+        base = summary.get("base_channel_name", "era5_tp")
+        add(_row(
+            "target",
+            f"RESIDUAL: T(CHIRPS) - T({base}), standardised "
+            f"(mean {residual.get('mean', 0):.4f}, std {residual.get('std', 1):.4f})",
+        ))
+        if summary:
+            add(_sub(
+                f"encoded target mean {summary.get('encoded_mean', float('nan')):+.4f}  "
+                f"std {summary.get('encoded_std', float('nan')):.4f}  "
+                f"|max| {summary.get('encoded_abs_max', float('nan')):.1f}"
+            ))
+            add(_sub(
+                f"base explains r={summary.get('base_correlation', float('nan')):.3f} "
+                f"of the transformed target"
+            ))
+        add(_sub("zero residual reproduces ERA5, so the model has a skill floor"))
+    else:
+        add(_row("target", "ABSOLUTE: T(CHIRPS)"))
     years = data["years"]
     add(_row(
         "train",

@@ -40,7 +40,11 @@ from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+from bdhires.transforms import (  # noqa: E402
+    CondTransform,
+    PrecipTransform,
+    ResidualSpec,
+)
 
 
 def load_model(ckpt_path: str, cond_channels: int, crop: int, device):
@@ -178,6 +182,7 @@ def main():
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
+        residual=ResidualSpec.from_stats(stats),
     )
     times = ds.time
     sel = np.where((times >= np.datetime64(args.start)) & (times <= np.datetime64(args.end)))[0]
@@ -214,6 +219,7 @@ def main():
     for k, j in enumerate(sel):
         item = ds[int(j)]
         cond = item["cond"][None].to(device)
+        base = item["base"][None].to(device)
         y = None
         if args.mode != "background":
             if perturb:
@@ -225,12 +231,15 @@ def main():
             else:
                 yj = np.repeat(y_all[j][None], n_members, axis=0)
             y = torch.from_numpy(yj[:, None].astype(np.float32)).to(device)  # (M,1,S)
-        out[k] = run_assim(
+        out_raw = run_assim(
             model,
             None if args.mode == "prior" else cond,
             (n_members, 1, grid.nlat, grid.nlon),
             device, H=H, y=y, R=R, cfg=scfg, gcfg=gcfg, flow=flow, mask=mask,
-        ).squeeze(1).cpu().numpy()
+            to_precip=lambda x, b=base: ds.residual.decode(x, b),
+        )
+        # Decode to transformed-precipitation space before storing.
+        out[k] = ds.residual.decode(out_raw, base).squeeze(1).cpu().numpy()
         if k % 20 == 0:
             print(f"  {k}/{len(sel)}  {str(times[j])[:10]}", flush=True)
 

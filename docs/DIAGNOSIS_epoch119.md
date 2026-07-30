@@ -193,6 +193,62 @@ carry far more information than u10/v10/msl.
 
 ---
 
+## Update — the v3 residual target
+
+The v2 run (transformed conditioning, absolute target) was stopped at epoch 20.
+Three sampled-validation points showed CRPS below the ERA5 baseline on both
+cases, but **RMSE still worse than ERA5** and **spatial correlation falling**
+(q99 0.405 → 0.301, q50 0.306 → 0.284). Too few points to be conclusive, but the
+same failure mode as epoch 119.
+
+v3 changes the target parameterisation:
+
+    residual = ( T(CHIRPS) - T(ERA5_tp) - mean ) / std
+
+The argument is structural rather than empirical. **The zero-residual solution
+is ERA5.** The model no longer has to learn the identity map before it can
+improve on its own conditioning, so "worse than the input" stops being
+reachable. That is precisely the failure both runs exhibited.
+
+Three properties make the *transformed-space* residual the right choice over an
+mm-space one:
+
+1. It is a multiplicative correction in physical space, which is how
+   precipitation bias behaves.
+2. It is roughly homoscedastic. An mm-space residual has error growing with
+   intensity — measured on synthetic data, the heavy-rain half is >5x noisier
+   than the light half in mm space but <2x in log space. MSE-based flow matching
+   needs the latter.
+3. Non-negativity is automatic: reconstruction goes back through
+   `PrecipTransform.inverse`, which cannot return negative rainfall. A signed
+   mm-space residual would need clipping, and clipping a symmetric error at zero
+   introduces a wet bias.
+
+**Known risk.** ERA5 misplaces rainfall over the Meghalaya and Chittagong
+orographic maxima. Where the base field puts rain in the wrong place the residual
+becomes a dipole — remove here, add there — which can be harder to learn than the
+field itself. The published remedy is a *learned* deterministic base (CorrDiff)
+rather than the raw predictor. This is the cheap intermediate, and if the
+correlation still fails to clear the baseline, that is the next step.
+
+Controlled by `residual.enabled` in `stats.json`, so the same codebase runs both
+parameterisations and an A/B remains possible without a code change.
+
+### On min-max normalisation
+
+Considered and rejected. Min-max is a *linear* rescale exactly like z-score, so
+it does nothing about skewness — it would not have fixed `era5_tp`; only the
+nonlinear `log1p` did. It is also strictly worse here: the scale is set by the
+two most extreme values in the sample, test values escape [0, 1] with no
+guarantee, and a [0, 1] marginal is badly matched to the `x0 ~ N(0, I)` the flow
+path interpolates from.
+
+The real remaining issue is *shape*, not scale: the normalized `tp` and `cape`
+marginals are still zero-inflated, and `tcwv`/`msl` are bimodal (the seasonal
+split). The remedies that actually address that are a rank-gauss/quantile
+transform on the conditioning channels, and per-pixel day-of-year climatological
+anomaly normalisation. Both remain open.
+
 ## Do you need a better model?
 
 **Not yet.** Items 1–3 are hours of work and two of them need no retraining at

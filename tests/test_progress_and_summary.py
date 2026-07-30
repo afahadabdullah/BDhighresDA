@@ -246,9 +246,12 @@ def _summary(stats=None, monitor=None, **kwargs):
 
 def test_summary_reports_the_facts_that_matter():
     text = _summary()
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
     for expected in [
-        "runs/prior_h100_v2",             # not the old run directory
-        "stats_v2.json",
+        cfg["train"]["out_dir"],          # never the old run directory
+        Path(cfg["data"]["stats"]).name,
         "era5_tp:log1p",                  # the v2 conditioning
         "era5_cape:sqrt",
         "13,880 days",
@@ -258,6 +261,7 @@ def test_summary_reports_the_facts_that_matter():
         "training from scratch",
     ]:
         assert expected in text, expected
+    assert "runs/prior_h100\n" not in text
 
 
 def test_summary_shows_attention_at_the_right_levels():
@@ -273,6 +277,25 @@ def test_summary_shows_attention_at_the_right_levels():
         if stripped.startswith("3 ") and "16x16" in stripped:
             assert stripped.endswith("yes")
     assert rows
+
+
+def test_summary_states_the_target_parameterisation():
+    """A reader must be able to tell absolute from residual at a glance."""
+    absolute = _summary()
+    assert "ABSOLUTE" in absolute
+
+    residual_stats = dict(_STATS)
+    residual_stats["residual"] = {
+        "enabled": True, "mean": 0.31, "std": 1.42, "base_channel": 0
+    }
+    residual_stats["residual_summary"] = {
+        "base_channel_name": "era5_tp", "encoded_mean": 0.0,
+        "encoded_std": 1.0, "encoded_abs_max": 6.2, "base_correlation": 0.71,
+    }
+    text = _summary(stats=residual_stats)
+    assert "RESIDUAL" in text
+    assert "era5_tp" in text
+    assert "skill floor" in text
 
 
 def test_summary_flags_a_pre_v2_stats_file():

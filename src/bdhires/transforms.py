@@ -286,3 +286,96 @@ class CondTransform:
         if "cond_transform" in stats:
             return cls.from_dict(stats["cond_transform"])
         return cls.identity(len(stats["cond_mean"]))
+
+
+# ---------------------------------------------------------------------------
+# Residual target parameterisation
+# ---------------------------------------------------------------------------
+#
+# Instead of generating CHIRPS directly, the network can generate the correction
+# to apply to ERA5:
+#
+#     residual = ( T(CHIRPS) - T(ERA5_tp) - mean ) / std
+#
+# where T is the PrecipTransform.  Three properties make this worth doing:
+#
+# 1. The zero-residual solution IS ERA5.  The model starts from its own
+#    conditioning rather than having to learn the identity map first, so it
+#    cannot score below the field it is conditioned on -- which is exactly how
+#    the epoch-119 run failed (docs/DIAGNOSIS_epoch119.md).
+#
+# 2. Taken in TRANSFORMED space this is a multiplicative correction in mm space,
+#    which is how precipitation bias actually behaves.  A residual in mm space
+#    would be heavily heteroscedastic (error growing with intensity) and a poor
+#    fit for an MSE-based flow-matching loss.
+#
+# 3. Non-negativity is automatic: the reconstruction goes back through
+#    ``PrecipTransform.inverse``, which cannot return a negative rain rate.  A
+#    signed mm-space residual would need clipping, and clipping a symmetric
+#    error at zero introduces a wet bias.
+#
+# Known risk: ERA5 misplaces rainfall over the Meghalaya and Chittagong
+# orographic maxima.  Where the base field puts rain in the wrong place the
+# residual becomes a dipole, which can be harder to learn than the field itself.
+# The published remedy is a LEARNED deterministic base (CorrDiff, Mardani et al.)
+# rather than the raw predictor; this is the cheap intermediate.
+
+
+@dataclass(frozen=True)
+class ResidualSpec:
+    """How the network's output maps to transformed-precipitation space.
+
+    Disabled (the default) is the identity, so every call site can simply always
+    call :meth:`encode` and :meth:`decode` regardless of mode.
+    """
+
+    enabled: bool = False
+    mean: float = 0.0
+    std: float = 1.0
+    base_channel: int = 0        # index of era5_tp within the cond stack
+
+    def encode(self, target_t, base_t):
+        """Transformed CHIRPS + transformed ERA5 -> the network's target."""
+        if not self.enabled:
+            return target_t
+        return (target_t - base_t - self.mean) / self.std
+
+    def decode(self, prediction, base_t):
+        """The network's output -> transformed CHIRPS."""
+        if not self.enabled:
+            return prediction
+        return prediction * self.std + self.mean + base_t
+
+    @property
+    def fill(self) -> float:
+        """Network-space value meaning "no correction to ERA5".
+
+        Used for masked cells: over the ocean the sensible statement is that the
+        model has nothing to add to the background, not that it is raining some
+        arbitrary amount.
+        """
+        if not self.enabled:
+            return 0.0
+        return -self.mean / self.std
+
+    def to_dict(self) -> dict:
+        return dict(
+            enabled=self.enabled, mean=self.mean, std=self.std,
+            base_channel=self.base_channel,
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResidualSpec":
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            mean=float(d.get("mean", 0.0)),
+            std=float(d.get("std", 1.0)),
+            base_channel=int(d.get("base_channel", 0)),
+        )
+
+    @classmethod
+    def from_stats(cls, stats: dict) -> "ResidualSpec":
+        """Absolute-target statistics files decode to the identity."""
+        if "residual" in stats:
+            return cls.from_dict(stats["residual"])
+        return cls()

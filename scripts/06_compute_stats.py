@@ -19,7 +19,11 @@ import numpy as np
 import zarr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+from bdhires.transforms import (  # noqa: E402
+    CondTransform,
+    PrecipTransform,
+    ResidualSpec,
+)
 
 
 def main():
@@ -35,6 +39,18 @@ def main():
         help="reproduce pre-2026 statistics: standardise raw ERA5 channels with "
              "no variance stabilisation (not recommended; see "
              "docs/DIAGNOSIS_epoch119.md item 1)",
+    )
+    ap.add_argument(
+        "--residual",
+        action="store_true",
+        help="parameterise the target as a correction to ERA5 tp in transformed "
+             "space instead of the absolute field",
+    )
+    ap.add_argument(
+        "--era5-tp-index",
+        type=int,
+        default=0,
+        help="index of era5_tp within the conditioning stack (the residual base)",
     )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -75,6 +91,53 @@ def main():
             f"contains {cond.shape[1]}"
         )
 
+    # Residual statistics come from the RAW tp channel, before the conditioning
+    # transform is applied below -- the residual base lives in precipitation
+    # space (PrecipTransform), not in conditioning space.
+    residual = ResidualSpec(enabled=False)
+    residual_summary = None
+    if args.residual:
+        if not 0 <= args.era5_tp_index < cond.shape[1]:
+            raise ValueError(
+                f"--era5-tp-index {args.era5_tp_index} is outside the "
+                f"{cond.shape[1]} conditioning channels"
+            )
+        base_name = channels[args.era5_tp_index]
+        if "tp" not in base_name:
+            raise ValueError(
+                f"--era5-tp-index {args.era5_tp_index} selects {base_name!r}, "
+                f"which does not look like total precipitation"
+            )
+        finite = np.isfinite(tgt) & valid[None]
+        target_t = tf.forward(np.where(finite, tgt, 0.0).astype(np.float64))
+        base_t = tf.forward(
+            np.clip(cond[:, args.era5_tp_index], 0.0, None).astype(np.float64)
+        )
+        difference = (target_t - base_t)[finite]
+        if not np.isfinite(difference).all():
+            raise ValueError("the residual target contains non-finite values")
+        residual = ResidualSpec(
+            enabled=True,
+            mean=float(difference.mean()),
+            std=float(difference.std() + 1e-12),
+            base_channel=int(args.era5_tp_index),
+        )
+        encoded = (difference - residual.mean) / residual.std
+        residual_summary = dict(
+            base_channel_name=base_name,
+            raw_mean=residual.mean,
+            raw_std=residual.std,
+            # the network's actual target: should be ~N(0, 1)
+            encoded_mean=float(encoded.mean()),
+            encoded_std=float(encoded.std()),
+            encoded_abs_max=float(np.abs(encoded).max()),
+            # how much of CHIRPS the base already explains
+            base_correlation=float(
+                np.corrcoef(target_t[finite], base_t[finite])[0, 1]
+            ),
+        )
+        print("residual target:", json.dumps(residual_summary, indent=2))
+
     # Variance-stabilise the skewed predictors BEFORE standardising, so that
     # cond_mean/cond_std describe the values the network actually sees.  The
     # spec is written into the output; PrecipDataset reads it back.
@@ -95,6 +158,8 @@ def main():
     stats = dict(
         precip_transform=tf.to_dict(),
         cond_transform=ctf.to_dict(),
+        residual=residual.to_dict(),
+        residual_summary=residual_summary,
         cond_mean=cm.tolist(),
         cond_std=cs.tolist(),
         cond_channels=channels,

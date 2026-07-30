@@ -84,9 +84,20 @@ echo "Transform: $TRANSFORM"
 echo "Output: $OUTPUT"
 echo "Python: $PYTHON_BIN"
 
+STATS_ARGS=()
+# STATS_RESIDUAL=1 parameterises the target as a correction to ERA5 tp in
+# transformed space rather than the absolute field.
+if [[ "${STATS_RESIDUAL:-0}" == "1" ]]; then
+    STATS_ARGS+=(--residual --era5-tp-index "${STATS_ERA5_TP_INDEX:-0}")
+    echo "Target: RESIDUAL (base = conditioning channel ${STATS_ERA5_TP_INDEX:-0})"
+else
+    echo "Target: ABSOLUTE"
+fi
+
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/06_compute_stats.py \
     --zarr "$ZARR_STORE" \
     --train-years "$TRAIN_START" "$TRAIN_END" \
     --transform "$TRANSFORM" \
     --sample-days "$SAMPLE_DAYS" \
+    "${STATS_ARGS[@]}" \
     --out "$OUTPUT"

@@ -35,7 +35,11 @@ from bdhires.da.sampler import sample  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+from bdhires.transforms import (  # noqa: E402
+    CondTransform,
+    PrecipTransform,
+    ResidualSpec,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -683,6 +687,7 @@ def main() -> None:
         cond_mean=np.asarray(stats["cond_mean"], dtype=np.float32),
         cond_std=np.asarray(stats["cond_std"], dtype=np.float32),
         cond_transform=CondTransform.from_stats(stats),
+        residual=ResidualSpec.from_stats(stats),
     )
     valid = dataset.fixed_valid > 0
     if valid.shape != grid.shape:
@@ -735,6 +740,7 @@ def main() -> None:
     mask = torch.from_numpy(valid.astype(np.float32)[None, None]).to(device)
     era5_tp_index = int(config["data"].get("era5_tp_cond_index", 0))
     condition_transform = CondTransform.from_stats(stats)
+    residual_spec = ResidualSpec.from_stats(stats)
     condition_mean = np.asarray(stats["cond_mean"], dtype=np.float32)
     condition_std = np.asarray(stats["cond_std"], dtype=np.float32)
 
@@ -763,6 +769,7 @@ def main() -> None:
         era5_input = np.where(valid, era5_input, np.nan)
 
         sampler = replace(base_sampler, seed=args.seed + case_number)
+        base = item["base"][None].to(device)
         with torch.inference_mode():
             generated = sample(
                 model,
@@ -772,8 +779,13 @@ def main() -> None:
                 cfg=sampler,
                 flow=flow,
                 mask=mask,
+                to_precip=lambda x, b=base: residual_spec.decode(x, b),
             )
-        members = transform.inverse(generated[:, 0].cpu().numpy())
+        # Decode the network variable into transformed-precipitation space
+        # (identity unless the checkpoint was trained on residuals).
+        members = transform.inverse(
+            residual_spec.decode(generated, base)[:, 0].cpu().numpy()
+        )
         members = np.where(valid[None], members, np.nan)
         if not np.isfinite(members[:, valid]).all() or np.any(members[:, valid] < 0):
             raise ValueError("generated precipitation is non-finite or negative")

@@ -137,10 +137,12 @@ def sample(
     cfg: SamplerConfig | None = None,
     flow: RectifiedFlow | None = None,
     mask: torch.Tensor | None = None,
+    to_precip=None,
 ) -> torch.Tensor:
     """Unguided conditional generation (the downscaler / background)."""
     return assimilate(
-        model, cond, shape, device, H=None, y=None, R=None, cfg=cfg, flow=flow, mask=mask
+        model, cond, shape, device, H=None, y=None, R=None, cfg=cfg, flow=flow,
+        mask=mask, to_precip=to_precip,
     )
 
 
@@ -157,8 +159,15 @@ def assimilate(
     flow: RectifiedFlow | None = None,
     mask: torch.Tensor | None = None,
     x0: torch.Tensor | None = None,
+    to_precip=None,
 ) -> torch.Tensor:
     """Generate an ensemble, optionally guided by observations.
+
+    ``to_precip`` maps the network's variable to transformed-precipitation
+    space: the identity for an absolute target, ``residual * std + mean + base``
+    for a residual one.  It is used only where physical units matter -- inside
+    the observation likelihood -- so the returned tensor is always in the
+    network's own variable and the caller decodes it.
 
     ``shape`` is ``(B, C, H, W)`` where B is the ensemble size.
 
@@ -206,7 +215,7 @@ def assimilate(
     def guide(xx, tt):
         u, g = guidance_grad(
             xx, tt, model, flow, cond, H, y, R, gcfg,
-            mask=mask, mask_fill=cfg.mask_fill,
+            mask=mask, mask_fill=cfg.mask_fill, to_precip=to_precip,
         )
         return combine(u, xx, tt), g
 

@@ -29,7 +29,11 @@ from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E4
 from bdhires.eval import calibration_report, crps_ensemble, fss_series, summarize  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
+from bdhires.transforms import (  # noqa: E402
+    CondTransform,
+    PrecipTransform,
+    ResidualSpec,
+)
 
 from assimilate import load_model  # noqa: E402
 
@@ -47,12 +51,16 @@ def run_case(model, ds, grid, tf, times, sel, Hop, y_all, R, scfg, gcfg, members
     for k, j in enumerate(sel):
         item = ds[int(j)]
         cond = item["cond"][None].to(device) if cond_on else None
+        base = item["base"][None].to(device)
         y = None
         if Hop is not None:
             y = torch.from_numpy(y_all[j][None, None]).to(device).expand(members, -1, -1)
-        out[k] = run_assim(model, cond, (members, 1, grid.nlat, grid.nlon), device,
-                           H=Hop, y=y, R=R, cfg=scfg, gcfg=gcfg, flow=RectifiedFlow(),
-                           mask=mask).squeeze(1).cpu().numpy()
+        generated = run_assim(
+            model, cond, (members, 1, grid.nlat, grid.nlon), device,
+            H=Hop, y=y, R=R, cfg=scfg, gcfg=gcfg, flow=RectifiedFlow(), mask=mask,
+            to_precip=lambda x, b=base: ds.residual.decode(x, b),
+        )
+        out[k] = ds.residual.decode(generated, base).squeeze(1).cpu().numpy()
     return tf.inverse(out)
 
 
@@ -86,6 +94,7 @@ def main():
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
+        residual=ResidualSpec.from_stats(stats),
     )
     times = ds.time
     sel = np.where((times >= np.datetime64(args.start)) & (times <= np.datetime64(args.end)))[0]

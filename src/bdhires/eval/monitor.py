@@ -256,6 +256,7 @@ class ValidationMonitor:
             ema.copy_to(model)
             model.eval()
 
+            residual = self.ds.residual
             scfg = SamplerConfig(
                 n_steps=self.cfg.n_steps,
                 heun=True,
@@ -276,6 +277,7 @@ class ValidationMonitor:
             records = []
             for case in self.cases:
                 item = self.ds[self._position_of(case.index)]
+                base = item["base"][None].to(self.device)
                 with torch.no_grad():
                     generated = sample(
                         model,
@@ -285,9 +287,12 @@ class ValidationMonitor:
                         cfg=scfg,
                         flow=flow,
                         mask=mask,
+                        to_precip=lambda x, b=base: residual.decode(x, b),
                     )
+                # The sampler returns the network's own variable; decode it into
+                # transformed-precipitation space before inverting to mm.
                 members = self.transform.inverse(
-                    generated[:, 0].float().cpu().numpy()
+                    residual.decode(generated, base)[:, 0].float().cpu().numpy()
                 )
                 members = np.where(self.valid[None], members, np.nan)
                 records.append(
