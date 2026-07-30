@@ -73,8 +73,11 @@ train:
                                 # state). v3 peaked near epoch 80 and there was
                                 # no way back to it: best.pt and last.pt are
                                 # both overwritten every ckpt_every epochs.
-  early_stop_patience: 6        # stop after 6 evaluations (30 epochs) with no
-                                # improvement in sampled CRPS
+  early_stop_patience: 0        # DISABLED. At ~2h45m for the full 150 epochs
+                                # the whole run is cheaper than the information
+                                # lost by truncating it, and keep_every snapshots
+                                # already let you pick the peak afterwards.
+                                # Set to 6 (= 30 epochs) for long schedules.
 
 # Sampled validation: runs the real sampler on two fixed held-out July days and
 # scores the ensemble in mm/day.  This is the checkpoint-selection signal --

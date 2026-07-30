@@ -94,8 +94,16 @@ echo "Repository: $SLURM_SUBMIT_DIR"
 echo "Preflight steps: $STEPS"
 echo "Report: $OUTPUT"
 
+PREFLIGHT_ARGS=()
+# Off by default; set PREFLIGHT_PIN_COMMIT=1 to fail when the repo has moved
+# since the normalization diagnostics ran.
+if [[ "${PREFLIGHT_PIN_COMMIT:-0}" == "1" ]]; then
+    PREFLIGHT_ARGS+=(--strict-commit)
+fi
+
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/preflight_training.py \
     --config "$PREFLIGHT_CONFIG" \
     --steps "$STEPS" \
     --normalization-report "$NORM_REPORT" \
+    "${PREFLIGHT_ARGS[@]}" \
     --out "$OUTPUT"

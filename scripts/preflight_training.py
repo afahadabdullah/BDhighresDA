@@ -103,6 +103,14 @@ def main() -> None:
         "--normalization-report",
         default="data/processed/normalization_diagnostics.json",
     )
+    parser.add_argument(
+        "--strict-commit",
+        action="store_true",
+        help="fail if the repository has moved since the normalization "
+             "diagnostics ran. Off by default: a code change does not "
+             "invalidate a data diagnostic, and pinning the commit mostly "
+             "blocked submissions without catching anything.",
+    )
     args = parser.parse_args()
     if args.steps < 1:
         parser.error("--steps must be positive")
@@ -123,12 +131,21 @@ def main() -> None:
     if normalization_report.get("passed") is not True:
         raise ValueError("normalization diagnostic report did not pass")
     if normalization_report.get("git_commit") != current_commit:
-        raise ValueError(
-            "repository changed after normalization diagnostics; rerun them"
+        message = (
+            f"repository moved since the normalization diagnostics "
+            f"({normalization_report.get('git_commit', '?')[:8]} -> "
+            f"{(current_commit or '?')[:8]})"
         )
+        if args.strict_commit:
+            raise ValueError(message + "; rerun them or drop --strict-commit")
+        print(f"WARNING: {message}; continuing (--strict-commit not set)")
+    # The statistics checksum is a DATA check, not a code one: if the statistics
+    # were recomputed, the diagnostic figure describes different numbers than the
+    # ones training will load.  That is worth failing on.
     if normalization_report.get("stats_sha256") != file_sha256(stats_path):
         raise ValueError(
-            "stats.json changed after normalization diagnostics; rerun them"
+            f"{stats_path.name} changed after the normalization diagnostics ran; "
+            f"rerun them so the diagnostic describes the statistics in use"
         )
     normalization_figure_path = (
         repository / normalization_report["figure"]

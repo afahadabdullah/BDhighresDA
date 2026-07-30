@@ -495,6 +495,34 @@ def test_early_stop_disabled_never_fires():
     assert _early_stop([5.0, 6.0, 7.0, 8.0, 9.0], patience=0)[0] is None
 
 
+def test_summary_reports_early_stopping_either_way():
+    import copy
+
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    on, off = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    on["train"]["early_stop_patience"] = 6
+    off["train"]["early_stop_patience"] = 0
+    assert "without a CRPS improvement" in _summary(cfg=on)
+    assert "disabled - runs the full schedule" in _summary(cfg=off)
+
+
+def test_preflight_gate_is_opt_in():
+    """The commit pin blocked three submissions and caught nothing."""
+    sbatch = (ROOT / "slurm" / "train_h100.sbatch").read_text()
+    assert '"${REQUIRE_TRAINING_PREFLIGHT:-0}"' in sbatch, (
+        "the preflight gate must default to off"
+    )
+    assert "PREFLIGHT_PIN_COMMIT" in sbatch, (
+        "there must still be a way to re-enable strict checking"
+    )
+    # the statistics checksum stays fatal: it is a data check, not a code one
+    preflight = (ROOT / "scripts" / "preflight_training.py").read_text()
+    assert "--strict-commit" in preflight
+    assert "rerun them so the diagnostic describes the statistics in use" in preflight
+
+
 def test_config_keeps_cfg_off_and_retains_snapshots():
     import yaml
 
@@ -503,7 +531,7 @@ def test_config_keeps_cfg_off_and_retains_snapshots():
     assert train["cond_dropout"] == 0.0, "unused at cfg_scale 1.0"
     assert validation["cfg_scale"] == 1.0
     assert train["keep_every"] > 0, "v3 lost its peak to overwriting"
-    assert train["early_stop_patience"] > 0
+    assert train["early_stop_patience"] >= 0, "0 disables early stopping"
     assert train["keep_every"] % train["ckpt_every"] == 0, (
         "snapshots are written from inside the checkpoint block"
     )

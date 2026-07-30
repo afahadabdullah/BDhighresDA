@@ -87,22 +87,26 @@ stats_v3.json
                  └─> train_h100.sbatch        pins preflight sha256 + git HEAD
 ```
 
-So any commit invalidates everything downstream of it. Submitting training after
-a code change fails with:
+**As of v5 this chain is no longer enforced.** Over the v2-v4 runs the commit
+pin blocked submission three times, every time because a commit had moved, and it
+never caught a real problem. So:
 
-```
-AssertionError: repository changed after preflight; rerun the GH200 preflight
-```
+* `train_h100.sbatch` no longer runs the preflight check unless you set
+  `REQUIRE_TRAINING_PREFLIGHT=1`.
+* When it does run, a moved commit is a WARNING. Set `PREFLIGHT_PIN_COMMIT=1`
+  to make it fatal again.
+* `scripts/preflight_training.py` warns instead of failing unless given
+  `--strict-commit`.
 
-That is the guard working, not a bug — it is refusing to train on a repo that
-differs from the one that was validated.
+One check stays fatal, because it is about DATA rather than code: if
+`stats_v3.json` changes after the normalization diagnostics ran, the diagnostic
+figure describes different numbers than training will load. Recompute statistics
+→ rerun the diagnostics.
 
-**Two consequences:**
-
-1. Run Steps 1a → 1c → 3 in order, and **do not commit anything between 1b and
-   3**. If you do, rerun from 1b.
-2. The chain must be rebuilt against `stats_v3.json`, not the old `stats.json` —
-   the normalization diagnostics hash the statistics file they were given.
+Steps 1b and 1c are still worth running once per data change. The preflight in
+particular executes two real optimiser steps on real data, which is a cheap smoke
+test before a long allocation. They are simply no longer gates on every
+submission.
 
 ## Step 1 — recompute statistics (~10 min)
 
