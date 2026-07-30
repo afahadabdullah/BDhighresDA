@@ -29,7 +29,7 @@ from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E4
 from bdhires.eval import calibration_report, crps_ensemble, fss_series, summarize  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet  # noqa: E402
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 
 from assimilate import load_model  # noqa: E402
 
@@ -85,6 +85,7 @@ def main():
         tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
+        cond_transform=CondTransform.from_stats(stats),
     )
     times = ds.time
     sel = np.where((times >= np.datetime64(args.start)) & (times <= np.datetime64(args.end)))[0]

@@ -97,6 +97,65 @@ def test_chw_and_nchw_paths_agree():
     )
 
 
+def test_forward_channel_matches_the_stacked_forward():
+    cond = _fake_cond(np.random.default_rng(7))
+    ctf = CondTransform.for_channels(CHANNELS)
+    stacked = ctf.forward(cond, channel_axis=1)
+    for i in range(len(CHANNELS)):
+        assert np.allclose(ctf.forward_channel(cond[:, i], i), stacked[:, i]), i
+
+
+def test_standardising_raw_values_with_transformed_stats_is_detectably_broken():
+    """Regression for the normalization-diagnostics failure.
+
+    cond_mean/cond_std are computed after the transform.  Applying them to raw
+    values leaves tp and cape wildly off while the untransformed channels look
+    fine -- which is exactly the signature the QA figure reported (sampled CAPE
+    mean 34.8 sigma, std 54.6).
+    """
+    cond = _fake_cond(np.random.default_rng(8))
+    ctf = CondTransform.for_channels(CHANNELS)
+    transformed = ctf.forward(cond, channel_axis=1)
+    mean = transformed.mean(axis=(0, 2, 3))
+    std = transformed.std(axis=(0, 2, 3))
+
+    def standard(values):
+        return abs(values.mean()) <= 0.5 and 0.5 <= values.std() <= 1.5
+
+    for i, name in enumerate(CHANNELS):
+        wrong = (cond[:, i] - mean[i]) / std[i]
+        right = (ctf.forward_channel(cond[:, i], i) - mean[i]) / std[i]
+        assert standard(right), f"{name} should be standard after the transform"
+        if ctf.kinds[i] == "none":
+            assert standard(wrong), f"{name} is untransformed and should be fine"
+        else:
+            assert not standard(wrong), (
+                f"{name} is transformed; standardising raw values must NOT look "
+                f"standard, or the diagnostic cannot catch this bug"
+            )
+
+
+def test_every_consumer_of_cond_stats_also_applies_the_cond_transform():
+    """Lint: cond_mean/cond_std and CondTransform must travel together.
+
+    Two call sites were missed when the transform was introduced
+    (06_plot_normalization.py and evaluate.py) and both produced silently wrong
+    normalisation.  This scan is cheap insurance against a third.
+    """
+    offenders = []
+    for path in sorted((ROOT / "scripts").glob("*.py")):
+        text = path.read_text()
+        uses_stats = 'stats["cond_mean"]' in text or '"cond_mean"' in text
+        if not uses_stats:
+            continue
+        if "CondTransform" not in text and "cond_transform" not in text:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"these read cond_mean/cond_std but never mention the conditioning "
+        f"transform: {offenders}"
+    )
+
+
 @pytest.mark.parametrize("channel", [0, 2])
 def test_inverse_round_trip(channel):
     cond = _fake_cond(np.random.default_rng(3))

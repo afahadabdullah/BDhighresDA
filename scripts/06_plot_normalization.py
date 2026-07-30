@@ -23,7 +23,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.transforms import PrecipTransform  # noqa: E402
+from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 
 
 FIELD_LABELS = {
@@ -223,12 +223,22 @@ def main() -> None:
         or np.any(condition_std <= 0)
     ):
         raise ValueError("condition normalization statistics are invalid")
+    # cond_mean/cond_std are computed AFTER the variance-stabilising transform
+    # (06_compute_stats.py), so the transform has to be applied here before
+    # standardising.  Standardising raw values with transformed-space constants
+    # gives nonsense -- sqrt-space CAPE statistics against raw J/kg produced a
+    # sampled mean of 34.8 sigma, which is what this diagnostic caught.
+    condition_transform = CondTransform.from_stats(stats)
     for channel_index, name in enumerate(condition_channels):
         normalized_samples[name] = (
-            samples[name] - condition_mean[channel_index]
+            condition_transform.forward_channel(samples[name], channel_index)
+            - condition_mean[channel_index]
         ) / condition_std[channel_index]
         normalized_maps[name] = (
-            condition_maps[channel_index] - condition_mean[channel_index]
+            condition_transform.forward_channel(
+                condition_maps[channel_index], channel_index
+            )
+            - condition_mean[channel_index]
         ) / condition_std[channel_index]
 
     metrics = {}

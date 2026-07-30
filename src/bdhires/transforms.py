@@ -223,6 +223,27 @@ class CondTransform:
                 raise ValueError(f"unknown conditioning transform {kind!r}")
         return xp.moveaxis(out, 0, axis) if xp is np else out.movedim(0, axis)
 
+    def forward_channel(self, values, channel: int):
+        """Transform a single channel, given as a bare array of any shape.
+
+        :meth:`forward` needs a full channel-stacked array; diagnostics and
+        per-variable plots hold one channel at a time.
+        """
+        if not self.kinds:
+            return values
+        kind = self.kinds[channel]
+        if kind == "none":
+            return values
+        xp = _backend(values)
+        z = xp.clip(values, 0.0, None) if xp is np else values.clamp_min(0.0)
+        if kind == "log1p":
+            return xp.log1p(z / self.eps)
+        if kind == "sqrt":
+            return xp.sqrt(z)
+        if kind == "cbrt":
+            return z ** (1.0 / 3.0)
+        raise ValueError(f"unknown conditioning transform {kind!r}")
+
     def inverse_channel(self, values, channel: int):
         """Invert a single channel back to physical units.
 
