@@ -113,6 +113,14 @@ class UNet(nn.Module):
         self.in_channels = in_channels
         self.cond_channels = cond_channels
         self.out_channels = out_channels
+        # Retained so the model can describe itself for the startup summary.
+        self.base_channels_arg = base_channels
+        self.channel_mult = tuple(channel_mult)
+        self.num_res_blocks = num_res_blocks
+        self.attn_resolutions = tuple(attn_resolutions)
+        self.dropout = dropout
+        self.image_size = image_size
+        self.num_heads = num_heads
         emb_ch = base_channels * 4
         self.time_embed = nn.Sequential(
             nn.Linear(base_channels, emb_ch), nn.SiLU(), nn.Linear(emb_ch, emb_ch)
@@ -181,3 +189,44 @@ class UNet(nn.Module):
     @property
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+    @property
+    def num_trainable_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def parameters_by_module(self) -> "dict[str, int]":
+        """Parameter count per top-level child, for the startup summary."""
+        return {name: sum(p.numel() for p in child.parameters())
+                for name, child in self.named_children()}
+
+    def levels(self) -> "list[dict]":
+        """Resolution, channel width and attention flag at each U-Net level.
+
+        Mirrors the loop in ``__init__`` rather than inspecting the built
+        modules, so it stays readable and matches what the config asked for.
+        """
+        out = []
+        resolution = self.image_size
+        for level, mult in enumerate(self.channel_mult):
+            channels = self.base_channels_arg * mult
+            out.append(
+                {
+                    "level": level,
+                    "resolution": resolution,
+                    "channels": channels,
+                    "attention": resolution in self.attn_resolutions,
+                    "res_blocks": self.num_res_blocks,
+                }
+            )
+            if level != len(self.channel_mult) - 1:
+                resolution //= 2
+        out.append(
+            {
+                "level": "mid",
+                "resolution": resolution,
+                "channels": self.base_channels_arg * self.channel_mult[-1],
+                "attention": True,          # the middle block always has attention
+                "res_blocks": 2,
+            }
+        )
+        return out

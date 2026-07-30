@@ -36,6 +36,8 @@ from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa:
 from bdhires.transforms import CondTransform, PrecipTransform  # noqa: E402
 from bdhires.utils.dist import cleanup_distributed, is_main, setup_distributed  # noqa: E402
 from bdhires.utils.dist import amp_dtype  # noqa: E402
+from bdhires.utils.progress import ProgressReporter, format_duration  # noqa: E402
+from bdhires.utils.summary import training_summary  # noqa: E402
 
 
 def load_cfg(path: str) -> dict:
@@ -130,9 +132,6 @@ def main():
 
     train_ds = build_dataset(cfg, "train")
     val_ds = build_dataset(cfg, "val")
-    if is_main():
-        print(f"train days={len(train_ds)}  val days={len(val_ds)}  "
-              f"cond channels={train_ds.total_cond_channels}")
 
     sampler = DistributedSampler(train_ds) if world > 1 else None
     dl = DataLoader(
@@ -154,8 +153,6 @@ def main():
         image_size=cfg["data"]["crop"],
         **cfg["model"],
     ).to(device)
-    if is_main():
-        print(f"model parameters: {model.num_parameters/1e6:.1f} M")
 
     if args.init_from:
         sd = torch.load(args.init_from, map_location="cpu")
@@ -201,15 +198,42 @@ def main():
             ck.get("best_val_loss", ck.get("val_loss", float("inf")))
         )
         best_crps = float(ck.get("best_crps", float("inf")))
-        if is_main():
-            print(
-                f"resumed epoch {ck['epoch']} step {step}; "
-                f"best validation loss={best_val_loss:.6f}",
-                flush=True,
-            )
 
     total_steps = cfg["train"]["epochs"] * max(1, len(dl))
     warmup = cfg["train"]["warmup_steps"]
+
+    if is_main():
+        print(
+            training_summary(
+                cfg=cfg,
+                config_path=args.config,
+                model=model,
+                train_ds=train_ds,
+                val_ds=val_ds,
+                device=device,
+                world_size=world,
+                amp_dtype=dtype,
+                steps_per_epoch=max(1, len(dl)),
+                total_steps=total_steps,
+                stats=json.loads(Path(cfg["data"]["stats"]).read_text()),
+                monitor=monitor,
+                resumed_from=args.resume,
+                start_epoch=start_epoch,
+            ),
+            flush=True,
+        )
+
+    reporter = (
+        ProgressReporter(
+            total_epochs=cfg["train"]["epochs"],
+            steps_per_epoch=max(1, len(dl)),
+            log_every=cfg["train"]["log_every"],
+            start_epoch=start_epoch,
+        )
+        if is_main()
+        else None
+    )
+    run_started = time.time()
 
     def lr_at(s):
         if s < warmup:
@@ -222,6 +246,8 @@ def main():
             sampler.set_epoch(epoch)
         net.train()
         t0, run = time.time(), 0.0
+        if reporter is not None:
+            reporter.begin_epoch(epoch)
         for i, batch in enumerate(dl):
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
@@ -244,10 +270,16 @@ def main():
             ema.update(model)
             run += loss.item()
             step += 1
-            if is_main() and step % cfg["train"]["log_every"] == 0:
-                print(f"ep {epoch} step {step} loss {run/(i+1):.4f} "
-                      f"lr {opt.param_groups[0]['lr']:.2e} "
-                      f"{(time.time()-t0)/(i+1):.2f}s/it", flush=True)
+            if reporter is not None:
+                reporter.update(loss.item(), opt.param_groups[0]["lr"])
+
+        if reporter is not None:
+            peak = ""
+            if device.type == "cuda":
+                peak = (
+                    f"peak {torch.cuda.max_memory_allocated(device) / 2**30:.1f} GiB"
+                )
+            print(reporter.end_epoch(peak), flush=True)
 
         if is_main() and (epoch + 1) % cfg["train"]["ckpt_every"] == 0:
             val = evaluate_ema_loss(
@@ -268,21 +300,23 @@ def main():
                 summary = monitor.run(model, ema, epoch, step)
                 if summary is not None:
                     crps = summary["mean_crps_mm"]
-                    cases = "  ".join(
-                        f"{c['date']} CRPS {c['crps_mm']:.2f} "
-                        f"bias {c['bias_mm']:+.2f} r {c['spatial_correlation']:.2f}"
-                        for c in summary["cases"]
-                    )
                     print(
-                        f"[epoch {epoch}] sampled validation ({summary['seconds']}s): "
-                        f"mean CRPS {crps:.3f} mm | {cases}",
+                        f"    sampled validation ({summary['seconds']}s):  "
+                        f"mean CRPS {crps:.3f} mm",
                         flush=True,
                     )
-            print(
-                f"[epoch {epoch}] train {run/max(1,len(dl)):.4f}  "
-                f"val_ema {val:.4f}",
-                flush=True,
-            )
+                    for case in summary["cases"]:
+                        print(
+                            f"      {case['date']} "
+                            f"q{int(round(case['quantile'] * 100)):02d}   "
+                            f"CRPS {case['crps_mm']:6.2f}   "
+                            f"bias {case['bias_mm']:+6.2f}   "
+                            f"r {case['spatial_correlation']:5.2f}   "
+                            f"spread {case['mean_spread_mm']:5.2f}   "
+                            f"cov90 {case['interval_90_coverage'] * 100:5.1f}%",
+                            flush=True,
+                        )
+            print(f"    val_ema (flow-matching loss) {val:.4f}", flush=True)
 
             # Prefer CRPS whenever we have it; fall back to the FM loss on the
             # epochs in between so early checkpoints are still ranked somehow.
@@ -338,6 +372,17 @@ def main():
             ),
             out_dir / "final.pt",
         )
+        print("=" * 78)
+        print(" TRAINING COMPLETE")
+        print(f"   wall time        {format_duration(time.time() - run_started)}")
+        print(f"   steps            {step:,}")
+        if best_crps < float("inf"):
+            print(f"   best CRPS        {best_crps:.4f} mm  -> {out_dir / 'best.pt'}")
+        print(f"   best val loss    {best_val_loss:.6f}")
+        print(f"   final weights    {out_dir / 'final.pt'}")
+        if monitor is not None:
+            print(f"   validation       {out_dir / 'validation' / 'progress.png'}")
+        print("=" * 78, flush=True)
     cleanup_distributed()
 
 
