@@ -65,17 +65,24 @@ print(
 )
 PY
 
-[[ -f runs/prior_h100/best.pt ]] || {
-    echo "ERROR: Missing runs/prior_h100/best.pt"
-    exit 1
-}
+CKPT="${ASSIM_CKPT:-runs/prior_h100/best.pt}"
+CONFIG="${ASSIM_CONFIG:-configs/da.yaml}"
+MODE="${ASSIM_MODE:-analysis}"
+
+[[ -f "$CKPT" ]]   || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
+[[ -f "$CONFIG" ]] || { echo "ERROR: config not found: $CONFIG"; exit 1; }
+
+echo "Checkpoint: $CKPT"
+echo "Config: $CONFIG"
+echo "Mode: $MODE"
 
 Y="$SLURM_ARRAY_TASK_ID"
+OUT="${ASSIM_OUT_PREFIX:-data/processed/bdhires_analysis}_${Y}.nc"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/assimilate.py \
-    --config configs/da.yaml \
-    --ckpt runs/prior_h100/best.pt \
+    --config "$CONFIG" \
+    --ckpt "$CKPT" \
     --start "${Y}-01-01" \
     --end "${Y}-12-31" \
-    --mode analysis \
-    --out "data/processed/bdhires_analysis_${Y}.nc"
+    --mode "$MODE" \
+    --out "$OUT"

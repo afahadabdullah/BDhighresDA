@@ -649,3 +649,34 @@ def test_guidance_guards_against_inference_mode():
     source = (ROOT / "src" / "bdhires" / "da" / "guidance.py").read_text()
     assert "is_inference_mode_enabled" in source
     assert "cannot run" in source and "no_grad" in source
+
+
+def test_no_sbatch_guard_hardcodes_a_checkpoint_or_stats_path():
+    """Precondition guards must validate the paths actually in use.
+
+    test_predictions.sbatch checked for runs/prior_h100/best.pt and stats.json
+    ABOVE the TEST_CKPT/TEST_STATS assignments, so every override was rejected
+    with one unhelpful line regardless of what was requested. It cost two
+    submissions before being found.
+    """
+    import re
+
+    offenders = {}
+    for path in sorted((ROOT / "slurm").glob("*.sbatch")):
+        hits = re.findall(
+            r'-[fd] (runs/[^\s&\]"]+|data/processed/stats[^\s&\]"]*)',
+            path.read_text(),
+        )
+        if hits:
+            offenders[path.name] = sorted(set(hits))
+    assert not offenders, (
+        f"sbatch guards testing hardcoded paths instead of variables: {offenders}"
+    )
+
+
+def test_test_prediction_guard_runs_after_the_variables_exist():
+    text = (ROOT / "slurm" / "test_predictions.sbatch").read_text()
+    assert text.index("for path in scripts/08_plot_test_predictions.py") > text.index(
+        'CKPT="${TEST_CKPT'
+    ), "the guard must come after CKPT/CONFIG/STATS are assigned"
+    assert "missing file: $path" in text, "a failure must name the file"

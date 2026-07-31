@@ -30,15 +30,6 @@ mkdir -p "$MPLCONFIGDIR"
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
 
-[[ -f scripts/08_plot_test_predictions.py &&
-   -f configs/da.yaml &&
-   -f runs/prior_h100/best.pt &&
-   -d data/processed/bd_wide.zarr &&
-   -f data/processed/stats.json ]] || {
-    echo "ERROR: Test script, best checkpoint, data, config, or statistics are missing."
-    exit 1
-}
-
 [[ "$(uname -m)" == "aarch64" ]] || {
     echo "ERROR: This job must run on an aarch64 Grace node."
     exit 1
@@ -48,6 +39,25 @@ CKPT="${TEST_CKPT:-runs/prior_h100/best.pt}"
 CONFIG="${TEST_CONFIG:-configs/da.yaml}"
 MEMBERS="${TEST_MEMBERS:-16}"
 QUANTILES="${TEST_QUANTILES:-0.50 0.90 0.99}"
+
+# Validate the paths ACTUALLY IN USE, after the variables exist.  This guard
+# used to sit above these assignments and hardcode runs/prior_h100/best.pt and
+# data/processed/stats.json, so it rejected every checkpoint except the v1 one
+# and reported it as a single unhelpful line.  Each failure now names the file.
+STATS_FILE="${TEST_STATS:-$("$PYTHON_BIN" -c "
+import sys, yaml
+print(yaml.safe_load(open(sys.argv[1]))['data']['stats'])
+" "$CONFIG" 2>/dev/null)}"
+
+missing=0
+for path in scripts/08_plot_test_predictions.py "$CONFIG" "$CKPT" "$STATS_FILE"; do
+    [[ -f "$path" ]] || { echo "ERROR: missing file: $path"; missing=1; }
+done
+[[ -d data/processed/bd_wide.zarr ]] || {
+    echo "ERROR: missing store: data/processed/bd_wide.zarr"; missing=1
+}
+[[ "$missing" -eq 0 ]] || exit 1
+echo "Statistics: $STATS_FILE"
 FIGURE="${TEST_MAP_FIGURE:-data/processed/test_prediction_maps.png}"
 METRICS_FIGURE="${TEST_METRICS_FIGURE:-data/processed/test_prediction_metrics.png}"
 CASE_DIR="${TEST_CASE_DIR:-data/processed/test_prediction_cases}"
