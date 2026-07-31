@@ -327,12 +327,30 @@ class ResidualSpec:
 
     Disabled (the default) is the identity, so every call site can simply always
     call :meth:`encode` and :meth:`decode` regardless of mode.
+
+    ``base`` selects what the residual is taken against:
+
+    ``"era5_tp"``      the ERA5 precipitation forecast.  Strong base
+                       (base_correlation 0.497) but it makes the prior depend on
+                       a forecast product, and if era5_tp is removed from the
+                       conditioning stack the model can no longer see the field
+                       its own target is defined against.
+
+    ``"climatology"``  the per-pixel day-of-year CHIRPS climatology.  Always
+                       available, independent of any forecast, and the zero
+                       residual reproduces climatology -- a defensible floor.
+                       This is the natural decomposition: the network predicts
+                       the ANOMALY, which is what a precipitation prior should
+                       be modelling.
+
+    ``"none"``         absolute target; ``enabled`` is then False.
     """
 
     enabled: bool = False
     mean: float = 0.0
     std: float = 1.0
-    base_channel: int = 0        # index of era5_tp within the cond stack
+    base_channel: int = 0        # index of era5_tp when base == "era5_tp"
+    base: str = "era5_tp"
 
     def encode(self, target_t, base_t):
         """Transformed CHIRPS + transformed ERA5 -> the network's target."""
@@ -361,7 +379,7 @@ class ResidualSpec:
     def to_dict(self) -> dict:
         return dict(
             enabled=self.enabled, mean=self.mean, std=self.std,
-            base_channel=self.base_channel,
+            base_channel=self.base_channel, base=self.base,
         )
 
     @classmethod
@@ -371,6 +389,7 @@ class ResidualSpec:
             mean=float(d.get("mean", 0.0)),
             std=float(d.get("std", 1.0)),
             base_channel=int(d.get("base_channel", 0)),
+            base=str(d.get("base", "era5_tp")),
         )
 
     @classmethod
@@ -379,3 +398,24 @@ class ResidualSpec:
         if "residual" in stats:
             return cls.from_dict(stats["residual"])
         return cls()
+
+
+def load_climatology(stats_path: str, stats: dict) -> "np.ndarray | None":
+    """Load the day-of-year climatology that belongs to a statistics file.
+
+    Written by 06_compute_stats.py as <stats stem>_climatology.npy.  Only needed
+    when residual.base is 'climatology'; returns None otherwise so absolute and
+    era5_tp-based checkpoints are unaffected.
+    """
+    import numpy as np
+    from pathlib import Path as _Path
+
+    if str(stats.get("residual", {}).get("base", "era5_tp")) != "climatology":
+        return None
+    path = _Path(str(stats_path).removesuffix(".json") + "_climatology.npy")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"residual.base is 'climatology' but {path} is missing; rerun "
+            f"06_compute_stats.py --residual --residual-base climatology"
+        )
+    return np.load(path)

@@ -7,7 +7,7 @@ data:
   #   stats.json     v1  absolute target, raw z-scored conditioning
   #   stats_v2.json  v2  absolute target, transformed conditioning
   #   stats_v3.json  v3  residual target, transformed conditioning
-  stats: data/processed/stats_v3.json
+  stats: data/processed/stats_v6.json
   crop: 128
   seasonal_encoding: true
   min_valid_fraction: 0.3       # reject random crops that land in the open Bay of
@@ -16,6 +16,16 @@ data:
   monitor_grid: bd              # fixed 128x128 production grid for the sampled
                                 # validation panels (must match data.crop)
   era5_tp_cond_index: 0
+  # v6: era5_tp is REMOVED from the conditioning stack. The prior sees the
+  # synoptic situation -- moisture, instability, flow, pressure -- plus geography
+  # and day-of-year. Every actual precipitation MEASUREMENT (IMERG, PERSIANN,
+  # gauges) enters through the observation likelihood instead, where it has an
+  # explicit error covariance and can be withheld for validation.
+  #
+  # This is what makes "the analysis beats every input" a testable claim rather
+  # than a hope: with no precipitation product in the conditioning, the prior
+  # cannot be accused of copying one.
+  cond_channels: [era5_tcwv, era5_cape, era5_u10, era5_v10, era5_msl]
   years:
     train: [1981, 2018]
     val:   [2019, 2020]
@@ -32,7 +42,7 @@ model:
 train:
   # New directory per parameterisation: weights are not comparable across them,
   # and keeping the old ones intact preserves the before/after baselines.
-  out_dir: runs/prior_h100_v5
+  out_dir: runs/prior_h100_v6
   # 38 train years ~ 13.9k days / batch 32 = ~433 steps/epoch.
   #
   # The v3 run was scheduled for 580 epochs and peaked at epoch 80-125 (35-54k

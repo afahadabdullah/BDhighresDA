@@ -34,6 +34,7 @@ from bdhires.eval import MonitorConfig, ValidationMonitor  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
+    load_climatology,
     CondTransform,
     PrecipTransform,
     ResidualSpec,
@@ -74,6 +75,7 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
         residual=ResidualSpec.from_stats(stats),
+        climatology=load_climatology(cfg["data"]["stats"], stats),
     )
 
 
@@ -111,6 +113,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
         residual=ResidualSpec.from_stats(stats),
+        climatology=load_climatology(cfg["data"]["stats"], stats),
     )
     return ValidationMonitor(
         dataset,

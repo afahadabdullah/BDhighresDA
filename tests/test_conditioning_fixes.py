@@ -654,3 +654,118 @@ def test_absolute_mode_dataset_is_unchanged_by_the_residual_code():
     mask = absolute["mask"].numpy()
     direct = TF.forward(absolute["target_mm"].numpy())
     assert np.allclose(absolute["x1"].numpy()[mask > 0], direct[mask > 0], atol=1e-5)
+
+
+# --------------------------------------------------------------------------
+# 7. v6: climatology residual base and conditioning-channel selection
+# --------------------------------------------------------------------------
+
+
+def test_climatology_base_round_trips_and_floors_at_climatology():
+    """Zero residual must reproduce CLIMATOLOGY, not ERA5."""
+    rng = np.random.default_rng(0)
+    chirps = rng.gamma(0.4, 12.0, (48, 48))
+    climatology = rng.gamma(1.5, 3.0, (48, 48))
+    spec = ResidualSpec(enabled=True, mean=0.31, std=1.42, base="climatology")
+    base_t = TF.forward(climatology)
+
+    encoded = spec.encode(TF.forward(chirps), base_t)
+    assert np.allclose(TF.inverse(spec.decode(encoded, base_t)), chirps,
+                       rtol=1e-4, atol=1e-4)
+    zero = np.full_like(base_t, spec.fill)
+    assert np.allclose(TF.inverse(spec.decode(zero, base_t)), climatology,
+                       rtol=1e-5, atol=1e-5)
+    extreme = np.full_like(base_t, -50.0)
+    assert (TF.inverse(spec.decode(extreme, base_t)) >= 0).all()
+
+
+def test_residual_base_survives_serialisation():
+    import json
+
+    for base in ("era5_tp", "climatology"):
+        spec = ResidualSpec(enabled=True, mean=0.1, std=1.0, base=base)
+        restored = ResidualSpec.from_stats(
+            json.loads(json.dumps({"residual": spec.to_dict()}))
+        )
+        assert restored.base == base
+    # files written before the field existed default to era5_tp
+    assert ResidualSpec.from_stats(
+        {"residual": {"enabled": True, "mean": 0.0, "std": 1.0}}
+    ).base == "era5_tp"
+
+
+@needs_torch
+def test_conditioning_channel_subset_drops_era5_tp():
+    store = _fake_store()
+    store["cond"] = store["cond"]           # (T, 6, H, W)
+    keep = ("era5_tcwv", "era5_cape", "era5_u10", "era5_v10", "era5_msl")
+    cfg = DatasetConfig(
+        root="unused", crop=32, random_crop=False, crop_origin=(32, 0),
+        cond_channels=keep,
+    )
+    ds = PrecipDataset(
+        cfg, TF, store=store,
+        cond_transform=CondTransform.for_channels(list(keep)),
+    )
+    assert ds.cond_channels == list(keep)
+    assert "era5_tp" not in ds.cond_channels
+    assert ds.n_cond == 5
+    item = ds[0]
+    # 5 ERA5 + 7 static + 2 seasonal
+    assert item["cond"].shape[0] == ds.total_cond_channels == 14
+
+
+@needs_torch
+def test_dropping_a_channel_changes_what_the_network_sees():
+    """Guard against the subset silently being ignored."""
+    store = _fake_store()
+    cfg_all = DatasetConfig(root="unused", crop=32, random_crop=False,
+                            crop_origin=(32, 0))
+    keep = ("era5_tcwv", "era5_cape", "era5_u10", "era5_v10", "era5_msl")
+    cfg_sub = DatasetConfig(root="unused", crop=32, random_crop=False,
+                            crop_origin=(32, 0), cond_channels=keep)
+    full = PrecipDataset(cfg_all, TF, store=store,
+                         cond_transform=CondTransform.for_channels(CHANNELS))[0]
+    sub = PrecipDataset(cfg_sub, TF, store=store,
+                        cond_transform=CondTransform.for_channels(list(keep)))[0]
+    assert full["cond"].shape[0] == sub["cond"].shape[0] + 1
+    # the retained ERA5 channels must be identical, just re-indexed
+    assert np.allclose(full["cond"].numpy()[1:6], sub["cond"].numpy()[0:5])
+
+
+@needs_torch
+def test_unknown_conditioning_channel_raises():
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=False,
+                        crop_origin=(32, 0), cond_channels=("era5_nonsense",))
+    with pytest.raises(ValueError, match="not in the store"):
+        PrecipDataset(cfg, TF, store=store)
+
+
+@needs_torch
+def test_climatology_base_without_a_climatology_array_raises():
+    store = _fake_store()
+    cfg = DatasetConfig(root="unused", crop=32, random_crop=False,
+                        crop_origin=(32, 0))
+    with pytest.raises(ValueError, match="climatology"):
+        PrecipDataset(
+            cfg, TF, store=store,
+            residual=ResidualSpec(enabled=True, mean=0.0, std=1.0,
+                                  base="climatology"),
+        )
+
+
+def test_v6_config_removes_precipitation_from_the_conditioning():
+    """The claim 'the analysis beats every input' needs no precip in the prior."""
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100.yaml").read_text())
+    channels = cfg["data"].get("cond_channels")
+    assert channels, "v6 must name its conditioning channels explicitly"
+    assert not any("tp" in name for name in channels), (
+        f"a precipitation channel is still in the prior's conditioning: {channels}"
+    )
+    assert "era5_tcwv" in channels and "era5_cape" in channels, (
+        "the dynamical channels should stay -- they describe the situation, "
+        "not the rainfall"
+    )

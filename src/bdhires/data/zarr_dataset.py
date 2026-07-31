@@ -42,6 +42,7 @@ class DatasetConfig:
     seasonal_encoding: bool = True
     era5_member: int | None = None   # ERA5-EDA member index, or None for the
                                      # deterministic HRES analysis
+    cond_channels: tuple[str, ...] | None = None   # subset to keep, in order
     min_valid_fraction: float = 0.3  # reject random crops with less land than
                                      # this (see _crop_box)
     max_crop_tries: int = 32
@@ -58,6 +59,7 @@ class PrecipDataset(Dataset):
         store=None,
         cond_transform: CondTransform | None = None,
         residual: ResidualSpec | None = None,
+        climatology: np.ndarray | None = None,
     ):
         self.cfg = cfg
         if store is not None:
@@ -83,8 +85,38 @@ class PrecipDataset(Dataset):
         self.static = np.asarray(self.z["static"][:], dtype=np.float32)
         self.H, self.W = self.valid.shape
         self.n_cond = self.z["cond"].shape[1]
+        # Optional channel subset.  The prior is meant to see the synoptic
+        # situation, not a precipitation forecast, so era5_tp is dropped from the
+        # conditioning stack while the dynamical channels stay.
+        self.all_cond_channels = [
+            str(name) for name in self.z.attrs.get("cond_channels", [])
+        ]
+        if cfg.cond_channels:
+            missing = set(cfg.cond_channels) - set(self.all_cond_channels)
+            if missing:
+                raise ValueError(
+                    f"requested conditioning channels not in the store: "
+                    f"{sorted(missing)}; available: {self.all_cond_channels}"
+                )
+            self.cond_index = np.array(
+                [self.all_cond_channels.index(n) for n in cfg.cond_channels]
+            )
+            self.cond_channels = list(cfg.cond_channels)
+        else:
+            self.cond_index = np.arange(self.n_cond)
+            self.cond_channels = list(self.all_cond_channels)
+        self.n_cond = len(self.cond_index)
+
         self.cond_transform = cond_transform or CondTransform.identity(self.n_cond)
         self.residual = residual or ResidualSpec()
+        # (366, H, W) per-pixel day-of-year CHIRPS climatology, mm/day.
+        self.climatology = climatology
+        if self.residual.enabled and self.residual.base == "climatology":
+            if climatology is None:
+                raise ValueError(
+                    "residual.base is 'climatology' but no climatology array was "
+                    "supplied; run 06_compute_stats.py --residual-base climatology"
+                )
 
         # Zero is not "no rain" in transformed space: forward(0 mm) is -mu/sd.
         # Filling masked cells with a literal 0.0 would encode a moderate rain
@@ -154,6 +186,20 @@ class PrecipDataset(Dataset):
             [np.full((h, w), np.sin(ang), np.float32), np.full((h, w), np.cos(ang), np.float32)]
         )
 
+    def _base_field(self, j: int, cond_raw: np.ndarray, sl) -> np.ndarray:
+        """Raw mm/day field the residual is taken against."""
+        if self.residual.base == "climatology":
+            doy = (
+                self.time[j].astype("datetime64[D]")
+                - self.time[j].astype("datetime64[Y]")
+            ).astype(int)
+            return self.climatology[min(doy, self.climatology.shape[0] - 1)][sl]
+        if self.residual.base == "era5_tp":
+            # NOTE: indexes the FULL cond stack, so it still works when era5_tp
+            # has been dropped from the conditioning channels the network sees.
+            return cond_raw[self.residual.base_channel]
+        return np.zeros(cond_raw.shape[1:], np.float32)
+
     def __getitem__(self, i: int):
         j = int(self.index[i])
         rng = np.random.default_rng(torch.initial_seed() % (2**31) + i)
@@ -161,7 +207,9 @@ class PrecipDataset(Dataset):
         sl = (slice(r0, r0 + ch), slice(c0, c0 + cw))
 
         target = np.asarray(self.z["target"][j][sl], dtype=np.float32)
-        cond = np.asarray(self.z["cond"][j][(slice(None), *sl)], dtype=np.float32)
+        cond_all = np.asarray(
+            self.z["cond"][j][(slice(None), *sl)], dtype=np.float32
+        )
         static = self.static[(slice(None), *sl)]
         valid = self.valid[sl]
 
@@ -171,11 +219,9 @@ class PrecipDataset(Dataset):
         target = np.where(finite, target, 0.0)
         mask = (valid * finite).astype(np.float32)
 
-        # The residual base is ERA5 tp in the SAME transformed space as the
-        # target, taken from the raw (untransformed, unstandardised) cond array
-        # before the conditioning transform is applied to it.
+        # The residual base, in the SAME transformed space as the target.
         base = self.transform.forward(
-            np.clip(cond[self.residual.base_channel], 0.0, None)
+            np.clip(self._base_field(j, cond_all, sl), 0.0, None)
         ).astype(np.float32)
 
         x1 = np.where(
@@ -185,6 +231,7 @@ class PrecipDataset(Dataset):
         )
         x1 = x1.astype(np.float32)[None]
 
+        cond = cond_all[self.cond_index]
         cond = self.cond_transform.forward(cond, channel_axis=0)
         if self.cond_mean is not None:
             cond = (cond - self.cond_mean[:, None, None]) / self.cond_std[:, None, None]

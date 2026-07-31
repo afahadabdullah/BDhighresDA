@@ -47,6 +47,28 @@ def main():
              "space instead of the absolute field",
     )
     ap.add_argument(
+        "--residual-base",
+        default="era5_tp",
+        choices=["era5_tp", "climatology"],
+        help="what the residual is taken against. 'climatology' uses the "
+             "per-pixel day-of-year CHIRPS mean, which keeps the residual's "
+             "well-conditioned target and non-negativity without making the "
+             "prior depend on a forecast product.",
+    )
+    ap.add_argument(
+        "--climatology-out",
+        default=None,
+        help="where to write the (366, H, W) day-of-year climatology "
+             "(default: alongside --out as *_climatology.npy)",
+    )
+    ap.add_argument(
+        "--climatology-smooth-days",
+        type=int,
+        default=15,
+        help="circular running-mean window over day-of-year. Raw per-DOY means "
+             "from 38 samples are far too noisy to use as a base.",
+    )
+    ap.add_argument(
         "--era5-tp-index",
         type=int,
         default=0,
@@ -91,6 +113,54 @@ def main():
             f"contains {cond.shape[1]}"
         )
 
+    # -- day-of-year climatology ------------------------------------------
+    # Built from ALL training days, not the 1500-day sample: a per-pixel per-DOY
+    # mean has only ~38 contributing days even with the full record, so it needs
+    # every one of them plus circular smoothing to be usable as a residual base.
+    climatology = None
+    if args.residual_base == "climatology" or args.residual:
+        print(f"building the day-of-year climatology from {len(idx)} training days",
+              flush=True)
+        H, W = valid.shape
+        totals = np.zeros((366, H, W), np.float64)
+        counts = np.zeros(366, np.int64)
+        for position, day in enumerate(idx):
+            doy = int(
+                (time[day].astype("datetime64[D]") - time[day].astype("datetime64[Y]"))
+                .astype(int)
+            )
+            field = np.asarray(z["target"][int(day)], dtype=np.float32)
+            totals[doy] += np.nan_to_num(field, nan=0.0)
+            counts[doy] += 1
+            if position % 2000 == 0:
+                print(f"  {position}/{len(idx)}", flush=True)
+        counts = np.maximum(counts, 1)
+        climatology = (totals / counts[:, None, None]).astype(np.float32)
+        # circular running mean over day-of-year
+        window = max(1, int(args.climatology_smooth_days))
+        if window > 1:
+            padded = np.concatenate(
+                [climatology[-window:], climatology, climatology[:window]], axis=0
+            )
+            kernel = np.ones(window, np.float64) / window
+            smoothed = np.empty_like(climatology)
+            for row in range(H):
+                block = padded[:, row, :]
+                filtered = np.apply_along_axis(
+                    lambda column: np.convolve(column, kernel, mode="same"),
+                    0, block,
+                )
+                smoothed[:, row, :] = filtered[window:-window]
+            climatology = smoothed.astype(np.float32)
+        climatology_path = Path(
+            args.climatology_out
+            or str(Path(args.out).with_suffix("")) + "_climatology.npy"
+        )
+        climatology_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(climatology_path, climatology)
+        print(f"wrote {climatology_path}  shape {climatology.shape}  "
+              f"mean {float(climatology[:, valid].mean()):.2f} mm/day", flush=True)
+
     # Residual statistics come from the RAW tp channel, before the conditioning
     # transform is applied below -- the residual base lives in precipitation
     # space (PrecipTransform), not in conditioning space.
@@ -103,7 +173,7 @@ def main():
                 f"{cond.shape[1]} conditioning channels"
             )
         base_name = channels[args.era5_tp_index]
-        if "tp" not in base_name:
+        if args.residual_base == "era5_tp" and "tp" not in base_name:
             raise ValueError(
                 f"--era5-tp-index {args.era5_tp_index} selects {base_name!r}, "
                 f"which does not look like total precipitation"
@@ -122,11 +192,16 @@ def main():
             if not ok.any():
                 continue
             target_t = tf.forward(np.where(ok, chunk, 0.0).astype(np.float64))[ok]
-            base_t = tf.forward(
-                np.clip(
-                    cond[start : start + 64, args.era5_tp_index], 0.0, None
-                ).astype(np.float64)
-            )[ok]
+            if args.residual_base == "climatology":
+                doys = np.array([
+                    int((time[int(d)].astype("datetime64[D]")
+                         - time[int(d)].astype("datetime64[Y]")).astype(int))
+                    for d in sub[start : start + 64]
+                ])
+                base_raw = climatology[np.minimum(doys, 365)]
+            else:
+                base_raw = cond[start : start + 64, args.era5_tp_index]
+            base_t = tf.forward(np.clip(base_raw, 0.0, None).astype(np.float64))[ok]
             difference = target_t - base_t
             if not np.isfinite(difference).all():
                 raise ValueError("the residual target contains non-finite values")
@@ -150,6 +225,7 @@ def main():
             mean=float(mean_d),
             std=float(np.sqrt(var_d) + 1e-12),
             base_channel=int(args.era5_tp_index),
+            base=args.residual_base,
         )
         mean_t, mean_b = sum_t / count, sum_b / count
         var_t = max(sum_tt / count - mean_t**2, 0.0)
@@ -164,7 +240,10 @@ def main():
             abs((value - residual.mean) / residual.std) for value in (min_d, max_d)
         ]
         residual_summary = dict(
-            base_channel_name=base_name,
+            base=args.residual_base,
+            base_channel_name=(
+                base_name if args.residual_base == "era5_tp" else "doy climatology"
+            ),
             n_pixels=int(count),
             raw_mean=residual.mean,
             raw_std=residual.std,

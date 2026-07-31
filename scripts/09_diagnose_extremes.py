@@ -73,6 +73,7 @@ from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
+    load_climatology,
     CondTransform,
     PrecipTransform,
     ResidualSpec,

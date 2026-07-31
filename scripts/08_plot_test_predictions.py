@@ -36,6 +36,7 @@ from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
+    load_climatology,
     CondTransform,
     PrecipTransform,
     ResidualSpec,
@@ -710,6 +711,7 @@ def main() -> None:
         cond_std=np.asarray(stats["cond_std"], dtype=np.float32),
         cond_transform=CondTransform.from_stats(stats),
         residual=ResidualSpec.from_stats(stats),
+        climatology=load_climatology(config["data"]["stats"], stats),
     )
     valid = dataset.fixed_valid > 0
     if valid.shape != grid.shape:
