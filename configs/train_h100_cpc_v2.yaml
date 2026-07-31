@@ -1,0 +1,87 @@
+# CPC v2: magnitude-aware CPC-conditioned downscaling on one GH200.
+#
+# Relative to train_h100_cpc.yaml this intentionally starts a fresh experiment:
+# both CHIRPS and CPC precipitation use sqrt transforms, CPC is injected at all
+# U-Net resolutions, clean predictions receive a weak 0.5-degree magnitude
+# constraint, and training oversamples wet days/crops.  Validation remains an
+# unweighted held-out sample and averages checkpoint CRPS over 15 fixed July days.
+data:
+  zarr: data/processed/bd_wide_cpc.zarr
+  stats: data/processed/stats_cpc_v2.json
+  crop: 128
+  seasonal_encoding: true
+  min_valid_fraction: 0.3
+  monitor_grid: bd
+  precip_cond_index: 0
+  precip_coverage_cond_index: 1
+  precip_baseline_label: CPC input
+  precip_baseline_channel: cpc_precip
+  precip_baseline_coverage_channel: cpc_valid
+  cond_channels:
+    - cpc_precip
+    - cpc_valid
+    - era5_tcwv
+    - era5_cape
+    - era5_u10
+    - era5_v10
+    - era5_msl
+  years:
+    train: [1981, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 32]
+  dropout: 0.2
+  num_heads: 4
+  multiscale_conditioning: true
+
+train:
+  out_dir: runs/prior_h100_cpc_v2
+  epochs: 150
+  batch_size: 32
+  lr: 1.5e-4
+  weight_decay: 0.01
+  warmup_steps: 2000
+  grad_clip: 1.0
+  use_ema: true
+  ema_decay: 0.9995
+  cond_dropout: 0.0
+  logit_normal_t: true
+  num_workers: 8
+  seed: 0
+  log_every: 50
+  ckpt_every: 5
+  keep_every: 10
+  early_stop_patience: 0
+  coarse_consistency:
+    factor: 10
+    target_weight: 0.10
+    cpc_weight: 0.02
+  wet_sampling:
+    enabled: true
+    day_quantile: 0.90
+    wet_component_fraction: 0.35
+    crop_probability: 0.50
+    crop_quantile: 0.95
+    crop_tries: 8
+
+validation:
+  enabled: true
+  start_epoch: 10
+  every: 5
+  members: 8
+  n_steps: 30
+  cfg_scale: 1.0
+  month: 7
+  # Approximately uniform quantile strata keep calibration evaluation separate
+  # from the wet-biased training sampler, while retaining q50 and q99 anchors.
+  quantiles:
+    [0.01, 0.08, 0.15, 0.22, 0.29, 0.36, 0.43, 0.50, 0.57, 0.64,
+     0.71, 0.78, 0.85, 0.92, 0.99]
+  max_cases: 15
+  max_map_cases: 4
+  save_maps: true

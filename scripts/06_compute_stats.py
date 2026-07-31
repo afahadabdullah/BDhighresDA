@@ -41,6 +41,20 @@ def main():
              "docs/DIAGNOSIS_epoch119.md item 1)",
     )
     ap.add_argument(
+        "--cond-transform",
+        action="append",
+        default=[],
+        metavar="CHANNEL=KIND",
+        help="override one predictor transform after applying the defaults; "
+             "repeatable, with KIND in log1p,sqrt,cbrt,none",
+    )
+    ap.add_argument(
+        "--daily-wetness",
+        action="store_true",
+        help="store every training day's land-mean rainfall for controlled "
+             "wet-day sampling during training",
+    )
+    ap.add_argument(
         "--residual",
         action="store_true",
         help="parameterise the target as a transformed-space correction to the "
@@ -276,6 +290,27 @@ def main():
         if args.no_cond_transform
         else CondTransform.for_channels(channels, eps=args.eps)
     )
+    if args.cond_transform:
+        kinds = list(ctf.kinds)
+        allowed = {"log1p", "sqrt", "cbrt", "none"}
+        for override in args.cond_transform:
+            if "=" not in override:
+                ap.error(
+                    f"--cond-transform must be CHANNEL=KIND, got {override!r}"
+                )
+            name, kind = override.split("=", 1)
+            if name not in channels:
+                ap.error(
+                    f"conditioning channel {name!r} is not in the packed store; "
+                    f"available: {channels}"
+                )
+            if kind not in allowed:
+                ap.error(
+                    f"unknown conditioning transform {kind!r}; "
+                    f"choose from {sorted(allowed)}"
+                )
+            kinds[channels.index(name)] = kind
+        ctf = CondTransform(kinds=tuple(kinds), eps=args.eps)
     # Transform in place, one channel at a time, staying in float32.
     # ``ctf.forward`` on the whole stack would hold a float64 input AND a float64
     # copy simultaneously -- 8.8 GB for 1500 sampled days.  Per-channel keeps the
@@ -296,6 +331,29 @@ def main():
     if not np.isfinite(cm).all() or not np.isfinite(cs).all() or np.any(cs <= 0):
         raise ValueError("computed condition statistics are invalid")
 
+    daily_wetness = None
+    if args.daily_wetness:
+        means = np.empty(len(idx), dtype=np.float32)
+        print(
+            f"computing daily land-mean rainfall for {len(idx)} training days",
+            flush=True,
+        )
+        for position, day in enumerate(idx):
+            field = np.asarray(z["target"][int(day)], dtype=np.float32)
+            values = field[valid]
+            finite = np.isfinite(values)
+            if not finite.any():
+                raise ValueError(
+                    f"training day {time[int(day)]} has no finite land target"
+                )
+            means[position] = float(values[finite].mean())
+            if position and position % 2000 == 0:
+                print(f"  daily wetness {position}/{len(idx)}", flush=True)
+        daily_wetness = {
+            "time_indices": idx.astype(int).tolist(),
+            "land_mean_mm_day": means.astype(float).tolist(),
+        }
+
     stats = dict(
         precip_transform=tf.to_dict(),
         cond_transform=ctf.to_dict(),
@@ -311,6 +369,7 @@ def main():
             mean_mm=float(p.mean()), wet_frac=float((p >= 1).mean()),
             p99_mm=float(np.percentile(p, 99)), max_mm=float(p.max()),
         ),
+        daily_wetness=daily_wetness,
     )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

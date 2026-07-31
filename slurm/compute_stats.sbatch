@@ -89,6 +89,14 @@ echo "Output: $OUTPUT"
 echo "Python: $PYTHON_BIN"
 
 STATS_ARGS=()
+if [[ -n "${STATS_CPC_PRECIP_TRANSFORM:-}" ]]; then
+    STATS_ARGS+=(
+        --cond-transform "cpc_precip=${STATS_CPC_PRECIP_TRANSFORM}"
+    )
+fi
+if [[ "${STATS_DAILY_WETNESS:-0}" == "1" ]]; then
+    STATS_ARGS+=(--daily-wetness)
+fi
 # STATS_RESIDUAL=1 parameterises the target as a transformed-space correction.
 if [[ "${STATS_RESIDUAL:-0}" == "1" ]]; then
     RESIDUAL_BASE="${STATS_RESIDUAL_BASE:-era5_tp}"

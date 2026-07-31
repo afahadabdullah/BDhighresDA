@@ -86,11 +86,50 @@ class Upsample(nn.Module):
         return self.conv(F.interpolate(x, scale_factor=2, mode="nearest"))
 
 
+def _zero_projection(in_channels: int, out_channels: int) -> nn.Conv2d:
+    """A stable residual injection that initially leaves the original U-Net unchanged."""
+    projection = nn.Conv2d(in_channels, out_channels, 1)
+    nn.init.zeros_(projection.weight)
+    nn.init.zeros_(projection.bias)
+    return projection
+
+
+class MultiscaleConditionEncoder(nn.Module):
+    """Encode the full conditioning stack at every U-Net resolution."""
+
+    def __init__(self, in_channels: int, widths: list[int]):
+        super().__init__()
+        blocks = []
+        previous = in_channels
+        for level, width in enumerate(widths):
+            stride = 1 if level == 0 else 2
+            blocks.append(
+                nn.Sequential(
+                    nn.Conv2d(previous, width, 3, stride=stride, padding=1),
+                    nn.SiLU(),
+                    nn.Conv2d(width, width, 3, padding=1),
+                    nn.SiLU(),
+                )
+            )
+            previous = width
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, condition: torch.Tensor) -> list[torch.Tensor]:
+        features = []
+        h = condition
+        for block in self.blocks:
+            h = block(h)
+            features.append(h)
+        return features
+
+
 class UNet(nn.Module):
     """U-Net returning a field of shape ``(B, out_channels, H, W)``.
 
-    Conditioning is by channel concatenation: ``forward(x, t, cond)`` where
-    ``cond`` holds the upsampled ERA5 predictors, the static fields
+    Conditioning always enters by channel concatenation.  When
+    ``multiscale_conditioning`` is enabled, a learned condition pyramid is also
+    injected through zero-initialized projections at every down/up resolution.
+    ``cond`` holds the dynamic predictors, the static fields
     (orography, land-sea mask, positional encoding) and the seasonal encoding
     broadcast to maps. IMERG is an assimilation-time observation and never a
     network predictor.
@@ -108,6 +147,7 @@ class UNet(nn.Module):
         dropout: float = 0.1,
         image_size: int = 128,
         num_heads: int = 4,
+        multiscale_conditioning: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -121,6 +161,7 @@ class UNet(nn.Module):
         self.dropout = dropout
         self.image_size = image_size
         self.num_heads = num_heads
+        self.multiscale_conditioning = bool(multiscale_conditioning)
         emb_ch = base_channels * 4
         self.time_embed = nn.Sequential(
             nn.Linear(base_channels, emb_ch), nn.SiLU(), nn.Linear(emb_ch, emb_ch)
@@ -129,7 +170,16 @@ class UNet(nn.Module):
 
         self.in_conv = nn.Conv2d(in_channels + cond_channels, base_channels, 3, padding=1)
 
+        condition_widths = [base_channels * mult for mult in channel_mult]
+        self.condition_encoder = (
+            MultiscaleConditionEncoder(cond_channels, condition_widths)
+            if self.multiscale_conditioning and cond_channels > 0
+            else None
+        )
+
         self.down = nn.ModuleList()
+        self.down_condition_projections = nn.ModuleList()
+        self.down_condition_levels: list[int] = []
         chans = [base_channels]
         ch = base_channels
         res = image_size
@@ -140,17 +190,32 @@ class UNet(nn.Module):
                 if res in attn_resolutions:
                     block.append(AttnBlock(ch, num_heads))
                 self.down.append(block)
+                self.down_condition_projections.append(
+                    _zero_projection(condition_widths[level], ch)
+                    if self.condition_encoder is not None
+                    else nn.Identity()
+                )
+                self.down_condition_levels.append(level)
                 chans.append(ch)
             if level != len(channel_mult) - 1:
                 self.down.append(nn.ModuleList([Downsample(ch)]))
+                self.down_condition_projections.append(nn.Identity())
+                self.down_condition_levels.append(-1)
                 chans.append(ch)
                 res //= 2
 
         self.mid = nn.ModuleList(
             [ResBlock(ch, ch, emb_ch, dropout), AttnBlock(ch, num_heads), ResBlock(ch, ch, emb_ch, dropout)]
         )
+        self.mid_condition_projection = (
+            _zero_projection(condition_widths[-1], ch)
+            if self.condition_encoder is not None
+            else nn.Identity()
+        )
 
         self.up = nn.ModuleList()
+        self.up_condition_projections = nn.ModuleList()
+        self.up_condition_levels: list[int] = []
         for level, mult in reversed(list(enumerate(channel_mult))):
             for i in range(num_res_blocks + 1):
                 block = nn.ModuleList(
@@ -163,6 +228,12 @@ class UNet(nn.Module):
                     block.append(Upsample(ch))
                     res *= 2
                 self.up.append(block)
+                self.up_condition_projections.append(
+                    _zero_projection(condition_widths[level], ch)
+                    if self.condition_encoder is not None
+                    else nn.Identity()
+                )
+                self.up_condition_levels.append(level)
 
         self.out_norm = nn.GroupNorm(32 if ch % 32 == 0 else 8, ch)
         self.out_conv = nn.Conv2d(ch, out_channels, 3, padding=1)
@@ -171,19 +242,42 @@ class UNet(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor | None = None):
         emb = self.time_embed(fourier_time_embedding(t, self.base_channels))
+        condition_features = (
+            self.condition_encoder(cond)
+            if self.condition_encoder is not None and cond is not None
+            else None
+        )
         h = torch.cat([x, cond], dim=1) if cond is not None else x
         h = self.in_conv(h)
         hs = [h]
-        for block in self.down:
+        for index, block in enumerate(self.down):
             for layer in block:
-                h = layer(h, emb) if isinstance(layer, ResBlock) else layer(h)
+                if isinstance(layer, ResBlock):
+                    h = layer(h, emb)
+                    if condition_features is not None:
+                        level = self.down_condition_levels[index]
+                        h = h + self.down_condition_projections[index](
+                            condition_features[level]
+                        )
+                else:
+                    h = layer(h)
             hs.append(h)
-        for layer in self.mid:
+        for index, layer in enumerate(self.mid):
             h = layer(h, emb) if isinstance(layer, ResBlock) else layer(h)
-        for block in self.up:
+            if index == 0 and condition_features is not None:
+                h = h + self.mid_condition_projection(condition_features[-1])
+        for index, block in enumerate(self.up):
             h = torch.cat([h, hs.pop()], dim=1)
             for layer in block:
-                h = layer(h, emb) if isinstance(layer, ResBlock) else layer(h)
+                if isinstance(layer, ResBlock):
+                    h = layer(h, emb)
+                    if condition_features is not None:
+                        level = self.up_condition_levels[index]
+                        h = h + self.up_condition_projections[index](
+                            condition_features[level]
+                        )
+                else:
+                    h = layer(h)
         return self.out_conv(F.silu(self.out_norm(h)))
 
     @property

@@ -115,7 +115,11 @@ def training_summary(
     ))
     cond_kinds = stats.get("cond_transform", {}).get("kinds")
     channel_names = stats.get("cond_channels", [])
-    selected_names = train_ds.cond_channels
+    selected_names = getattr(
+        train_ds,
+        "cond_channels",
+        list(channel_names[: train_ds.n_cond]),
+    )
     if cond_kinds:
         kind_by_name = dict(zip(channel_names, cond_kinds))
         applied = [
@@ -182,6 +186,14 @@ def training_summary(
         f"blocks={model.num_res_blocks}  heads={model.num_heads}  "
         f"dropout={model.dropout}",
     ))
+    add(_sub(
+        "conditioning injection: "
+        + (
+            "input + every U-Net scale"
+            if getattr(model, "multiscale_conditioning", False)
+            else "input only"
+        )
+    ))
     add(_sub("level   resolution   channels   attn"))
     for level in model.levels():
         name = str(level["level"])
@@ -210,6 +222,24 @@ def training_summary(
         f"lr={train['lr']:.2e}  wd={train['weight_decay']}  "
         f"betas=(0.9, 0.999)  clip={train['grad_clip']}",
     ))
+    coarse = train.get("coarse_consistency") or {}
+    if float(coarse.get("target_weight", 0.0)) > 0 or float(
+        coarse.get("cpc_weight", 0.0)
+    ) > 0:
+        add(_row(
+            "coarse loss",
+            f"factor={coarse.get('factor', 10)}  "
+            f"CHIRPS weight={float(coarse.get('target_weight', 0.0)):g}  "
+            f"CPC weight={float(coarse.get('cpc_weight', 0.0)):g}",
+        ))
+    wet = train.get("wet_sampling") or {}
+    if wet.get("enabled", False):
+        add(_row(
+            "wet sampling",
+            f"top {100 * (1 - float(wet.get('day_quantile', 0.9))):g}% days get "
+            f"{100 * float(wet.get('wet_component_fraction', 0.35)):g}% mixture; "
+            f"wet crop probability={100 * float(wet.get('crop_probability', 0.0)):g}%",
+        ))
     add(_row(
         "schedule",
         f"{train['warmup_steps']:,} warmup steps then cosine to 0",

@@ -46,6 +46,9 @@ class DatasetConfig:
     min_valid_fraction: float = 0.3  # reject random crops with less land than
                                      # this (see _crop_box)
     max_crop_tries: int = 32
+    wet_crop_probability: float = 0.0  # training-only chance to include a wet pixel
+    wet_crop_quantile: float = 0.95    # candidate pixels within the day's land field
+    wet_crop_tries: int = 8
 
 
 class PrecipDataset(Dataset):
@@ -78,6 +81,10 @@ class PrecipDataset(Dataset):
             yrs = self.time.astype("datetime64[Y]").astype(int) + 1970
             idx = idx[(yrs[idx] >= cfg.years[0]) & (yrs[idx] <= cfg.years[1])]
         self.index = idx
+        if not 0.0 <= cfg.wet_crop_probability <= 1.0:
+            raise ValueError("wet_crop_probability must lie in [0, 1]")
+        if not 0.0 <= cfg.wet_crop_quantile <= 1.0:
+            raise ValueError("wet_crop_quantile must lie in [0, 1]")
 
         self.valid = np.asarray(self.z["valid"][:], dtype=np.float32)
         self.static = np.asarray(self.z["static"][:], dtype=np.float32)
@@ -165,13 +172,59 @@ class PrecipDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index)
 
-    def _crop_box(self, rng: np.random.Generator):
+    def _wet_crop_box(
+        self,
+        rng: np.random.Generator,
+        store_index: int,
+        crop: int,
+    ) -> tuple[int, int] | None:
+        """Choose a valid crop containing one of the day's wettest land pixels."""
+        field = np.asarray(self.z["target"][store_index], dtype=np.float32)
+        finite_land = (self.valid > 0.5) & np.isfinite(field)
+        values = field[finite_land]
+        if not values.size:
+            return None
+        threshold = float(np.quantile(values, self.cfg.wet_crop_quantile))
+        candidates = np.argwhere(finite_land & (field >= threshold))
+        if not len(candidates):
+            return None
+        for _ in range(max(1, self.cfg.wet_crop_tries)):
+            row, column = candidates[int(rng.integers(0, len(candidates)))]
+            row_low = max(0, int(row) - crop + 1)
+            row_high = min(int(row), self.H - crop)
+            col_low = max(0, int(column) - crop + 1)
+            col_high = min(int(column), self.W - crop)
+            if row_low > row_high or col_low > col_high:
+                continue
+            r0 = int(rng.integers(row_low, row_high + 1))
+            c0 = int(rng.integers(col_low, col_high + 1))
+            fraction = float(self.valid[r0 : r0 + crop, c0 : c0 + crop].mean())
+            if fraction >= self.cfg.min_valid_fraction:
+                return r0, c0
+        return None
+
+    def _crop_box(
+        self,
+        rng: np.random.Generator,
+        store_index: int | None = None,
+    ):
         c = self.cfg.crop
         if c >= self.H:
             return 0, 0, self.H, self.W
         if self.cfg.random_crop:
             if self.cfg.crop_origin is not None:
                 raise ValueError("crop_origin cannot be combined with random_crop=True")
+            wet_box = None
+            if (
+                store_index is not None
+                and self.cfg.wet_crop_probability > 0.0
+                and rng.random() < self.cfg.wet_crop_probability
+            ):
+                wet_box = self._wet_crop_box(rng, store_index, c)
+            if wet_box is not None:
+                r0, c0 = wet_box
+                return r0, c0, c, c
+
             # The wide domain reaches down to 16 N, so its southern third is open
             # Bay of Bengal where CHIRPS is entirely absent.  A crop landing there
             # has a near-empty loss mask and contributes essentially no gradient
@@ -236,8 +289,16 @@ class PrecipDataset(Dataset):
 
     def __getitem__(self, i: int):
         j = int(self.index[i])
-        rng = np.random.default_rng(torch.initial_seed() % (2**31) + i)
-        r0, c0, ch, cw = self._crop_box(rng)
+        if self.cfg.wet_crop_probability > 0.0:
+            # A stateful worker-local stream gives a repeatedly sampled wet day
+            # a different crop on each visit.  The legacy deterministic stream
+            # remains unchanged for configurations without wet-crop sampling.
+            if not hasattr(self, "_wet_rng"):
+                self._wet_rng = np.random.default_rng(torch.initial_seed())
+            rng = self._wet_rng
+        else:
+            rng = np.random.default_rng(torch.initial_seed() % (2**31) + i)
+        r0, c0, ch, cw = self._crop_box(rng, j)
         sl = (slice(r0, r0 + ch), slice(c0, c0 + cw))
 
         target = np.asarray(self.z["target"][j][sl], dtype=np.float32)
@@ -253,10 +314,19 @@ class PrecipDataset(Dataset):
         target = np.where(finite, target, 0.0)
         mask = (valid * finite).astype(np.float32)
 
-        # The residual base, in the SAME transformed space as the target.
-        base = self.transform.forward(
-            np.clip(self._base_field(j, cond_all, sl), 0.0, None)
-        ).astype(np.float32)
+        # The residual base, in raw and transformed units.  The raw copy is used
+        # only by the optional coarse-consistency training loss.
+        base_mm = np.clip(self._base_field(j, cond_all, sl), 0.0, None).astype(
+            np.float32
+        )
+        base = self.transform.forward(base_mm).astype(np.float32)
+        base_valid = np.ones_like(base_mm, dtype=np.float32)
+        if self.residual.base == "cpc_precip" and "cpc_valid" in self.all_cond_channels:
+            base_valid = np.clip(
+                cond_all[self.all_cond_channels.index("cpc_valid")],
+                0.0,
+                1.0,
+            ).astype(np.float32)
 
         x1 = np.where(
             mask > 0,
@@ -287,6 +357,8 @@ class PrecipDataset(Dataset):
             # prediction back into precipitation; harmless when the residual
             # parameterisation is off.
             "base": torch.from_numpy(base[None]),
+            "base_mm": torch.from_numpy(base_mm[None]),
+            "base_valid": torch.from_numpy(base_valid[None]),
         }
 
     @property

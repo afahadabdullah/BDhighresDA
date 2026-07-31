@@ -111,6 +111,8 @@ def flow_matching_loss(
     mask: torch.Tensor | None = None,
     cond_dropout: float = 0.1,
     logit_normal_t: bool = True,
+    clean_loss_fn=None,
+    return_components: bool = False,
 ):
     """Conditional flow-matching loss with optional conditioning dropout.
 
@@ -130,8 +132,20 @@ def flow_matching_loss(
     err = (pred - target) ** 2
     if mask is not None:
         m = mask.expand_as(err)
-        return (err * m).sum() / m.sum().clamp_min(1.0)
-    return err.mean()
+        flow_loss = (err * m).sum() / m.sum().clamp_min(1.0)
+    else:
+        flow_loss = err.mean()
+
+    auxiliary_loss = pred.new_zeros(())
+    if clean_loss_fn is not None:
+        clean = flow.x1_hat(x_t, t, pred)
+        auxiliary_loss = clean_loss_fn(clean)
+        if auxiliary_loss.ndim:
+            raise ValueError("clean_loss_fn must return a scalar")
+    total = flow_loss + auxiliary_loss
+    if return_components:
+        return total, flow_loss, auxiliary_loss
+    return total
 
 
 def select_weights(checkpoint: dict) -> dict:

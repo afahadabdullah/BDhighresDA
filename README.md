@@ -120,6 +120,13 @@ slurm/submit_normalization_diagnostics_cpc.sh
 slurm/submit_preflight_training_cpc_gh200.sh
 slurm/submit_train_cpc_gh200.sh
 
+# CPC v2 magnitude experiment (sqrt transforms, multiscale conditioning,
+# coarse consistency, wet sampling, and 15 fixed validation cases):
+slurm/submit_compute_stats_cpc_v2.sh
+slurm/submit_normalization_diagnostics_cpc_v2.sh
+slurm/submit_preflight_training_cpc_v2_gh200.sh
+slurm/submit_train_cpc_v2_gh200.sh
+
 # Held-out best-checkpoint input/target/prediction/error/spread diagnostic:
 slurm/submit_test_predictions.sh
 

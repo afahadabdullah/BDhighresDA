@@ -37,6 +37,7 @@ try:  # pragma: no cover
 
     from bdhires.data import DatasetConfig, PrecipDataset
     from bdhires.da.sampler import SamplerConfig, apply_mask, sample
+    from bdhires.models import RectifiedFlow, UNet, flow_matching_loss
 except ImportError:  # pragma: no cover
     torch = None
 
@@ -357,6 +358,10 @@ def test_config_blocks_construct_and_background_is_uninflated():
 class _FakeStore(dict):
     """Minimal mapping standing in for the packed Zarr store."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attrs = {"cond_channels": CHANNELS}
+
 
 def _fake_store(n_days=4, size=64, land_rows=slice(32, 64)):
     valid = np.zeros((size, size), np.float32)
@@ -482,7 +487,12 @@ def test_training_configs_have_a_consistent_monitor_cadence():
 
     from bdhires.eval.monitor import MonitorConfig
 
-    for name in ("train_h100.yaml", "train_h100_cpc.yaml", "train_v100.yaml"):
+    for name in (
+        "train_h100.yaml",
+        "train_h100_cpc.yaml",
+        "train_h100_cpc_v2.yaml",
+        "train_v100.yaml",
+    ):
         cfg = yaml.safe_load((ROOT / "configs" / name).read_text())
         monitor = MonitorConfig.from_dict(cfg.get("validation"))
         if not monitor.enabled:
@@ -845,3 +855,73 @@ def test_cpc_training_config_replaces_era5_precipitation():
         "val": [2019, 2020],
         "test": [2021, 2025],
     }
+
+
+def test_cpc_v2_config_enables_all_magnitude_experiment_components():
+    import yaml
+
+    cfg = yaml.safe_load(
+        (ROOT / "configs" / "train_h100_cpc_v2.yaml").read_text()
+    )
+    assert cfg["data"]["stats"].endswith("stats_cpc_v2.json")
+    assert cfg["train"]["out_dir"].endswith("prior_h100_cpc_v2")
+    assert cfg["model"]["multiscale_conditioning"] is True
+    assert cfg["train"]["coarse_consistency"]["target_weight"] > 0
+    assert cfg["train"]["coarse_consistency"]["cpc_weight"] > 0
+    assert cfg["train"]["wet_sampling"]["enabled"] is True
+    quantiles = cfg["validation"]["quantiles"]
+    assert len(quantiles) == len(set(quantiles)) == 15
+    assert cfg["validation"]["max_cases"] == 15
+    assert cfg["validation"]["max_map_cases"] < 15
+    # No conditional dropout means w=1 is the only calibrated CFG setting.
+    assert cfg["train"]["cond_dropout"] == 0.0
+    assert cfg["validation"]["cfg_scale"] == 1.0
+
+
+@needs_torch
+def test_multiscale_condition_encoder_preserves_output_shape_and_is_optional():
+    kwargs = dict(
+        in_channels=1,
+        cond_channels=3,
+        out_channels=1,
+        base_channels=8,
+        channel_mult=(1, 2),
+        num_res_blocks=1,
+        attn_resolutions=(),
+        image_size=16,
+        num_heads=1,
+    )
+    legacy = UNet(**kwargs, multiscale_conditioning=False)
+    multiscale = UNet(**kwargs, multiscale_conditioning=True)
+    x = torch.randn(2, 1, 16, 16)
+    condition = torch.randn(2, 3, 16, 16)
+    t = torch.tensor([0.2, 0.8])
+    assert multiscale(x, t, condition).shape == x.shape
+    assert not any("condition_encoder" in key for key in legacy.state_dict())
+    assert any("condition_encoder" in key for key in multiscale.state_dict())
+
+
+@needs_torch
+def test_flow_matching_clean_loss_is_added_and_reported_separately():
+    class ZeroVelocity(torch.nn.Module):
+        def forward(self, x, t, cond):
+            return torch.zeros_like(x)
+
+    x1 = torch.randn(2, 1, 8, 8)
+    condition = torch.randn(2, 2, 8, 8)
+    extra = 0.375
+
+    def clean_loss(clean):
+        return clean.sum() * 0.0 + extra
+
+    total, fm, coarse = flow_matching_loss(
+        ZeroVelocity(),
+        x1,
+        condition,
+        RectifiedFlow(),
+        clean_loss_fn=clean_loss,
+        return_components=True,
+        cond_dropout=0.0,
+    )
+    assert torch.allclose(coarse, torch.tensor(extra))
+    assert torch.allclose(total, fm + coarse)

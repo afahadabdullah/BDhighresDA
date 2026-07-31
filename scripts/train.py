@@ -23,8 +23,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, WeightedRandomSampler
 
 import sys
 
@@ -62,6 +63,9 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
     stats = json.loads(Path(cfg["data"]["stats"]).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
     selected = cfg["data"].get("cond_channels")
+    wet = cfg["train"].get("wet_sampling", {}) if split == "train" else {}
+    if not wet.get("enabled", False):
+        wet = {}
     dcfg = DatasetConfig(
         root=cfg["data"]["zarr"],
         crop=cfg["data"]["crop"],
@@ -70,6 +74,9 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
         min_valid_fraction=cfg["data"].get("min_valid_fraction", 0.3),
         cond_channels=tuple(selected) if selected else None,
+        wet_crop_probability=float(wet.get("crop_probability", 0.0)),
+        wet_crop_quantile=float(wet.get("crop_quantile", 0.95)),
+        wet_crop_tries=int(wet.get("crop_tries", 8)),
     )
     return PrecipDataset(
         dcfg,
@@ -80,6 +87,126 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         residual=ResidualSpec.from_stats(stats),
         climatology=load_climatology(cfg["data"]["stats"], stats),
     )
+
+
+def build_training_sampler(cfg: dict, dataset: PrecipDataset, world_size: int):
+    """Return distributed or controlled wet-day sampling for the training split."""
+    wet = cfg["train"].get("wet_sampling") or {}
+    if not wet.get("enabled", False):
+        return DistributedSampler(dataset) if world_size > 1 else None
+    if world_size > 1:
+        raise ValueError(
+            "wet-day sampling currently supports a single training process; "
+            "the CPC v2 GH200 configuration uses world_size=1"
+        )
+
+    stats = json.loads(Path(cfg["data"]["stats"]).read_text())
+    daily = stats.get("daily_wetness")
+    if not daily:
+        raise ValueError(
+            "wet_sampling is enabled but the statistics file has no "
+            "daily_wetness; recompute it with 06_compute_stats.py --daily-wetness"
+        )
+    stored_indices = np.asarray(daily["time_indices"], dtype=np.int64)
+    means = np.asarray(daily["land_mean_mm_day"], dtype=np.float64)
+    if not np.array_equal(stored_indices, dataset.index):
+        by_index = dict(zip(stored_indices.tolist(), means.tolist()))
+        try:
+            means = np.asarray([by_index[int(i)] for i in dataset.index], np.float64)
+        except KeyError as exc:
+            raise ValueError(
+                f"daily wetness statistics do not cover training index {exc.args[0]}"
+            ) from exc
+    quantile = float(wet.get("day_quantile", 0.9))
+    component = float(wet.get("wet_component_fraction", 0.35))
+    if not 0.0 <= quantile < 1.0:
+        raise ValueError("wet_sampling.day_quantile must lie in [0, 1)")
+    if not 0.0 <= component < 1.0:
+        raise ValueError("wet_component_fraction must lie in [0, 1)")
+    wet_mask = means >= np.quantile(means, quantile)
+    if not wet_mask.any():
+        raise ValueError("wet-day sampler selected no days")
+
+    # A probability mixture retains a uniform component while deliberately
+    # spending more optimizer steps on the wettest days.
+    weights = np.full(len(dataset), (1.0 - component) / len(dataset), np.float64)
+    weights[wet_mask] += component / int(wet_mask.sum())
+    generator = torch.Generator().manual_seed(int(cfg["train"]["seed"]))
+    return WeightedRandomSampler(
+        torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(dataset),
+        replacement=True,
+        generator=generator,
+    )
+
+
+def _masked_coarse_mean(
+    field: torch.Tensor,
+    weight: torch.Tensor,
+    factor: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Differentiable weighted means on approximately 0.5-degree blocks."""
+    height, width = field.shape[-2:]
+    pad_h = (-height) % factor
+    pad_w = (-width) % factor
+    padding = (0, pad_w, 0, pad_h)
+    numerator = F.avg_pool2d(
+        F.pad(field * weight, padding), factor, stride=factor
+    )
+    denominator = F.avg_pool2d(F.pad(weight, padding), factor, stride=factor)
+    return numerator / denominator.clamp_min(1.0e-6), denominator > 1.0e-6
+
+
+def build_coarse_clean_loss(cfg: dict, dataset: PrecipDataset, batch: dict, device):
+    """Build the optional clean-field magnitude loss for one training batch."""
+    options = cfg["train"].get("coarse_consistency") or {}
+    target_weight = float(options.get("target_weight", 0.0))
+    cpc_weight = float(options.get("cpc_weight", 0.0))
+    if target_weight <= 0.0 and cpc_weight <= 0.0:
+        return None
+    factor = int(options.get("factor", 10))
+    if factor < 1:
+        raise ValueError("coarse_consistency.factor must be positive")
+
+    base = batch["base"].to(device, non_blocking=True)
+    target_mm = batch["target_mm"].to(device, non_blocking=True).float()
+    base_mm = batch["base_mm"].to(device, non_blocking=True).float()
+    mask = batch["mask"].to(device, non_blocking=True).float()
+    base_valid = batch["base_valid"].to(device, non_blocking=True).float()
+    transform = dataset.transform
+    residual = dataset.residual
+
+    target_coarse, target_support = _masked_coarse_mean(target_mm, mask, factor)
+    base_weight = mask * base_valid
+    base_coarse, base_support = _masked_coarse_mean(base_mm, base_weight, factor)
+
+    def clean_loss(clean: torch.Tensor) -> torch.Tensor:
+        predicted_t = residual.decode(clean.float(), base.float())
+        predicted_mm = transform.inverse(predicted_t)
+        predicted_target, _ = _masked_coarse_mean(predicted_mm, mask, factor)
+        loss = predicted_mm.new_zeros(())
+        if target_weight > 0.0:
+            difference = F.smooth_l1_loss(
+                transform.forward(predicted_target),
+                transform.forward(target_coarse),
+                reduction="none",
+            )
+            loss = loss + target_weight * difference[target_support].mean()
+        if cpc_weight > 0.0:
+            predicted_base, _ = _masked_coarse_mean(
+                predicted_mm, base_weight, factor
+            )
+            difference = F.smooth_l1_loss(
+                transform.forward(predicted_base),
+                transform.forward(base_coarse),
+                reduction="none",
+            )
+            valid_difference = difference[base_support]
+            if valid_difference.numel():
+                loss = loss + cpc_weight * valid_difference.mean()
+        return loss
+
+    return clean_loss
 
 
 def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
@@ -162,7 +289,7 @@ def main():
     train_ds = build_dataset(cfg, "train")
     val_ds = build_dataset(cfg, "val")
 
-    sampler = DistributedSampler(train_ds) if world > 1 else None
+    sampler = build_training_sampler(cfg, train_ds, world)
     dl = DataLoader(
         train_ds,
         batch_size=cfg["train"]["batch_size"],
@@ -285,10 +412,10 @@ def main():
         return cfg["train"]["lr"] * (0.5 * (1 + math.cos(math.pi * min(p, 1.0))))
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
-        if sampler is not None:
+        if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
         net.train()
-        t0, run = time.time(), 0.0
+        run_fm, run_coarse, batches = 0.0, 0.0, 0
         if reporter is not None:
             reporter.begin_epoch(epoch)
         for i, batch in enumerate(dl):
@@ -297,12 +424,17 @@ def main():
             x1 = batch["x1"].to(device, non_blocking=True)
             cond = batch["cond"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
+            clean_loss_fn = build_coarse_clean_loss(
+                cfg, train_ds, batch, device
+            )
 
             with torch.autocast("cuda", dtype=dtype, enabled=device.type == "cuda"):
-                loss = flow_matching_loss(
+                loss, fm_loss, coarse_loss = flow_matching_loss(
                     net, x1, cond, flow, mask=mask,
                     cond_dropout=cfg["train"]["cond_dropout"],
                     logit_normal_t=cfg["train"].get("logit_normal_t", True),
+                    clean_loss_fn=clean_loss_fn,
+                    return_components=True,
                 )
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -312,7 +444,9 @@ def main():
             scaler.update()
             if ema is not None:
                 ema.update(model)
-            run += loss.item()
+            run_fm += fm_loss.item()
+            run_coarse += coarse_loss.item()
+            batches += 1
             step += 1
             if reporter is not None:
                 reporter.update(loss.item(), opt.param_groups[0]["lr"])
@@ -323,7 +457,13 @@ def main():
                 peak = (
                     f"peak {torch.cuda.max_memory_allocated(device) / 2**30:.1f} GiB"
                 )
-            print(reporter.end_epoch(peak), flush=True)
+            components = (
+                f"FM {run_fm / max(1, batches):.4f}  "
+                f"coarse {run_coarse / max(1, batches):.4f}"
+            )
+            if peak:
+                components += f"  {peak}"
+            print(reporter.end_epoch(components), flush=True)
 
         stop_now = False
         if is_main() and (epoch + 1) % cfg["train"]["ckpt_every"] == 0:

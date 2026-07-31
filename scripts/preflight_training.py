@@ -23,7 +23,12 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from train import build_dataset, load_cfg  # noqa: E402
+from train import (  # noqa: E402
+    build_coarse_clean_loss,
+    build_dataset,
+    build_training_sampler,
+    load_cfg,
+)
 
 from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
 from bdhires.utils.dist import amp_dtype  # noqa: E402
@@ -76,6 +81,9 @@ def validate_batch(
         "cond": (batch_size, condition_channels, crop, crop),
         "mask": (batch_size, 1, crop, crop),
         "target_mm": (batch_size, 1, crop, crop),
+        "base": (batch_size, 1, crop, crop),
+        "base_mm": (batch_size, 1, crop, crop),
+        "base_valid": (batch_size, 1, crop, crop),
     }
     for name, shape in expected.items():
         if tuple(batch[name].shape) != shape:
@@ -212,10 +220,12 @@ def main() -> None:
     batch_size = int(config["train"]["batch_size"])
     workers = int(config["train"]["num_workers"])
     crop = int(config["data"]["crop"])
+    training_sampler = build_training_sampler(config, train_dataset, 1)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=training_sampler is None,
+        sampler=training_sampler,
         num_workers=workers,
         pin_memory=True,
         drop_last=True,
@@ -267,6 +277,8 @@ def main() -> None:
     print(f"autocast dtype: {dtype}", flush=True)
 
     losses = []
+    flow_losses = []
+    coarse_losses = []
     gradient_norms = []
     model.train()
     iterator = iter(train_loader)
@@ -281,8 +293,11 @@ def main() -> None:
         x1 = batch["x1"].to(device, non_blocking=True)
         condition = batch["cond"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
+        clean_loss_fn = build_coarse_clean_loss(
+            config, train_dataset, batch, device
+        )
         with torch.autocast("cuda", dtype=dtype):
-            loss = flow_matching_loss(
+            loss, flow_loss, coarse_loss = flow_matching_loss(
                 model,
                 x1,
                 condition,
@@ -290,6 +305,8 @@ def main() -> None:
                 mask=mask,
                 cond_dropout=config["train"]["cond_dropout"],
                 logit_normal_t=config["train"].get("logit_normal_t", True),
+                clean_loss_fn=clean_loss_fn,
+                return_components=True,
             )
         require_finite("training loss", loss)
         optimizer.zero_grad(set_to_none=True)
@@ -305,9 +322,12 @@ def main() -> None:
         ema.update(model)
         torch.cuda.synchronize(device)
         losses.append(float(loss.item()))
+        flow_losses.append(float(flow_loss.item()))
+        coarse_losses.append(float(coarse_loss.item()))
         gradient_norms.append(float(gradient_norm.item()))
         print(
-            f"preflight step {step}/{args.steps}: loss={losses[-1]:.6f}, "
+            f"preflight step {step}/{args.steps}: loss={losses[-1]:.6f} "
+            f"(FM={flow_losses[-1]:.6f}, coarse={coarse_losses[-1]:.6f}), "
             f"gradient_norm={gradient_norms[-1]:.6f}",
             flush=True,
         )
@@ -373,6 +393,8 @@ def main() -> None:
         "model_parameters": model.num_parameters,
         "steps": args.steps,
         "training_losses": losses,
+        "flow_matching_losses": flow_losses,
+        "coarse_consistency_losses": coarse_losses,
         "gradient_norms": gradient_norms,
         "validation_loss": float(validation_loss.item()),
         "peak_memory_allocated_gib": round(peak_allocated, 3),

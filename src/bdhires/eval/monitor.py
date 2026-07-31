@@ -48,7 +48,8 @@ class MonitorConfig:
     cfg_scale: float = 2.0       # match background_sampler in configs/da.yaml
     month: int = 7               # July: the heart of the BD monsoon
     quantiles: tuple[float, ...] = (0.5, 0.99)   # typical + wet extreme
-    max_cases: int = 2
+    max_cases: int = 15
+    max_map_cases: int = 4       # metrics use all cases; figures stay readable
     save_maps: bool = True
 
     @classmethod
@@ -352,7 +353,15 @@ class ValidationMonitor:
             handle.write(json.dumps(summary) + "\n")
 
         if self.cfg.save_maps:
-            self._plot_maps(records, epoch)
+            map_records = records
+            if 0 < self.cfg.max_map_cases < len(records):
+                positions = np.unique(
+                    np.rint(
+                        np.linspace(0, len(records) - 1, self.cfg.max_map_cases)
+                    ).astype(int)
+                )
+                map_records = [records[int(position)] for position in positions]
+            self._plot_maps(map_records, epoch)
         self._plot_progress()
         return summary
 
@@ -652,6 +661,7 @@ class ValidationMonitor:
             return
         epochs = [r["epoch"] + 1 for r in rows]
         colours = plt.get_cmap("tab10").colors
+        aggregate_view = len(self.cases) > 6
 
         figure, axes = plt.subplots(2, 3, figsize=(17, 9), constrained_layout=True)
         for axis, (key, ylabel, subtitle, lower_better) in zip(
@@ -667,14 +677,40 @@ class ValidationMonitor:
                 ]
                 axis.plot(
                     epochs[: len(series)], series, marker="o", ms=3.2,
-                    lw=1.4, color=colour, label=case.label,
+                    lw=0.8 if aggregate_view else 1.4,
+                    alpha=0.28 if aggregate_view else 1.0,
+                    color=colour,
+                    label=None if aggregate_view else case.label,
                 )
                 reference = (case.baseline or {}).get(key)
                 if reference is not None and reference == reference:
-                    # Unlabelled: one shared legend entry is added below instead
-                    # of repeating "ERA5 baseline" once per case per panel.
-                    axis.axhline(reference, color=colour, ls=":", lw=1.4)
+                    if not aggregate_view:
+                        # Unlabelled: one shared legend entry is added below instead
+                        # of repeating the baseline once per case per panel.
+                        axis.axhline(reference, color=colour, ls=":", lw=1.4)
                     has_baseline = True
+            if aggregate_view:
+                pooled = [np.mean([c[key] for c in r["cases"]]) for r in rows]
+                axis.plot(
+                    epochs,
+                    pooled,
+                    marker="o",
+                    ms=4.0,
+                    lw=2.2,
+                    color="black",
+                    label=f"mean of {len(self.cases)} cases",
+                )
+                references = [
+                    (case.baseline or {}).get(key) for case in self.cases
+                ]
+                references = [
+                    value for value in references
+                    if value is not None and value == value
+                ]
+                if references:
+                    axis.axhline(
+                        float(np.mean(references)), color="grey", ls=":", lw=1.6
+                    )
             if key == "bias_mm":
                 axis.axhline(0.0, color="black", lw=0.9)
             if key == "interval_90_coverage":
