@@ -77,6 +77,20 @@ def parse_args() -> argparse.Namespace:
         default="data/processed/test_prediction_report.json",
     )
     parser.add_argument(
+        "--stats",
+        default=None,
+        help="override data.stats from the config. Each checkpoint is bound to "
+             "the statistics it was trained with and they are NOT "
+             "interchangeable, so this avoids editing da.yaml between runs.",
+    )
+    parser.add_argument(
+        "--cfg-scale",
+        type=float,
+        default=None,
+        help="override background_sampler.cfg_scale, for sweeping without "
+             "writing a config file per value.",
+    )
+    parser.add_argument(
         "--cartopy-data-dir",
         default="data/static/cartopy",
         help="Writable persistent cache for Natural Earth boundary files.",
@@ -668,6 +682,12 @@ def main() -> None:
     cartopy.config["data_dir"] = cartopy_data_dir
 
     config = yaml.safe_load(config_path.read_text())
+    if args.stats:
+        config["data"]["stats"] = args.stats
+    if args.cfg_scale is not None:
+        config.setdefault("background_sampler", config["sampler"])
+        config["background_sampler"]["cfg_scale"] = args.cfg_scale
+    print(f"statistics: {config['data']['stats']}")
     stats = json.loads(Path(config["data"]["stats"]).read_text())
     transform = PrecipTransform.from_dict(stats["precip_transform"])
     grid = get_grid(config["data"]["grid"])

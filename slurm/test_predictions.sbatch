@@ -47,6 +47,7 @@ export PYTHONPATH="$PWD/src"
 CKPT="${TEST_CKPT:-runs/prior_h100/best.pt}"
 CONFIG="${TEST_CONFIG:-configs/da.yaml}"
 MEMBERS="${TEST_MEMBERS:-16}"
+QUANTILES="${TEST_QUANTILES:-0.50 0.90 0.99}"
 FIGURE="${TEST_MAP_FIGURE:-data/processed/test_prediction_maps.png}"
 METRICS_FIGURE="${TEST_METRICS_FIGURE:-data/processed/test_prediction_metrics.png}"
 CASE_DIR="${TEST_CASE_DIR:-data/processed/test_prediction_cases}"
@@ -76,8 +77,14 @@ echo "Individual case figures: $CASE_DIR"
 echo "Report: $REPORT"
 echo "Cartopy data: $CARTOPY_DIR"
 
+EXTRA=()
+[[ -n "${TEST_STATS:-}" ]] && EXTRA+=(--stats "$TEST_STATS")
+[[ -n "${TEST_CFG_SCALE:-}" ]] && EXTRA+=(--cfg-scale "$TEST_CFG_SCALE")
+
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_plot_test_predictions.py \
     --config "$CONFIG" \
+    --quantiles $QUANTILES \
+    "${EXTRA[@]}" \
     --ckpt "$CKPT" \
     --members "$MEMBERS" \
     --out-figure "$FIGURE" \
