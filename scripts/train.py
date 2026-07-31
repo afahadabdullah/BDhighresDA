@@ -157,6 +157,26 @@ def _masked_coarse_mean(
     return numerator / denominator.clamp_min(1.0e-6), denominator > 1.0e-6
 
 
+def _stable_coarse_transform(transform: PrecipTransform, precipitation: torch.Tensor):
+    """Variance stabilisation with a finite derivative at zero rainfall.
+
+    ``sqrt(p)`` and ``cbrt(p)`` are perfectly valid data transforms, but their
+    derivatives diverge at ``p=0``.  Targets do not require gradients, so this is
+    invisible in ordinary flow matching.  The clean-field auxiliary loss does
+    backpropagate through physical precipitation and therefore needs a small
+    offset at the dry boundary.  Applying the same mapping to prediction and
+    target preserves equality and the intended tail compression.
+    """
+    offset = max(float(transform.eps), 1.0e-6)
+    if transform.kind == "sqrt":
+        raw = torch.sqrt(precipitation.clamp_min(0.0) + offset)
+        return (raw - transform.mu) / transform.sd
+    if transform.kind == "cbrt":
+        raw = torch.pow(precipitation.clamp_min(0.0) + offset, 1.0 / 3.0)
+        return (raw - transform.mu) / transform.sd
+    return transform.forward(precipitation)
+
+
 def build_coarse_clean_loss(cfg: dict, dataset: PrecipDataset, batch: dict, device):
     """Build the optional clean-field magnitude loss for one training batch."""
     options = cfg["train"].get("coarse_consistency") or {}
@@ -187,8 +207,8 @@ def build_coarse_clean_loss(cfg: dict, dataset: PrecipDataset, batch: dict, devi
         loss = predicted_mm.new_zeros(())
         if target_weight > 0.0:
             difference = F.smooth_l1_loss(
-                transform.forward(predicted_target),
-                transform.forward(target_coarse),
+                _stable_coarse_transform(transform, predicted_target),
+                _stable_coarse_transform(transform, target_coarse),
                 reduction="none",
             )
             loss = loss + target_weight * difference[target_support].mean()
@@ -197,8 +217,8 @@ def build_coarse_clean_loss(cfg: dict, dataset: PrecipDataset, batch: dict, devi
                 predicted_mm, base_weight, factor
             )
             difference = F.smooth_l1_loss(
-                transform.forward(predicted_base),
-                transform.forward(base_coarse),
+                _stable_coarse_transform(transform, predicted_base),
+                _stable_coarse_transform(transform, base_coarse),
                 reduction="none",
             )
             valid_difference = difference[base_support]

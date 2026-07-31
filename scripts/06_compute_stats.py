@@ -376,8 +376,23 @@ def main():
     partial = output.with_suffix(output.suffix + ".part")
     partial.write_text(json.dumps(stats, indent=2) + "\n")
     partial.replace(output)
-    print(json.dumps({k: v for k, v in stats.items() if k != "cond_mean" and k != "cond_std"},
-                     indent=2))
+    # Do not dump the complete daily-wetness vectors to a SLURM log.  They hold
+    # roughly 14,000 values and can leave srun draining stdout long after Python
+    # exits ("eio_handle_mainloop: Abandoning IO").  The full vectors are already
+    # safely stored in the JSON file above; stdout only needs a compact summary.
+    printable = {
+        key: value
+        for key, value in stats.items()
+        if key not in {"cond_mean", "cond_std", "daily_wetness"}
+    }
+    if daily_wetness is not None:
+        printable["daily_wetness"] = {
+            "n_days": int(len(means)),
+            "min_mm_day": float(means.min()),
+            "median_mm_day": float(np.median(means)),
+            "max_mm_day": float(means.max()),
+        }
+    print(json.dumps(printable, indent=2))
     print(f"wrote {output}")
 
 

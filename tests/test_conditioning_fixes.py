@@ -925,3 +925,14 @@ def test_flow_matching_clean_loss_is_added_and_reported_separately():
     )
     assert torch.allclose(coarse, torch.tensor(extra))
     assert torch.allclose(total, fm + coarse)
+
+
+@needs_torch
+def test_sqrt_coarse_loss_transform_has_finite_gradient_at_zero():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from train import _stable_coarse_transform
+
+    precipitation = torch.tensor([0.0, 0.1, 10.0], requires_grad=True)
+    transform = PrecipTransform(kind="sqrt", eps=0.1, mu=1.0, sd=2.0)
+    _stable_coarse_transform(transform, precipitation).sum().backward()
+    assert torch.isfinite(precipitation.grad).all()
