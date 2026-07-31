@@ -37,7 +37,11 @@ def lag_correlations(
     return correlations
 
 
-def area_mean_series(root, block_days: int) -> tuple[np.ndarray, np.ndarray]:
+def area_mean_series(
+    root,
+    block_days: int,
+    background_channel: str = "era5_tp",
+) -> tuple[np.ndarray, np.ndarray]:
     valid = np.asarray(root["valid"][:]) > 0.5
     latitude = np.asarray(root["lat"][:], dtype=np.float64)
     weights = np.cos(np.deg2rad(latitude))[:, None] * valid
@@ -46,9 +50,17 @@ def area_mean_series(root, block_days: int) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError("packed store has an empty land-validity mask")
 
     channels = list(root.attrs.get("cond_channels", []))
-    if "era5_tp" not in channels:
-        raise ValueError("packed store does not identify an era5_tp channel")
-    tp_index = channels.index("era5_tp")
+    if background_channel not in channels:
+        raise ValueError(
+            f"packed store does not identify {background_channel!r}; "
+            f"available: {channels}"
+        )
+    background_index = channels.index(background_channel)
+    coverage_index = (
+        channels.index("cpc_valid")
+        if background_channel == "cpc_precip" and "cpc_valid" in channels
+        else None
+    )
     ntime = root["time"].shape[0]
     target_mean = np.empty(ntime, dtype=np.float64)
     background_mean = np.empty(ntime, dtype=np.float64)
@@ -56,20 +68,44 @@ def area_mean_series(root, block_days: int) -> tuple[np.ndarray, np.ndarray]:
         stop = min(start + block_days, ntime)
         target = np.asarray(root["target"][start:stop], dtype=np.float64)
         background = np.asarray(
-            root["cond"][start:stop, tp_index, :, :],
+            root["cond"][start:stop, background_index, :, :],
             dtype=np.float64,
         )
+        background_weights = np.broadcast_to(
+            weights[None],
+            background.shape,
+        ).copy()
+        target_weights = np.broadcast_to(weights[None], target.shape).copy()
+        if coverage_index is not None:
+            coverage = np.asarray(
+                root["cond"][start:stop, coverage_index, :, :],
+                dtype=np.float64,
+            )
+            coverage = np.clip(coverage, 0.0, 1.0)
+            background_weights *= coverage
+            # Compare both products over the same supported area.  Otherwise a
+            # partially missing CPC field would be averaged over a different
+            # footprint from CHIRPS and could create an artificial temporal lag.
+            target_weights *= coverage
         target_finite = np.isfinite(target)
-        target_numerator = np.nansum(target * weights[None], axis=(1, 2))
+        target_numerator = np.nansum(target * target_weights, axis=(1, 2))
         target_denominator = np.sum(
-            target_finite * weights[None],
+            target_finite * target_weights,
             axis=(1, 2),
         )
-        target_mean[start:stop] = target_numerator / target_denominator
-        background_mean[start:stop] = np.sum(
-            background * weights[None],
-            axis=(1, 2),
-        ) / denominator
+        target_mean[start:stop] = np.divide(
+            target_numerator,
+            target_denominator,
+            out=np.full(stop - start, np.nan, dtype=np.float64),
+            where=target_denominator > 0,
+        )
+        background_denominator = background_weights.sum(axis=(1, 2))
+        background_mean[start:stop] = np.divide(
+            np.sum(background * background_weights, axis=(1, 2)),
+            background_denominator,
+            out=np.full(stop - start, np.nan, dtype=np.float64),
+            where=background_denominator > 0,
+        )
         print(f"read alignment block {start}:{stop}", flush=True)
     return target_mean, background_mean
 
@@ -91,6 +127,7 @@ def main() -> None:
         default="data/processed/alignment_qc.json",
     )
     parser.add_argument("--block-days", type=int, default=31)
+    parser.add_argument("--background-channel", default="era5_tp")
     parser.add_argument("--lags", nargs="+", type=int, default=[-2, -1, 0, 1, 2])
     args = parser.parse_args()
     if args.block_days < 1:
@@ -110,12 +147,19 @@ def main() -> None:
     if not np.array_equal(time.astype("datetime64[D]"), expected):
         raise ValueError("packed time axis is not unique, daily and contiguous")
 
-    target_mean, background_mean = area_mean_series(root, args.block_days)
+    target_mean, background_mean = area_mean_series(
+        root,
+        args.block_days,
+        args.background_channel,
+    )
     correlations = lag_correlations(target_mean, background_mean, args.lags)
     peak_lag = max(correlations, key=correlations.get)
     passed = peak_lag == 0
 
-    print("Lag convention: correlate CHIRPS[t] with ERA5[t + lag]")
+    print(
+        f"Lag convention: correlate CHIRPS[t] with "
+        f"{args.background_channel}[t + lag]"
+    )
     print(" lag    Pearson r")
     for lag in sorted(correlations):
         print(f"{lag:+4d}    {correlations[lag]:.6f}")
@@ -127,7 +171,10 @@ def main() -> None:
         "time_end": str(time[-1]),
         "n_days": int(len(time)),
         "series": "cos(latitude)-weighted WIDE-domain land mean precipitation",
-        "lag_convention": "correlate CHIRPS[t] with ERA5[t + lag]",
+        "background_channel": args.background_channel,
+        "lag_convention": (
+            f"correlate CHIRPS[t] with {args.background_channel}[t + lag]"
+        ),
         "correlations": {str(lag): value for lag, value in correlations.items()},
         "peak_lag_days": int(peak_lag),
         "passed": passed,

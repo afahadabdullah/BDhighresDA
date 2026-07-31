@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack ERA5, CHIRPS and static fields into the model-training Zarr store.
+"""Pack ERA5, optional CPC, CHIRPS and static fields into the training Zarr.
 
 This stage intentionally excludes IMERG and gauges. They are observations used
 later during assimilation, not predictors or training targets.
@@ -13,7 +13,7 @@ and written, so rerunning the same command safely continues an interrupted job.
 
 Time conventions
 ----------------
-CHIRPS and the Earthmover ERA5 files both represent 00:00-24:00 UTC day D.
+CHIRPS, CPC and the Earthmover ERA5 files represent daily fields for day D.
 ``00_download_era5.py`` has already summed hourly ``tp`` and averaged the five
 state variables before this script reads them.
 
@@ -21,8 +21,11 @@ Spatial conventions
 -------------------
 ERA5 precipitation is conservatively remapped from 0.25 degrees to the exact
 0.05-degree WIDE grid with separable spherical cell-overlap weights. State
-variables are bilinearly interpolated. CHIRPS is already on a 0.05-degree grid
-and is nearest-neighbour selected onto the exact project coordinates.
+variables and optional CPC precipitation are bilinearly interpolated. CPC
+missing values are normalized over the available interpolation weights, filled
+with zero only where no CPC support exists, and accompanied by ``cpc_valid``.
+CHIRPS is already on a 0.05-degree grid and is nearest-neighbour selected onto
+the exact project coordinates.
 """
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ CORE_MAP = {
     "msl": "era5_msl",
 }
 CONDITION_CHANNELS = list(CORE_MAP.values())
+CPC_CONDITION_CHANNELS = ["cpc_precip", "cpc_valid"]
 
 
 def _rename_coords(dataset: xr.Dataset) -> xr.Dataset:
@@ -150,24 +154,37 @@ def validate_source_inventory(
     years: list[int],
     era5_dir: Path,
     chirps_dir: Path,
-) -> tuple[dict[int, Path], dict[int, Path]]:
+    cpc_dir: Path | None = None,
+) -> tuple[dict[int, Path], dict[int, Path], dict[int, Path] | None]:
     """Validate metadata and edge records for every requested raw-data year."""
     era5_paths = {year: era5_dir / f"era5_daily_{year}.nc" for year in years}
     chirps_paths = {
         year: chirps_dir / f"chirps_wide_{year}.nc" for year in years
     }
+    cpc_paths = (
+        {year: cpc_dir / f"precip.{year}.nc" for year in years}
+        if cpc_dir is not None
+        else None
+    )
     missing_era5 = [year for year, path in era5_paths.items() if not path.is_file()]
     missing_chirps = [
         year for year, path in chirps_paths.items() if not path.is_file()
     ]
-    if missing_era5 or missing_chirps:
+    missing_cpc = (
+        [year for year, path in cpc_paths.items() if not path.is_file()]
+        if cpc_paths is not None
+        else []
+    )
+    if missing_era5 or missing_chirps or missing_cpc:
         raise FileNotFoundError(
             "raw-data inventory is incomplete; "
             f"missing ERA5 years={missing_era5}, "
-            f"missing CHIRPS years={missing_chirps}"
+            f"missing CHIRPS years={missing_chirps}, "
+            f"missing CPC years={missing_cpc}"
         )
 
     reference_lat = reference_lon = None
+    cpc_reference_lat = cpc_reference_lon = None
     for year in years:
         with xr.open_dataset(era5_paths[year]) as raw:
             dataset = _rename_coords(raw)
@@ -209,8 +226,39 @@ def validate_source_inventory(
                 raise ValueError(
                     f"{chirps_paths[year]} has no finite edge precipitation"
                 )
+
+        if cpc_paths is not None:
+            with xr.open_dataset(cpc_paths[year]) as raw:
+                dataset = _rename_coords(raw)
+                if "precip" not in dataset:
+                    raise ValueError(
+                        f"{cpc_paths[year]} does not contain CPC precipitation"
+                    )
+                actual = pd.DatetimeIndex(dataset.time.values)
+                expected = expected_time(year)
+                if not actual.is_unique or not actual.is_monotonic_increasing:
+                    raise ValueError(f"{cpc_paths[year]} has an invalid time axis")
+                unexpected = actual.difference(expected)
+                if len(unexpected):
+                    raise ValueError(
+                        f"{cpc_paths[year]} contains dates outside {year}: "
+                        f"{unexpected[:4].tolist()}"
+                    )
+                if cpc_reference_lat is None:
+                    cpc_reference_lat = dataset.lat.values.copy()
+                    cpc_reference_lon = dataset.lon.values.copy()
+                else:
+                    np.testing.assert_allclose(dataset.lat.values, cpc_reference_lat)
+                    np.testing.assert_allclose(dataset.lon.values, cpc_reference_lon)
+                missing_days = len(expected.difference(actual))
+                if missing_days:
+                    print(
+                        f"CPC {year}: {missing_days} absent source day(s); "
+                        "cpc_valid will mark them unavailable",
+                        flush=True,
+                    )
         print(f"inventory OK: {year}", flush=True)
-    return era5_paths, chirps_paths
+    return era5_paths, chirps_paths, cpc_paths
 
 
 def load_static(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -288,7 +336,9 @@ def initialize_store(
     static: np.ndarray,
     valid: np.ndarray,
     static_channels: list[str],
+    condition_channels: list[str] | None = None,
 ):
+    condition_channels = condition_channels or CONDITION_CHANNELS
     output.parent.mkdir(parents=True, exist_ok=True)
     existed = output.exists()
     root = open_zarr_group(output, "a")
@@ -302,7 +352,7 @@ def initialize_store(
             "schema_version": SCHEMA_VERSION,
             "start_year": years[0],
             "end_year": years[-1],
-            "cond_channels": CONDITION_CHANNELS,
+            "cond_channels": condition_channels,
             "static_channels": static_channels,
         }
         for key, value in expected.items():
@@ -318,7 +368,7 @@ def initialize_store(
             end_year=years[-1],
             completed_years=[],
             complete=False,
-            cond_channels=CONDITION_CHANNELS,
+            cond_channels=condition_channels,
             static_channels=static_channels,
             era5_tp_cond_index=0,
             observations=(
@@ -333,6 +383,9 @@ def initialize_store(
                 "res": WIDE.res,
             },
         )
+        if "cpc_precip" in condition_channels:
+            root.attrs["cpc_precip_cond_index"] = condition_channels.index("cpc_precip")
+            root.attrs["cpc_valid_cond_index"] = condition_channels.index("cpc_valid")
 
     ntime = len(days)
     arrays = {
@@ -382,8 +435,8 @@ def initialize_store(
         "cond": ensure_array(
             root,
             "cond",
-            shape=(ntime, len(CONDITION_CHANNELS), *WIDE.shape),
-            chunks=(1, len(CONDITION_CHANNELS), *WIDE.shape),
+            shape=(ntime, len(condition_channels), *WIDE.shape),
+            chunks=(1, len(condition_channels), *WIDE.shape),
             dtype="f4",
             fill_value=np.nan,
         ),
@@ -397,12 +450,59 @@ def initialize_store(
     return root, arrays
 
 
+def interpolate_cpc_condition(
+    data: xr.DataArray,
+    target_lat: np.ndarray,
+    target_lon: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bilinearly interpolate CPC while preserving an explicit coverage field.
+
+    CPC is land-only.  Interpolating its decoded NaNs directly spreads NaNs into
+    otherwise valid coastal land cells.  Interpolate precipitation*coverage and
+    coverage separately, then divide.  Locations/days with no CPC support are
+    represented by precipitation=0 and coverage=0, never by a non-finite model
+    input.
+    """
+    data = data.transpose("time", "lat", "lon")
+    finite = np.isfinite(data) & (data >= 0.0) & (data <= 1000.0)
+    numerator = data.where(finite, 0.0).interp(
+        lat=target_lat,
+        lon=target_lon,
+        method="linear",
+    )
+    coverage = finite.astype(np.float32).interp(
+        lat=target_lat,
+        lon=target_lon,
+        method="linear",
+    )
+    numerator_values = np.asarray(numerator.values, dtype=np.float32)
+    coverage_values = np.asarray(coverage.values, dtype=np.float32)
+    supported = np.isfinite(coverage_values) & (coverage_values > 1.0e-6)
+    precipitation = np.zeros_like(numerator_values, dtype=np.float32)
+    np.divide(
+        numerator_values,
+        coverage_values,
+        out=precipitation,
+        where=supported,
+    )
+    precipitation = np.clip(precipitation, 0.0, None)
+    coverage_values = np.where(
+        np.isfinite(coverage_values),
+        np.clip(coverage_values, 0.0, 1.0),
+        0.0,
+    ).astype(np.float32)
+    return precipitation, coverage_values
+
+
 def load_year(
     era5_path: Path,
     chirps_path: Path,
+    cpc_path: Path | None,
     year: int,
     valid: np.ndarray,
+    condition_channels: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    condition_channels = condition_channels or CONDITION_CHANNELS
     days = expected_time(year)
     with xr.open_dataset(chirps_path) as raw:
         dataset = _rename_coords(raw)
@@ -434,10 +534,28 @@ def load_year(
             )
         conditions = np.stack(channels, axis=1).astype(np.float32)
 
+    if cpc_path is not None:
+        with xr.open_dataset(cpc_path) as raw:
+            dataset = _rename_coords(raw).reindex(time=days)
+            # Read only the regional source cells required for interpolation.
+            dataset = dataset.sel(
+                lat=slice(WIDE.lat_min - 1.0, WIDE.lat_max + 1.0),
+                lon=slice(WIDE.lon_min - 1.0, WIDE.lon_max + 1.0),
+            )
+            cpc_precip, cpc_valid = interpolate_cpc_condition(
+                dataset["precip"],
+                WIDE.lat,
+                WIDE.lon,
+            )
+        conditions = np.concatenate(
+            [conditions, cpc_precip[:, None], cpc_valid[:, None]],
+            axis=1,
+        )
+
     expected_target_shape = (len(days), *WIDE.shape)
     expected_cond_shape = (
         len(days),
-        len(CONDITION_CHANNELS),
+        len(condition_channels),
         *WIDE.shape,
     )
     if target_values.shape != expected_target_shape:
@@ -447,11 +565,11 @@ def load_year(
         )
     if conditions.shape != expected_cond_shape:
         raise ValueError(
-            f"{era5_path} produced {conditions.shape}, "
+            f"dynamic inputs produced {conditions.shape}, "
             f"expected {expected_cond_shape}"
         )
     if not np.isfinite(conditions).all():
-        raise ValueError(f"{era5_path} produced non-finite condition values")
+        raise ValueError("dynamic inputs produced non-finite condition values")
     land_values = target_values[:, valid > 0.5]
     if not np.isfinite(land_values).all():
         missing = int((~np.isfinite(land_values)).sum())
@@ -484,6 +602,11 @@ def main() -> None:
     parser.add_argument("--end", type=int, default=2025)
     parser.add_argument("--era5", default="data/raw/era5")
     parser.add_argument("--chirps", default="data/raw/chirps")
+    parser.add_argument(
+        "--cpc",
+        default=None,
+        help="optional directory containing precip.YYYY.nc CPC files",
+    )
     parser.add_argument("--static", default="data/static/static_wide.nc")
     parser.add_argument("--out", default="data/processed/bd_wide.zarr")
     args = parser.parse_args()
@@ -492,10 +615,15 @@ def main() -> None:
 
     years = list(range(args.start, args.end + 1))
     days = pd.date_range(f"{args.start}-01-01", f"{args.end}-12-31", freq="D")
-    era5_paths, chirps_paths = validate_source_inventory(
+    cpc_dir = Path(args.cpc) if args.cpc else None
+    condition_channels = CONDITION_CHANNELS + (
+        CPC_CONDITION_CHANNELS if cpc_dir is not None else []
+    )
+    era5_paths, chirps_paths, cpc_paths = validate_source_inventory(
         years,
         Path(args.era5),
         Path(args.chirps),
+        cpc_dir,
     )
     static, valid, static_channels = load_static(Path(args.static))
     root, arrays = initialize_store(
@@ -505,6 +633,7 @@ def main() -> None:
         static,
         valid,
         static_channels,
+        condition_channels,
     )
 
     completed = {int(year) for year in root.attrs.get("completed_years", [])}
@@ -523,8 +652,10 @@ def main() -> None:
         target, conditions = load_year(
             era5_paths[year],
             chirps_paths[year],
+            cpc_paths[year] if cpc_paths is not None else None,
             year,
             valid,
+            condition_channels,
         )
         arrays["target"][start:stop] = target
         arrays["cond"][start:stop] = conditions
@@ -539,6 +670,17 @@ def main() -> None:
                 conditions[:, 0, valid > 0.5].mean()
             ),
         }
+        if "cpc_precip" in condition_channels:
+            cpc_index = condition_channels.index("cpc_precip")
+            coverage_index = condition_channels.index("cpc_valid")
+            summaries[str(year)].update(
+                cpc_land_mean_mm_day=float(
+                    conditions[:, cpc_index, valid > 0.5].mean()
+                ),
+                cpc_land_coverage_fraction=float(
+                    conditions[:, coverage_index, valid > 0.5].mean()
+                ),
+            )
         completed.add(year)
         root.attrs["year_summaries_json"] = json.dumps(
             summaries,
@@ -561,10 +703,10 @@ def main() -> None:
 
     print(
         f"wrote {args.out}: T={len(days)}, "
-        f"ERA5 channels={len(CONDITION_CHANNELS)}, years={years[0]}-{years[-1]}",
+        f"condition channels={len(condition_channels)}, years={years[0]}-{years[-1]}",
         flush=True,
     )
-    print("condition channels:", CONDITION_CHANNELS, flush=True)
+    print("condition channels:", condition_channels, flush=True)
     print("IMERG and gauges are not stored in the training dataset.", flush=True)
 
 

@@ -20,9 +20,11 @@ START="${PACK_START:-1981}"
 END="${PACK_END:-2025}"
 ERA5_DIR="${PACK_ERA5:-data/raw/era5}"
 CHIRPS_DIR="${PACK_CHIRPS:-data/raw/chirps}"
+CPC_DIR="${PACK_CPC:-}"
 STATIC_FILE="${PACK_STATIC:-data/static/static_wide.nc}"
 OUTPUT="${PACK_OUT:-data/processed/bd_wide.zarr}"
 QC_OUTPUT="${PACK_QC_OUT:-data/processed/alignment_qc.json}"
+ALIGNMENT_CHANNEL="${PACK_ALIGNMENT_CHANNEL:-era5_tp}"
 
 export PYTHONNOUSERSITE=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
@@ -73,19 +75,28 @@ echo "Architecture: $(uname -m)"
 echo "Years: $START-$END"
 echo "ERA5: $ERA5_DIR"
 echo "CHIRPS: $CHIRPS_DIR"
+echo "CPC: ${CPC_DIR:-not included}"
 echo "Static fields: $STATIC_FILE"
 echo "Packed store: $OUTPUT"
 echo "Alignment report: $QC_OUTPUT"
+echo "Alignment channel: $ALIGNMENT_CHANNEL"
 echo "Python: $PYTHON_BIN"
+
+PACK_ARGS=()
+if [[ -n "$CPC_DIR" ]]; then
+    PACK_ARGS+=(--cpc "$CPC_DIR")
+fi
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/04_regrid_and_pack.py \
     --start "$START" \
     --end "$END" \
     --era5 "$ERA5_DIR" \
     --chirps "$CHIRPS_DIR" \
+    "${PACK_ARGS[@]}" \
     --static "$STATIC_FILE" \
     --out "$OUTPUT"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/04_check_alignment.py \
     --zarr "$OUTPUT" \
+    --background-channel "$ALIGNMENT_CHANNEL" \
     --out "$QC_OUTPUT"

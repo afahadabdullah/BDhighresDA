@@ -6,7 +6,7 @@ Store layout (all on the 0.05 deg target grid, latitude ascending)::
       time      (T,)              datetime64[ns]
       lat       (H,)  lon (W,)
       target    (T, H, W)         CHIRPS daily precip, mm/day, NaN over ocean
-      cond      (T, Ccond, H, W)  ERA5 predictors only, already regridded
+      cond      (T, Ccond, H, W)  dynamic predictors, already regridded
       static    (Cstat, H, W)     orography, land-sea mask, lat/lon encodings
       valid     (H, W)            1 where CHIRPS has data (land)
 
@@ -79,15 +79,13 @@ class PrecipDataset(Dataset):
             idx = idx[(yrs[idx] >= cfg.years[0]) & (yrs[idx] <= cfg.years[1])]
         self.index = idx
 
-        self.cond_mean = cond_mean
-        self.cond_std = cond_std
         self.valid = np.asarray(self.z["valid"][:], dtype=np.float32)
         self.static = np.asarray(self.z["static"][:], dtype=np.float32)
         self.H, self.W = self.valid.shape
-        self.n_cond = self.z["cond"].shape[1]
-        # Optional channel subset.  The prior is meant to see the synoptic
-        # situation, not a precipitation forecast, so era5_tp is dropped from the
-        # conditioning stack while the dynamical channels stay.
+        full_n_cond = self.z["cond"].shape[1]
+        self.n_cond = full_n_cond
+        # Optional channel subset.  This lets experiments choose CPC precipitation,
+        # ERA5 precipitation, or no precipitation while sharing one packed store.
         self.all_cond_channels = [
             str(name) for name in self.z.attrs.get("cond_channels", [])
         ]
@@ -107,7 +105,43 @@ class PrecipDataset(Dataset):
             self.cond_channels = list(self.all_cond_channels)
         self.n_cond = len(self.cond_index)
 
-        self.cond_transform = cond_transform or CondTransform.identity(self.n_cond)
+        # Statistics are computed for the complete packed conditioning stack.
+        # Slice them with the same indices as the data so a configured subset
+        # cannot silently receive the wrong transform/mean/std.
+        if cond_transform is None:
+            self.cond_transform = CondTransform.identity(self.n_cond)
+        elif not cond_transform.kinds:
+            self.cond_transform = cond_transform
+        elif len(cond_transform.kinds) == full_n_cond:
+            self.cond_transform = CondTransform(
+                kinds=tuple(cond_transform.kinds[i] for i in self.cond_index),
+                eps=cond_transform.eps,
+            )
+        elif len(cond_transform.kinds) == self.n_cond:
+            self.cond_transform = cond_transform
+        else:
+            raise ValueError(
+                f"conditioning transform has {len(cond_transform.kinds)} channels; "
+                f"expected {full_n_cond} packed or {self.n_cond} selected"
+            )
+
+        def select_stats(values, name):
+            if values is None:
+                return None
+            vector = np.asarray(values, dtype=np.float32)
+            if vector.shape == (full_n_cond,):
+                return vector[self.cond_index]
+            if vector.shape == (self.n_cond,):
+                return vector
+            raise ValueError(
+                f"{name} has shape {vector.shape}; expected ({full_n_cond},) packed "
+                f"or ({self.n_cond},) selected"
+            )
+
+        self.cond_mean = select_stats(cond_mean, "cond_mean")
+        self.cond_std = select_stats(cond_std, "cond_std")
+        if (self.cond_mean is None) != (self.cond_std is None):
+            raise ValueError("cond_mean and cond_std must be supplied together")
         self.residual = residual or ResidualSpec()
         # (366, H, W) per-pixel day-of-year CHIRPS climatology, mm/day.
         self.climatology = climatology
@@ -124,7 +158,7 @@ class PrecipDataset(Dataset):
         # into the land field (docs/DIAGNOSIS_epoch119.md item 5).
         self.mask_fill = float(np.asarray(self.transform.forward(np.float32(0.0))))
         if self.residual.enabled:
-            # In residual mode the masked value means "no correction to ERA5",
+            # In residual mode the masked value means "no correction to the base",
             # which is both finite and the least informative thing to say.
             self.mask_fill = float(self.residual.fill)
 
@@ -194,9 +228,9 @@ class PrecipDataset(Dataset):
                 - self.time[j].astype("datetime64[Y]")
             ).astype(int)
             return self.climatology[min(doy, self.climatology.shape[0] - 1)][sl]
-        if self.residual.base == "era5_tp":
+        if self.residual.base in {"era5_tp", "cpc_precip"}:
             # NOTE: indexes the FULL cond stack, so it still works when era5_tp
-            # has been dropped from the conditioning channels the network sees.
+            # or CPC has been reordered in the channels the network sees.
             return cond_raw[self.residual.base_channel]
         return np.zeros(cond_raw.shape[1:], np.float32)
 
@@ -249,9 +283,9 @@ class PrecipDataset(Dataset):
             "time": torch.tensor(self.time[j].astype("datetime64[s]").astype(np.int64)),
             "target_mm": torch.from_numpy(target[None]),
             "crop": torch.tensor([r0, c0]),
-            # Transformed ERA5 tp.  Needed to turn a residual prediction back
-            # into precipitation; harmless (and still useful as a baseline) when
-            # the residual parameterisation is off.
+            # Transformed precipitation base. Needed to turn a residual
+            # prediction back into precipitation; harmless when the residual
+            # parameterisation is off.
             "base": torch.from_numpy(base[None]),
         }
 

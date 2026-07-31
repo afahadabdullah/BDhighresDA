@@ -29,10 +29,14 @@ export PYTHONPATH="$PWD/src"
 
 PREFLIGHT_CONFIG="${PREFLIGHT_CONFIG:-configs/train_h100.yaml}"
 NORM_REPORT="${PREFLIGHT_NORM_REPORT:-data/processed/normalization_diagnostics.json}"
+ZARR_STORE="$("$PYTHON_BIN" -c "
+import sys, yaml
+print(yaml.safe_load(open(sys.argv[1]))['data']['zarr'])
+" "$PREFLIGHT_CONFIG")"
 
 [[ -f scripts/preflight_training.py &&
    -f "$PREFLIGHT_CONFIG" &&
-   -d data/processed/bd_wide.zarr &&
+   -d "$ZARR_STORE" &&
    -f "$NORM_REPORT" ]] || {
     echo "ERROR: Training code, data, or normalization diagnostics are missing."
     exit 1

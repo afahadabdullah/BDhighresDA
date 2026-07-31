@@ -40,6 +40,40 @@ def test_conservative_regrid_preserves_uniform_field() -> None:
     np.testing.assert_allclose(result, 7.5, rtol=1e-6)
 
 
+def test_cpc_interpolation_normalizes_missing_source_weights() -> None:
+    module = load_script("04_regrid_and_pack.py")
+    source = xr.DataArray(
+        np.array(
+            [
+                [[2.0, np.nan], [4.0, 6.0]],
+                [[np.nan, np.nan], [np.nan, np.nan]],
+            ],
+            dtype=np.float32,
+        ),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": np.arange(2),
+            "lat": [0.0, 1.0],
+            "lon": [10.0, 11.0],
+        },
+    )
+
+    precip, coverage = module.interpolate_cpc_condition(
+        source,
+        np.array([0.5]),
+        np.array([10.5]),
+    )
+
+    # The supported day is the weighted mean of 2, 4 and 6; the missing corner
+    # lowers coverage but does not turn precipitation into NaN.
+    np.testing.assert_allclose(precip[0, 0, 0], 4.0, rtol=1e-6)
+    np.testing.assert_allclose(coverage[0, 0, 0], 0.75, rtol=1e-6)
+    assert precip[1, 0, 0] == 0.0
+    assert coverage[1, 0, 0] == 0.0
+    assert np.isfinite(precip).all()
+    assert np.isfinite(coverage).all()
+
+
 def test_alignment_correlation_peaks_at_zero() -> None:
     module = load_script("04_check_alignment.py")
     rng = np.random.default_rng(4)

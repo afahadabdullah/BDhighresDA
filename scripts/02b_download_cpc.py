@@ -2,10 +2,9 @@
 """Download the CPC Global Unified Gauge-Based Analysis of Daily Precipitation.
 
 0.5 degree, daily, land only, 1979-present, from NOAA PSL.  Produced by optimal
-interpolation of GTS gauge reports -- so unlike ERA5 precipitation it is a
-MEASUREMENT, not a forecast.  That distinction decides where it belongs in this
-project: a measurement should enter through the observation likelihood, not the
-prior's conditioning (see docs/DIAGNOSIS_epoch119.md and the v6 config).
+interpolation of GTS gauge reports, it is a contemporaneous analysis rather than
+a forecast.  It can therefore condition a CPC-to-CHIRPS statistical-downscaling
+experiment, but that experiment must not be interpreted as forecast downscaling.
 
 One netCDF per year, ~50 MB each, so the whole 1981-2025 record is a few GB.
 
@@ -32,6 +31,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="re-download files that are already present",
     )
+    parser.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="exit non-zero if any requested year fails or is absent",
+    )
     args = parser.parse_args()
     if args.start > args.end:
         parser.error("--start must not exceed --end")
@@ -43,18 +47,21 @@ def parse_args() -> argparse.Namespace:
 def download(url: str, destination: Path) -> None:
     """Fetch to a .part file and rename, so an interrupted run leaves no stub."""
     partial = destination.with_suffix(destination.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=120) as response:
-        total = int(response.headers.get("Content-Length", 0))
-        written = 0
-        with partial.open("wb") as handle:
-            while chunk := response.read(1 << 20):
-                handle.write(chunk)
-                written += len(chunk)
-        if total and written != total:
-            partial.unlink(missing_ok=True)
-            raise IOError(
-                f"{url}: expected {total} bytes, received {written}"
-            )
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response:
+            total = int(response.headers.get("Content-Length", 0))
+            written = 0
+            with partial.open("wb") as handle:
+                while chunk := response.read(1 << 20):
+                    handle.write(chunk)
+                    written += len(chunk)
+            if total and written != total:
+                raise IOError(
+                    f"{url}: expected {total} bytes, received {written}"
+                )
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
     partial.replace(destination)
 
 
@@ -85,8 +92,13 @@ def main() -> None:
           if present else "\nno files downloaded")
     if failures:
         print(f"failed: {failures}")
-        if len(failures) == args.end - args.start + 1:
-            sys.exit(1)
+    requested = set(range(args.start, args.end + 1))
+    absent = sorted(requested - set(present))
+    if args.require_complete and absent:
+        print(f"required years absent: {absent}")
+        sys.exit(1)
+    if len(failures) == args.end - args.start + 1:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

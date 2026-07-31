@@ -2,20 +2,20 @@
 
 **Generative downscaling + data assimilation for daily rainfall over Bangladesh.**
 
-ERA5 (0.25°) is downscaled to **0.05° (~5 km) daily precipitation** by a
-conditional **flow-matching** generative prior, then corrected at inference
+ERA5 (0.25°), or CPC (0.5°) in the CPC experiment, is downscaled to
+**0.05° (~5 km) daily precipitation** by a conditional **flow-matching**
+generative prior, then corrected at inference
 time by **GPM IMERG footprints and sparse BMD rain gauges**, both assimilated
 through score guidance — no retraining needed when the observing network
 changes.
 
-**Two phases, and only one sees observations.**
-*Training* (offline, once): ERA5 → U-Net → CHIRPS at 5 km. No gauge, no
-satellite. The network learns `p(rainfall | ERA5)` and nothing else.
-*Inference* (every day): the same frozen network samples a background from
-ERA5, and observations nudge every integration step to give the analysis.
-That separation is what makes this data assimilation rather than multi-input
-regression, and it means the observing network can change — new gauges, a new
-IMERG version, radar later — without retraining anything.
+**The default workflow has two phases, and only one sees observations.**
+*Training* (offline, once): ERA5 → U-Net → CHIRPS at 5 km. No gauge or
+satellite observation reaches this default prior. *Inference* (every day): the
+same frozen network samples a background from ERA5, and observations nudge
+every integration step to give the analysis. The optional CPC experiment is a
+separate, explicitly contemporaneous CPC-to-CHIRPS statistical-downscaling
+ablation; it does not have the same forecast/observation separation.
 
 The approach follows [Manshausen et al. (2025, *JAMES*)](https://doi.org/10.1029/2024MS004505)
 (score-based data assimilation of weather stations at km scale), with the
@@ -36,6 +36,7 @@ the data plan, and the experiment/ablation list.
 | Step | Script |
 |---|---|
 | 0. ERA5 predictors | `scripts/00_download_era5.py` |
+| 0b. CPC daily precipitation (optional condition) | `scripts/02b_download_cpc.py` |
 | 1. CHIRPS target | `scripts/01_download_chirps.py` |
 | 2. IMERG observations | `scripts/02_download_imerg.py` |
 | 3. DEM + static fields (orography, mask, position) | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
@@ -67,10 +68,14 @@ slurm/setup_earthmover_env.sh
 conda run -p ../envs/bdda-earthmover \
   python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
 python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
+python scripts/02b_download_cpc.py --start 1981 --end 2025 \
+       --out data/raw/cpc --require-complete
 python scripts/03_download_dem.py --out data/raw/dem/copernicus_glo90_wide.nc
 python scripts/03_build_static.py --dem data/raw/dem/copernicus_glo90_wide.nc \
        --chirps data/raw/chirps/chirps_wide_2010.nc --out data/static/static_wide.nc
 python scripts/04_regrid_and_pack.py --start 1981 --end 2025 --out data/processed/bd_wide.zarr
+python scripts/04_regrid_and_pack.py --start 1981 --end 2025 \
+       --cpc data/raw/cpc --out data/processed/bd_wide_cpc.zarr
 python scripts/04_check_alignment.py --zarr data/processed/bd_wide.zarr \
        --out data/processed/alignment_qc.json
 python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
@@ -82,11 +87,17 @@ slurm/submit_download_chirps.sh
 # ERA5: free Earthmover ARCO store, six variables, daily regional files:
 slurm/submit_download_era5.sh
 
+# Optional CPC-conditioned experiment: complete 1981-2025 daily record.
+slurm/submit_download_cpc.sh
+
 # DEM: public Copernicus GLO-90, then build all seven static channels:
 slurm/submit_dem_static.sh
 
 # ERA5 + CHIRPS + static training store, followed by lag-alignment QC:
 slurm/submit_pack_training_data.sh
+
+# CPC experiment uses a separate store so the ERA5/v6 store stays reproducible.
+slurm/submit_pack_training_data_cpc.sh
 
 # Training-period normalization statistics (requires alignment pass):
 slurm/submit_compute_stats.sh
@@ -102,6 +113,12 @@ slurm/submit_preflight_training_gh200.sh
 
 # 3. after PREFLIGHT PASSED, train on PRISM GH200:
 slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
+
+# CPC conditioning (CPC precip + coverage, five ERA5 weather fields, no ERA5 tp):
+slurm/submit_compute_stats_cpc.sh
+slurm/submit_normalization_diagnostics_cpc.sh
+slurm/submit_preflight_training_cpc_gh200.sh
+slurm/submit_train_cpc_gh200.sh
 
 # Held-out best-checkpoint input/target/prediction/error/spread diagnostic:
 slurm/submit_test_predictions.sh
@@ -127,7 +144,7 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.
 | **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
 | **DEM access** | No key required; Copernicus GLO-90 is downloaded anonymously from the AWS Open Data Registry |
 
-## Conditioning: six ERA5 surface channels
+## Conditioning experiments
 
 `tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·
 `u10`/`v10` (low-level flow) · `msl` (synoptic circulation), plus the static
@@ -139,6 +156,13 @@ background predictor because it already reflects the model's full dynamics
 and moisture convergence. Exact IVT is retained as a future ablation: add it
 only if a controlled validation experiment improves CRPS and extreme-rain
 skill.
+
+The CPC experiment in `configs/train_h100_cpc.yaml` replaces ERA5 `tp` with
+same-day CPC precipitation and an explicit CPC-coverage channel, while retaining
+the five ERA5 weather fields. It is a CPC-to-CHIRPS statistical-downscaling
+experiment: because CPC is a contemporaneous gauge analysis, it is not a
+forecast experiment. Missing CPC source cells and days are represented by
+finite zero precipitation plus `cpc_valid=0`, never by NaNs in model inputs.
 
 ## Domains
 

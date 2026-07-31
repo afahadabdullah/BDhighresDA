@@ -7,9 +7,10 @@ Single GPU:
 2 x V100 (one node):
     torchrun --nproc_per_node=2 scripts/train.py --config configs/train_v100.yaml
 
-Single stage: the prior is conditioned on ERA5 and the static fields only, so
-it trains on the full 1981-2018 record.  IMERG never reaches the network -- it
-is assimilated as an observation at inference time (docs/METHODOLOGY.md S4).
+Single stage: the prior is conditioned on the dynamic channels selected in the
+configuration plus static fields, so it trains on the full 1981-2018 record.
+IMERG never reaches the network -- it is assimilated as an observation at
+inference time (docs/METHODOLOGY.md S4).
 """
 from __future__ import annotations
 
@@ -60,6 +61,7 @@ def save_checkpoint(state: dict, path: Path) -> None:
 def build_dataset(cfg: dict, split: str) -> PrecipDataset:
     stats = json.loads(Path(cfg["data"]["stats"]).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
+    selected = cfg["data"].get("cond_channels")
     dcfg = DatasetConfig(
         root=cfg["data"]["zarr"],
         crop=cfg["data"]["crop"],
@@ -67,6 +69,7 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         years=tuple(cfg["data"]["years"][split]),
         seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
         min_valid_fraction=cfg["data"].get("min_valid_fraction", 0.3),
+        cond_channels=tuple(selected) if selected else None,
     )
     return PrecipDataset(
         dcfg,
@@ -99,6 +102,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
             flush=True,
         )
         return None
+    selected = cfg["data"].get("cond_channels")
     dataset = PrecipDataset(
         DatasetConfig(
             root=cfg["data"]["zarr"],
@@ -107,6 +111,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
             crop_origin=crop_offsets(WIDE, grid),
             years=tuple(cfg["data"]["years"]["val"]),
             seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
+            cond_channels=tuple(selected) if selected else None,
         ),
         tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
@@ -121,10 +126,24 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         device,
         out_dir / "validation",
         cfg=mcfg,
-        era5_tp_index=int(cfg["data"].get("era5_tp_cond_index", 0)),
-        cond_transform=CondTransform.from_stats(stats),
-        cond_mean=np.asarray(stats["cond_mean"], np.float32),
-        cond_std=np.asarray(stats["cond_std"], np.float32),
+        era5_tp_index=int(
+            cfg["data"].get(
+                "precip_cond_index",
+                cfg["data"].get("era5_tp_cond_index", 0),
+            )
+        ),
+        baseline_label=cfg["data"].get("precip_baseline_label", "ERA5 input"),
+        baseline_channel=cfg["data"].get(
+            "precip_baseline_channel",
+            "era5_tp",
+        ),
+        baseline_valid_channel=cfg["data"].get(
+            "precip_baseline_coverage_channel"
+        ),
+        baseline_valid_index=cfg["data"].get("precip_coverage_cond_index"),
+        cond_transform=dataset.cond_transform,
+        cond_mean=dataset.cond_mean,
+        cond_std=dataset.cond_std,
         extent=(grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max),
     )
 

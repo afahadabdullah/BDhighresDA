@@ -2,7 +2,7 @@
 """Create the mandatory pre-training normalization diagnostic figure.
 
 The single large PNG contains raw and normalized maps plus sampled
-distributions for CHIRPS and all six ERA5 predictors, followed by the seven
+distributions for CHIRPS and all dynamic predictors, followed by the seven
 static fields. A JSON sidecar records numerical checks used by the GH200
 training preflight.
 """
@@ -34,6 +34,8 @@ FIELD_LABELS = {
     "era5_u10": "ERA5 10 m zonal wind",
     "era5_v10": "ERA5 10 m meridional wind",
     "era5_msl": "ERA5 mean sea-level pressure",
+    "cpc_precip": "CPC daily precipitation",
+    "cpc_valid": "CPC interpolation coverage",
 }
 FIELD_UNITS = {
     "target": "mm day⁻¹",
@@ -43,6 +45,8 @@ FIELD_UNITS = {
     "era5_u10": "m s⁻¹",
     "era5_v10": "m s⁻¹",
     "era5_msl": "hPa",
+    "cpc_precip": "mm day⁻¹",
+    "cpc_valid": "fraction",
 }
 
 
@@ -140,15 +144,8 @@ def main() -> None:
         raise ValueError("Zarr and statistics condition-channel metadata differ")
     if static_channels != list(stats["static_channels"]):
         raise ValueError("Zarr and statistics static-channel metadata differ")
-    if condition_channels != [
-        "era5_tp",
-        "era5_tcwv",
-        "era5_cape",
-        "era5_u10",
-        "era5_v10",
-        "era5_msl",
-    ]:
-        raise ValueError(f"unexpected condition channels: {condition_channels}")
+    if not condition_channels:
+        raise ValueError("packed store does not identify any condition channels")
 
     valid = np.asarray(root["valid"][:]) > 0.5
     static = np.asarray(root["static"][:], dtype=np.float32)
@@ -262,11 +259,15 @@ def main() -> None:
         passed = passed and approximately_standard
 
     fields = ["target", *condition_channels]
-    figure = plt.figure(figsize=(22, 34), constrained_layout=True)
+    figure_rows = len(fields) + 2
+    figure = plt.figure(
+        figsize=(22, 3.7 * figure_rows),
+        constrained_layout=True,
+    )
     grid = figure.add_gridspec(
-        9,
+        figure_rows,
         4,
-        height_ratios=[1, 1, 1, 1, 1, 1, 1, 0.9, 0.9],
+        height_ratios=[1.0] * len(fields) + [0.9, 0.9],
     )
     extent = [
         float(longitude.min()),
@@ -375,11 +376,11 @@ def main() -> None:
         normalized_hist_axis.grid(alpha=0.2)
 
     static_axes = [
-        figure.add_subplot(grid[7, column]) for column in range(4)
+        figure.add_subplot(grid[len(fields), column]) for column in range(4)
     ] + [
-        figure.add_subplot(grid[8, column]) for column in range(3)
+        figure.add_subplot(grid[len(fields) + 1, column]) for column in range(3)
     ]
-    summary_axis = figure.add_subplot(grid[8, 3])
+    summary_axis = figure.add_subplot(grid[len(fields) + 1, 3])
     for index, (axis, name) in enumerate(zip(static_axes, static_channels)):
         values = static[index]
         symmetric = name in {

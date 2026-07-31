@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,6 +27,7 @@ from bdhires.transforms import (  # noqa: E402
     PrecipTransform,
     ResidualSpec,
 )
+from bdhires.eval.monitor import ValidationMonitor  # noqa: E402
 
 # The transform tests are pure numpy and must run anywhere.  Only the sampler and
 # dataset tests need torch, so guard those individually rather than skipping the
@@ -71,6 +73,32 @@ def _fake_cond(rng, n=8, h=16, w=16) -> np.ndarray:
 def test_default_spec_targets_only_the_skewed_channels():
     ctf = CondTransform.for_channels(CHANNELS)
     assert ctf.kinds == ("log1p", "none", "sqrt", "none", "none", "none")
+
+
+def test_cpc_precipitation_uses_log_transform_but_coverage_does_not():
+    ctf = CondTransform.for_channels(["cpc_precip", "cpc_valid"])
+    assert ctf.kinds == ("log1p", "none")
+
+
+def test_monitor_reads_named_raw_cpc_baseline_and_coverage():
+    condition = np.zeros((1, 2, 2, 2), dtype=np.float32)
+    condition[0, 0] = [[1.0, 2.0], [3.0, 4.0]]
+    condition[0, 1] = [[1.0, 0.0], [0.5, 1.0]]
+    monitor = ValidationMonitor.__new__(ValidationMonitor)
+    monitor.ds = SimpleNamespace(
+        all_cond_channels=["cpc_precip", "cpc_valid"],
+        z={"cond": condition},
+    )
+    monitor.slices = (slice(None), slice(None))
+    monitor.valid = np.ones((2, 2), dtype=bool)
+    monitor.baseline_channel = "cpc_precip"
+    monitor.baseline_valid_channel = "cpc_valid"
+
+    recovered = monitor._baseline_mm(None, 0)
+
+    assert recovered[0, 0] == 1.0
+    assert np.isnan(recovered[0, 1])
+    assert recovered[1, 0] == 3.0
 
 
 def test_transform_stabilises_variance():
@@ -454,7 +482,7 @@ def test_training_configs_have_a_consistent_monitor_cadence():
 
     from bdhires.eval.monitor import MonitorConfig
 
-    for name in ("train_h100.yaml", "train_v100.yaml"):
+    for name in ("train_h100.yaml", "train_h100_cpc.yaml", "train_v100.yaml"):
         cfg = yaml.safe_load((ROOT / "configs" / name).read_text())
         monitor = MonitorConfig.from_dict(cfg.get("validation"))
         if not monitor.enabled:
@@ -682,7 +710,7 @@ def test_climatology_base_round_trips_and_floors_at_climatology():
 def test_residual_base_survives_serialisation():
     import json
 
-    for base in ("era5_tp", "climatology"):
+    for base in ("era5_tp", "cpc_precip", "climatology"):
         spec = ResidualSpec(enabled=True, mean=0.1, std=1.0, base=base)
         restored = ResidualSpec.from_stats(
             json.loads(json.dumps({"residual": spec.to_dict()}))
@@ -713,6 +741,34 @@ def test_conditioning_channel_subset_drops_era5_tp():
     item = ds[0]
     # 5 ERA5 + 7 static + 2 seasonal
     assert item["cond"].shape[0] == ds.total_cond_channels == 14
+
+
+@needs_torch
+def test_conditioning_subset_slices_full_store_statistics_consistently():
+    store = _fake_store()
+    keep = ("era5_tcwv", "era5_cape", "era5_u10", "era5_v10", "era5_msl")
+    cfg = DatasetConfig(
+        root="unused",
+        crop=32,
+        random_crop=False,
+        crop_origin=(32, 0),
+        cond_channels=keep,
+    )
+    full_mean = np.arange(len(CHANNELS), dtype=np.float32)
+    full_std = np.arange(1, len(CHANNELS) + 1, dtype=np.float32)
+    ds = PrecipDataset(
+        cfg,
+        TF,
+        store=store,
+        cond_transform=CondTransform.for_channels(CHANNELS),
+        cond_mean=full_mean,
+        cond_std=full_std,
+    )
+
+    np.testing.assert_array_equal(ds.cond_mean, full_mean[1:])
+    np.testing.assert_array_equal(ds.cond_std, full_std[1:])
+    assert ds.cond_transform.kinds == ("none", "sqrt", "none", "none", "none")
+    assert np.isfinite(ds[0]["cond"].numpy()).all()
 
 
 @needs_torch
@@ -769,3 +825,23 @@ def test_v6_config_removes_precipitation_from_the_conditioning():
         "the dynamical channels should stay -- they describe the situation, "
         "not the rainfall"
     )
+
+
+def test_cpc_training_config_replaces_era5_precipitation():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / "train_h100_cpc.yaml").read_text())
+    channels = cfg["data"]["cond_channels"]
+    assert channels[0:2] == ["cpc_precip", "cpc_valid"]
+    assert "era5_tp" not in channels
+    assert cfg["data"]["precip_baseline_channel"] == "cpc_precip"
+    assert cfg["data"]["precip_baseline_coverage_channel"] == "cpc_valid"
+    assert all(
+        name in channels
+        for name in ("era5_tcwv", "era5_cape", "era5_u10", "era5_v10", "era5_msl")
+    )
+    assert cfg["data"]["years"] == {
+        "train": [1981, 2018],
+        "val": [2019, 2020],
+        "test": [2021, 2025],
+    }

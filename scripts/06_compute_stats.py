@@ -43,13 +43,13 @@ def main():
     ap.add_argument(
         "--residual",
         action="store_true",
-        help="parameterise the target as a correction to ERA5 tp in transformed "
-             "space instead of the absolute field",
+        help="parameterise the target as a transformed-space correction to the "
+             "selected precipitation base",
     )
     ap.add_argument(
         "--residual-base",
         default="era5_tp",
-        choices=["era5_tp", "climatology"],
+        choices=["era5_tp", "cpc_precip", "climatology"],
         help="what the residual is taken against. 'climatology' uses the "
              "per-pixel day-of-year CHIRPS mean, which keeps the residual's "
              "well-conditioned target and non-negativity without making the "
@@ -73,6 +73,13 @@ def main():
         type=int,
         default=0,
         help="index of era5_tp within the conditioning stack (the residual base)",
+    )
+    ap.add_argument(
+        "--residual-base-index",
+        type=int,
+        default=None,
+        help="packed conditioning-channel index for era5_tp or cpc_precip; "
+             "defaults to --era5-tp-index for backward compatibility",
     )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -118,7 +125,7 @@ def main():
     # mean has only ~38 contributing days even with the full record, so it needs
     # every one of them plus circular smoothing to be usable as a residual base.
     climatology = None
-    if args.residual_base == "climatology" or args.residual:
+    if args.residual_base == "climatology":
         print(f"building the day-of-year climatology from {len(idx)} training days",
               flush=True)
         H, W = valid.shape
@@ -167,17 +174,24 @@ def main():
     residual = ResidualSpec(enabled=False)
     residual_summary = None
     if args.residual:
-        if not 0 <= args.era5_tp_index < cond.shape[1]:
-            raise ValueError(
-                f"--era5-tp-index {args.era5_tp_index} is outside the "
-                f"{cond.shape[1]} conditioning channels"
-            )
-        base_name = channels[args.era5_tp_index]
-        if args.residual_base == "era5_tp" and "tp" not in base_name:
-            raise ValueError(
-                f"--era5-tp-index {args.era5_tp_index} selects {base_name!r}, "
-                f"which does not look like total precipitation"
-            )
+        base_index = (
+            args.residual_base_index
+            if args.residual_base_index is not None
+            else args.era5_tp_index
+        )
+        base_name = "doy climatology"
+        if args.residual_base != "climatology":
+            if not 0 <= base_index < cond.shape[1]:
+                raise ValueError(
+                    f"residual base index {base_index} is outside the "
+                    f"{cond.shape[1]} conditioning channels"
+                )
+            base_name = channels[base_index]
+            if base_name != args.residual_base:
+                raise ValueError(
+                    f"residual base index {base_index} selects {base_name!r}, "
+                    f"not requested {args.residual_base!r}"
+                )
         # Accumulated in chunks.  Materialising float64 copies of the full
         # (N, H, W) target and base plus their difference added ~2.2 GB of
         # temporaries to an already 11 GB script and pushed the job over its
@@ -200,7 +214,7 @@ def main():
                 ])
                 base_raw = climatology[np.minimum(doys, 365)]
             else:
-                base_raw = cond[start : start + 64, args.era5_tp_index]
+                base_raw = cond[start : start + 64, base_index]
             base_t = tf.forward(np.clip(base_raw, 0.0, None).astype(np.float64))[ok]
             difference = target_t - base_t
             if not np.isfinite(difference).all():
@@ -224,7 +238,7 @@ def main():
             enabled=True,
             mean=float(mean_d),
             std=float(np.sqrt(var_d) + 1e-12),
-            base_channel=int(args.era5_tp_index),
+            base_channel=int(base_index),
             base=args.residual_base,
         )
         mean_t, mean_b = sum_t / count, sum_b / count
@@ -241,9 +255,7 @@ def main():
         ]
         residual_summary = dict(
             base=args.residual_base,
-            base_channel_name=(
-                base_name if args.residual_base == "era5_tp" else "doy climatology"
-            ),
+            base_channel_name=base_name,
             n_pixels=int(count),
             raw_mean=residual.mean,
             raw_std=residual.std,

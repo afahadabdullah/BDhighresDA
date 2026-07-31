@@ -92,6 +92,10 @@ class ValidationMonitor:
         out_dir: str | Path,
         cfg: MonitorConfig | None = None,
         era5_tp_index: int = 0,
+        baseline_label: str = "ERA5 input",
+        baseline_channel: str | None = None,
+        baseline_valid_channel: str | None = None,
+        baseline_valid_index: int | None = None,
         cond_transform=None,
         cond_mean: np.ndarray | None = None,
         cond_std: np.ndarray | None = None,
@@ -109,6 +113,10 @@ class ValidationMonitor:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = self.out_dir / "history.jsonl"
         self.era5_tp_index = era5_tp_index
+        self.baseline_label = baseline_label
+        self.baseline_channel = baseline_channel
+        self.baseline_valid_channel = baseline_valid_channel
+        self.baseline_valid_index = baseline_valid_index
         self.cond_transform = cond_transform
         self.cond_mean = cond_mean
         self.cond_std = cond_std
@@ -160,7 +168,7 @@ class ValidationMonitor:
         return cases
 
     def _attach_baselines(self) -> None:
-        """Score raw ERA5 against CHIRPS for each case, once.
+        """Score the configured raw precipitation baseline against CHIRPS once.
 
         This is the bar the model has to clear.  The epoch-119 failure was a
         model whose ensemble mean correlated *worse* with CHIRPS than the ERA5
@@ -171,7 +179,7 @@ class ValidationMonitor:
         for case in self.cases:
             try:
                 item = self.ds[self._position_of(case.index)]
-                case.era5 = self._era5_mm(item)
+                case.era5 = self._baseline_mm(item, case.index)
                 keep = self.valid & np.isfinite(case.target) & np.isfinite(case.era5)
                 predicted = case.era5[keep].astype(np.float64)
                 observed = case.target[keep].astype(np.float64)
@@ -190,7 +198,8 @@ class ValidationMonitor:
                 }
             except Exception as exc:  # pragma: no cover - diagnostics only
                 print(
-                    f"[validation monitor] no ERA5 baseline for {case.date}: {exc!r}",
+                    f"[validation monitor] no {self.baseline_label} baseline for "
+                    f"{case.date}: {exc!r}",
                     flush=True,
                 )
 
@@ -311,7 +320,7 @@ class ValidationMonitor:
                     {
                         "case": case,
                         "members": members,
-                        "era5": self._era5_mm(item),
+                        "era5": self._baseline_mm(item, case.index),
                         "metrics": self._metrics(members, case.target),
                     }
                 )
@@ -351,8 +360,39 @@ class ValidationMonitor:
         """Map a store index back to a dataset position."""
         return int(np.where(self.ds.index == index)[0][0])
 
-    def _era5_mm(self, item) -> np.ndarray:
-        """Recover the ERA5 tp channel in mm/day for the comparison panel."""
+    def _baseline_mm(self, item, store_index: int | None = None) -> np.ndarray:
+        """Recover the configured precipitation condition in mm/day."""
+        if self.baseline_channel is not None:
+            if store_index is None:
+                raise ValueError("store_index is required for a named baseline")
+            channels = self.ds.all_cond_channels
+            if self.baseline_channel not in channels:
+                raise ValueError(
+                    f"baseline channel {self.baseline_channel!r} is not packed; "
+                    f"available: {channels}"
+                )
+            channel_index = channels.index(self.baseline_channel)
+            values = np.asarray(
+                self.ds.z["cond"][store_index, channel_index][self.slices],
+                dtype=np.float32,
+            )
+            available = self.valid.copy()
+            if self.baseline_valid_channel is not None:
+                if self.baseline_valid_channel not in channels:
+                    raise ValueError(
+                        f"baseline coverage channel "
+                        f"{self.baseline_valid_channel!r} is not packed"
+                    )
+                valid_index = channels.index(self.baseline_valid_channel)
+                coverage = np.asarray(
+                    self.ds.z["cond"][store_index, valid_index][self.slices],
+                    dtype=np.float32,
+                )
+                available &= coverage > 1.0e-6
+            return np.where(available, values, np.nan)
+
+        # Legacy path for callers that provide only an index into the selected,
+        # normalized network-conditioning tensor.
         values = item["cond"][self.era5_tp_index].numpy()
         if self.cond_mean is not None and self.cond_std is not None:
             values = (
@@ -361,7 +401,21 @@ class ValidationMonitor:
             )
         if self.cond_transform is not None:
             values = self.cond_transform.inverse_channel(values, self.era5_tp_index)
-        return np.where(self.valid, values, np.nan)
+        available = self.valid.copy()
+        if self.baseline_valid_index is not None:
+            coverage = item["cond"][self.baseline_valid_index].numpy()
+            if self.cond_mean is not None and self.cond_std is not None:
+                coverage = (
+                    coverage * self.cond_std[self.baseline_valid_index]
+                    + self.cond_mean[self.baseline_valid_index]
+                )
+            if self.cond_transform is not None:
+                coverage = self.cond_transform.inverse_channel(
+                    coverage,
+                    self.baseline_valid_index,
+                )
+            available &= coverage > 1.0e-6
+        return np.where(available, values, np.nan)
 
     def _metrics(self, members: np.ndarray, target: np.ndarray) -> dict:
         from .metrics import crps_ensemble
@@ -503,6 +557,9 @@ class ValidationMonitor:
                 self._decorate(axis, left=column == 0, bottom=row == rows - 1)
                 if row == 0:
                     letter, title, subtitle = self.MAP_COLUMNS[column]
+                    if column == 0:
+                        title = self.baseline_label
+                        subtitle = "daily precipitation condition"
                     axis.set_title(
                         f"{letter}.  {title}\n"
                         f"{subtitle.format(members=self.cfg.members)}",
@@ -545,7 +602,8 @@ class ValidationMonitor:
             bar.ax.tick_params(labelsize=7)
 
         figure.suptitle(
-            "BDhighresDA sampled validation - held-out ERA5-conditioned background\n"
+            f"BDhighresDA sampled validation - held-out background conditioned on "
+            f"{self.baseline_label}\n"
             f"Epoch {epoch + 1}   |   {self.weights_label}   |   {self.cfg.members}-member "
             f"ensemble   |   {self.cfg.n_steps} sampler steps, CFG w="
             f"{self.cfg.cfg_scale:g}, prior temperature 1.0\n"
@@ -573,7 +631,7 @@ class ValidationMonitor:
     ]
 
     def _plot_progress(self) -> None:
-        """Metric-vs-epoch curves with the ERA5 baseline drawn in.
+        """Metric-vs-epoch curves with the configured baseline drawn in.
 
         The reference lines are the point of this figure: a conditional model
         that cannot beat the field it is conditioned on has not learned to use
@@ -626,7 +684,7 @@ class ValidationMonitor:
             handles, labels = axis.get_legend_handles_labels()
             if has_baseline:
                 handles.append(Line2D([], [], color="grey", ls=":", lw=1.4))
-                labels.append("ERA5 input baseline")
+                labels.append(f"{self.baseline_label} baseline")
             if lower_better is not None:
                 pooled = [np.mean([c[key] for c in r["cases"]]) for r in rows]
                 best = int(np.argmin(pooled) if lower_better else np.argmax(pooled))
@@ -652,7 +710,7 @@ class ValidationMonitor:
             f"{self.weights_label}   |   {self.cfg.members}-member ensemble   |   "
             f"{self.cfg.n_steps} sampler steps, CFG w={self.cfg.cfg_scale:g}   |   "
             f"evaluated every {self.cfg.every} epochs\n"
-            "Dotted lines are the raw ERA5 input scored against CHIRPS: the "
+            f"Dotted lines are the raw {self.baseline_label} scored against CHIRPS: the "
             "model must beat its own conditioning",
             fontsize=13.5,
         )

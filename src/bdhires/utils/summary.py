@@ -115,11 +115,13 @@ def training_summary(
     ))
     cond_kinds = stats.get("cond_transform", {}).get("kinds")
     channel_names = stats.get("cond_channels", [])
+    selected_names = train_ds.cond_channels
     if cond_kinds:
+        kind_by_name = dict(zip(channel_names, cond_kinds))
         applied = [
-            f"{name}:{kind}"
-            for name, kind in zip(channel_names, cond_kinds)
-            if kind != "none"
+            f"{name}:{kind_by_name[name]}"
+            for name in selected_names
+            if kind_by_name.get(name, "none") != "none"
         ]
         add(_row("cond transform", "  ".join(applied) if applied else "identity"))
     else:
@@ -143,7 +145,7 @@ def training_summary(
                 f"base explains r={summary.get('base_correlation', float('nan')):.3f} "
                 f"of the transformed target"
             ))
-        add(_sub("zero residual reproduces ERA5, so the model has a skill floor"))
+        add(_sub(f"zero residual reproduces {base}, so the model has a skill floor"))
     else:
         add(_row("target", "ABSOLUTE: T(CHIRPS)"))
     years = data["years"]
@@ -163,8 +165,8 @@ def training_summary(
     n_static = train_ds.static.shape[0]
     n_season = train_ds.total_cond_channels - train_ds.n_cond - n_static
     add(_row("conditioning", f"{train_ds.total_cond_channels} channels"))
-    add(_sub(f"{train_ds.n_cond:>3d} ERA5    "
-             f"{' '.join(channel_names) or 'unnamed'}"))
+    add(_sub(f"{train_ds.n_cond:>3d} dynamic "
+             f"{' '.join(selected_names) or 'unnamed'}"))
     static_names = stats.get("static_channels", [])
     add(_sub(f"{n_static:>3d} static  "
              f"{' '.join(static_names) or 'unnamed'}"))

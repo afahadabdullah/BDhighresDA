@@ -128,7 +128,7 @@ def unstandardize(x, mu, sd):
 # Conditioning-channel transforms
 # ---------------------------------------------------------------------------
 #
-# The ERA5 predictors are stored in the Zarr in raw physical units, which is the
+# The dynamic predictors are stored in the Zarr in raw physical units, which is the
 # right thing for a data store.  They must NOT be handed to the network that way.
 #
 # Daily ERA5 ``tp`` has a skewness of roughly 10: a global z-score puts ~95% of
@@ -148,13 +148,14 @@ def unstandardize(x, mu, sd):
 
 DEFAULT_COND_TRANSFORMS: dict[str, str] = {
     "era5_tp": "log1p",
+    "cpc_precip": "log1p",
     "era5_cape": "sqrt",
 }
 
 
 @dataclass(frozen=True)
 class CondTransform:
-    """Per-channel variance-stabilising transform for the ERA5 predictors.
+    """Per-channel variance-stabilising transform for dynamic predictors.
 
     ``kinds`` is one transform name per conditioning channel, in channel order,
     drawn from the same vocabulary as :class:`PrecipTransform` (``log1p``,
@@ -293,13 +294,13 @@ class CondTransform:
 # ---------------------------------------------------------------------------
 #
 # Instead of generating CHIRPS directly, the network can generate the correction
-# to apply to ERA5:
+# to apply to a precipitation base such as ERA5 or CPC:
 #
-#     residual = ( T(CHIRPS) - T(ERA5_tp) - mean ) / std
+#     residual = ( T(CHIRPS) - T(base) - mean ) / std
 #
 # where T is the PrecipTransform.  Three properties make this worth doing:
 #
-# 1. The zero-residual solution IS ERA5.  The model starts from its own
+# 1. The zero-residual solution IS the base.  The model starts from its own
 #    conditioning rather than having to learn the identity map first, so it
 #    cannot score below the field it is conditioned on -- which is exactly how
 #    the epoch-119 run failed (docs/DIAGNOSIS_epoch119.md).
@@ -343,17 +344,21 @@ class ResidualSpec:
                        the ANOMALY, which is what a precipitation prior should
                        be modelling.
 
+    ``"cpc_precip"``   CPC Global Unified daily precipitation, interpolated to
+                       the model grid.  The zero residual reproduces CPC and a
+                       separate coverage channel identifies unavailable values.
+
     ``"none"``         absolute target; ``enabled`` is then False.
     """
 
     enabled: bool = False
     mean: float = 0.0
     std: float = 1.0
-    base_channel: int = 0        # index of era5_tp when base == "era5_tp"
+    base_channel: int = 0        # packed channel index for a data-backed base
     base: str = "era5_tp"
 
     def encode(self, target_t, base_t):
-        """Transformed CHIRPS + transformed ERA5 -> the network's target."""
+        """Transformed CHIRPS + transformed base -> the network's target."""
         if not self.enabled:
             return target_t
         return (target_t - base_t - self.mean) / self.std
@@ -366,7 +371,7 @@ class ResidualSpec:
 
     @property
     def fill(self) -> float:
-        """Network-space value meaning "no correction to ERA5".
+        """Network-space value meaning "no correction to the base".
 
         Used for masked cells: over the ocean the sensible statement is that the
         model has nothing to add to the background, not that it is raining some

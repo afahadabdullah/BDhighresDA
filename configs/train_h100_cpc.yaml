@@ -1,0 +1,69 @@
+# CPC-conditioned H100 experiment.
+#
+# The precipitation condition is CPC Global Unified daily precipitation at
+# 0.5 degrees, bilinearly mapped to 0.05 degrees by the packer.  ERA5 tp remains
+# in the shared Zarr for controlled comparisons but is not exposed to this model.
+# stats_cpc.json parameterizes the target as T(CHIRPS)-T(CPC), so a zero model
+# correction reproduces the CPC condition.
+data:
+  zarr: data/processed/bd_wide_cpc.zarr
+  stats: data/processed/stats_cpc.json
+  crop: 128
+  seasonal_encoding: true
+  min_valid_fraction: 0.3
+  monitor_grid: bd
+  precip_cond_index: 0
+  precip_coverage_cond_index: 1
+  precip_baseline_label: CPC input
+  precip_baseline_channel: cpc_precip
+  precip_baseline_coverage_channel: cpc_valid
+  cond_channels:
+    - cpc_precip
+    - cpc_valid
+    - era5_tcwv
+    - era5_cape
+    - era5_u10
+    - era5_v10
+    - era5_msl
+  years:
+    train: [1981, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 32]
+  dropout: 0.2
+  num_heads: 4
+
+train:
+  out_dir: runs/prior_h100_cpc
+  epochs: 150
+  batch_size: 32
+  lr: 1.5e-4
+  weight_decay: 0.01
+  warmup_steps: 2000
+  grad_clip: 1.0
+  use_ema: true
+  ema_decay: 0.9995
+  cond_dropout: 0.0
+  logit_normal_t: true
+  num_workers: 8
+  seed: 0
+  log_every: 50
+  ckpt_every: 5
+  keep_every: 10
+  early_stop_patience: 0
+
+validation:
+  enabled: true
+  start_epoch: 10
+  every: 5
+  members: 8
+  n_steps: 30
+  cfg_scale: 1.0
+  month: 7
+  quantiles: [0.5, 0.99]
+  save_maps: true

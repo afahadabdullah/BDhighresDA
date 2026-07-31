@@ -89,11 +89,18 @@ echo "Output: $OUTPUT"
 echo "Python: $PYTHON_BIN"
 
 STATS_ARGS=()
-# STATS_RESIDUAL=1 parameterises the target as a correction to ERA5 tp in
-# transformed space rather than the absolute field.
+# STATS_RESIDUAL=1 parameterises the target as a transformed-space correction.
 if [[ "${STATS_RESIDUAL:-0}" == "1" ]]; then
-    STATS_ARGS+=(--residual --era5-tp-index "${STATS_ERA5_TP_INDEX:-0}")
-    echo "Target: RESIDUAL (base = conditioning channel ${STATS_ERA5_TP_INDEX:-0})"
+    RESIDUAL_BASE="${STATS_RESIDUAL_BASE:-era5_tp}"
+    STATS_ARGS+=(
+        --residual
+        --residual-base "$RESIDUAL_BASE"
+        --era5-tp-index "${STATS_ERA5_TP_INDEX:-0}"
+    )
+    if [[ -n "${STATS_RESIDUAL_BASE_INDEX:-}" ]]; then
+        STATS_ARGS+=(--residual-base-index "$STATS_RESIDUAL_BASE_INDEX")
+    fi
+    echo "Target: RESIDUAL (base = $RESIDUAL_BASE)"
 else
     echo "Target: ABSOLUTE"
 fi

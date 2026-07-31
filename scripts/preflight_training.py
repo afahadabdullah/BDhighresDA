@@ -28,7 +28,6 @@ from train import build_dataset, load_cfg  # noqa: E402
 from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
 from bdhires.utils.dist import amp_dtype  # noqa: E402
 
-EXPECTED_ERA5_CHANNELS = 6
 EXPECTED_STATIC_CHANNELS = 7
 EXPECTED_SEASONAL_CHANNELS = 2
 
@@ -160,24 +159,29 @@ def main() -> None:
     ):
         raise ValueError("normalization diagnostic figure checksum changed")
 
-    era5_channels = len(stats["cond_channels"])
+    packed_channels = list(stats["cond_channels"])
+    selected_channels = list(
+        config["data"].get("cond_channels") or packed_channels
+    )
+    missing_channels = sorted(set(selected_channels) - set(packed_channels))
+    if missing_channels:
+        raise ValueError(
+            f"configured condition channels are absent from statistics: "
+            f"{missing_channels}"
+        )
+    dynamic_channels = len(selected_channels)
     static_channels = len(stats["static_channels"])
     seasonal_channels = (
         EXPECTED_SEASONAL_CHANNELS
         if config["data"].get("seasonal_encoding", True)
         else 0
     )
-    if era5_channels != EXPECTED_ERA5_CHANNELS:
-        raise ValueError(
-            f"expected {EXPECTED_ERA5_CHANNELS} ERA5 channels, found "
-            f"{era5_channels}: {stats['cond_channels']}"
-        )
     if static_channels != EXPECTED_STATIC_CHANNELS:
         raise ValueError(
             f"expected {EXPECTED_STATIC_CHANNELS} static channels, found "
             f"{static_channels}: {stats['static_channels']}"
         )
-    expected_conditions = era5_channels + static_channels + seasonal_channels
+    expected_conditions = dynamic_channels + static_channels + seasonal_channels
 
     torch.manual_seed(config["train"]["seed"])
     device = torch.device("cuda", 0)
@@ -250,7 +254,8 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"channels: ERA5={era5_channels}, static={static_channels}, "
+        f"channels: dynamic={dynamic_channels} {selected_channels}, "
+        f"static={static_channels}, "
         f"seasonal={seasonal_channels}, total={expected_conditions}",
         flush=True,
     )
