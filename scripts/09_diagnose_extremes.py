@@ -26,9 +26,19 @@ Three hypotheses, which this script separates:
    field itself.  Signature: exceedance tracking |ERA5 - CHIRPS| rather than any
    geometric feature.
 
-These are not mutually exclusive -- the south-east corner is simultaneously the
-domain edge, a coastline, and where ERA5 is worst, which is exactly why the eye
-cannot separate them and a quantitative profile is needed.
+4. OROGRAPHY.  The model may simply over-produce rain over high terrain.  The
+   Meghalaya barrier and the Chittagong Hills are the wettest places in the
+   domain, and CHIRPS -- being infrared-based with a sparse mountain gauge
+   network -- is itself least reliable there, so the per-pixel ceiling used here
+   is weakest exactly where the model is most extreme.
+
+These are not mutually exclusive, and the geography conspires against a marginal
+answer: the south-east corner is simultaneously the domain edge, a coastline,
+high terrain, and where ERA5 is worst.  A single enrichment number cannot
+separate edge from orography because Meghalaya and the Chittagong Hills are both
+elevated AND near the eastern boundary, so the script also crosses the two --
+high terrain in the interior versus low terrain at the edge -- which is the cut
+that isolates each one.
 
 Extremeness is measured against a PER-PIXEL physical ceiling: the largest daily
 CHIRPS value ever observed at that pixel across a sample of training days.  A
@@ -328,6 +338,30 @@ def main() -> None:
         for name, selector in regions.items()
     }
 
+    # The domain edge and the high terrain overlap: Meghalaya and the Chittagong
+    # Hills are both elevated AND close to the eastern boundary, so a marginal
+    # enrichment cannot tell them apart.  Cross them.  If exceedance stays high
+    # over high terrain far from the edge, orography is doing the work; if it
+    # stays high at the edge over low terrain, the boundary is.
+    near_edge = to_edge <= 4
+    high_ground = elevation >= np.quantile(elevation[keep], 0.9)
+    conditional = {}
+    for edge_label, edge_selector in (
+        ("near edge", near_edge), ("interior", ~near_edge)
+    ):
+        for terrain_label, terrain_selector in (
+            ("high terrain", high_ground), ("low terrain", ~high_ground)
+        ):
+            selector = edge_selector & terrain_selector
+            conditional[f"{edge_label}, {terrain_label}"] = {
+                "share_of_exceedances": share(selector),
+                "share_of_area": area(selector),
+                "enrichment": (
+                    share(selector) / area(selector)
+                    if area(selector) > 0 else float("nan")
+                ),
+            }
+
     report = {
         "checkpoint": str(args.ckpt),
         "checkpoint_epoch": checkpoint.get("epoch"),
@@ -341,6 +375,7 @@ def main() -> None:
         "worst_ratio_to_ceiling": float(worst_ratio[keep].max()),
         "spearman_with_exceedance": correlations,
         "attribution": attribution,
+        "conditional_attribution": conditional,
     }
     Path(args.out_report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_report).write_text(json.dumps(report, indent=2) + "\n")
@@ -360,9 +395,31 @@ def main() -> None:
         )
     print(
         "\nEnrichment >> 1 means exceedances concentrate there beyond what its "
-        "area alone would give.\nThe largest enrichment identifies the dominant "
-        "mechanism."
+        "area alone would give."
     )
+    print("\nEdge and terrain overlap, so cross them to separate the two:")
+    print("condition                          exceedances   area   enrichment")
+    for name, values in conditional.items():
+        print(
+            f"  {name:<32s} {values['share_of_exceedances']:6.1%} "
+            f"{values['share_of_area']:6.1%} {values['enrichment']:8.2f}x"
+        )
+    interior_high = conditional["interior, high terrain"]["enrichment"]
+    edge_low = conditional["near edge, low terrain"]["enrichment"]
+    print(
+        f"\n  high terrain in the INTERIOR: {interior_high:.2f}x"
+        f"   -> orography acting on its own"
+    )
+    print(
+        f"  low terrain AT THE EDGE:      {edge_low:.2f}x"
+        f"   -> boundary acting on its own"
+    )
+    if interior_high > edge_low * 1.3:
+        print("  => OROGRAPHY dominates")
+    elif edge_low > interior_high * 1.3:
+        print("  => DOMAIN EDGE dominates")
+    else:
+        print("  => both contribute comparably")
 
     # -- figure ---------------------------------------------------------------
     extent = [grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max]
