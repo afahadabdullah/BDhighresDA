@@ -40,9 +40,13 @@ OBSERVATION ERROR
     to expect.  Perturbing in mm and then transforming would make the assumed R
     wrong and would quietly mis-tune everything downstream.
 
-    ``--obs-error perfect`` sets that to ~0.  It is not realistic; it bounds what
-    the DA could achieve with flawless gauges, which is what makes a
-    disappointing realistic result interpretable.
+    ``--obs-error perfect`` sets it small but NOT zero.  The likelihood variance
+    is V(t) = R + gamma*(1-t)^2/t^2, which collapses to R as t -> 1; with R ~ 0
+    the gradient explodes and ``clip_norm`` reduces it to a pure direction with
+    no magnitude.  The first run of this experiment used R = 1e-3 and the
+    analysis came out 475% WORSE than the background at the very stations it had
+    assimilated.  That is a property of the guidance formulation, not of the
+    model, and it is why R is floored at 0.05.
 
     python scripts/10_osse.py --ckpt runs/prior_h100_v5/best.pt \
         --networks 10,25,50,100,200,bmd --days 20 --members 16
@@ -295,7 +299,12 @@ def main() -> None:
                 float(gauge_cfg["representativeness"]),
             )
         elif token == "perfect":
-            error_levels["perfect"] = (1e-3, 0.0)
+            # NOT zero: the likelihood variance is V(t) = R + gamma(1-t)^2/t^2,
+            # which collapses to R as t -> 1. With R ~ 0 the gradient explodes
+            # and clip_norm turns it into a pure direction with no magnitude,
+            # which destroys the analysis rather than sharpening it. 0.05 is
+            # small enough to bound the achievable skill without that.
+            error_levels["perfect"] = (0.05, 0.0)
     if not error_levels:
         raise ValueError("no observation-error levels selected")
 
@@ -327,10 +336,17 @@ def main() -> None:
         flush=True,
     )
 
-    # -- the background is identical for every configuration on a given day ----
-    background_cache: dict[int, np.ndarray] = {}
+    # -- the background depends only on the day and the prior temperature -----
+    # It must use the SAME prior temperature as the analysis, or the comparison
+    # measures inflation as well as assimilation.  In tuning mode the temperature
+    # varies, so the cache is keyed on it.
+    background_cache: dict[tuple[int, float], np.ndarray] = {}
     truth_cache: dict[int, np.ndarray] = {}
-    for index in days:
+
+    def background_for(index: int, temperature: float) -> np.ndarray:
+        key = (int(index), round(float(temperature), 6))
+        if key in background_cache:
+            return background_cache[key]
         position = int(np.where(dataset.index == index)[0][0])
         item = dataset[position]
         base = item["base"][None].to(device)
@@ -340,18 +356,24 @@ def main() -> None:
                 item["cond"][None].to(device),
                 (args.members, 1, grid.nlat, grid.nlon),
                 device,
-                cfg=replace(base_sampler, seed=args.seed + int(index),
-                            prior_temperature=1.0, n_corrections=0),
+                cfg=replace(
+                    base_sampler,
+                    seed=args.seed + int(index),
+                    prior_temperature=temperature,
+                ),
                 flow=flow,
                 mask=mask,
                 to_precip=lambda x, b=base: residual.decode(x, b),
             )
-        background_cache[int(index)] = transform.inverse(
+        field = transform.inverse(
             residual.decode(generated, base)[:, 0].float().cpu().numpy()
         )
+        background_cache[key] = np.where(valid[None], field, np.nan)
+        return background_cache[key]
+
+    for index in days:
         target = np.asarray(dataset.z["target"][int(index)][slices], dtype=np.float32)
         truth_cache[int(index)] = np.where(valid, target, np.nan)
-    print(f"[osse] cached {len(background_cache)} background ensembles", flush=True)
 
     dump_target = args.dump_network
     if args.dump and dump_target is None:
@@ -451,7 +473,9 @@ def main() -> None:
                         residual.decode(generated, base)[:, 0].float().cpu().numpy()
                     )
                     analysis = np.where(valid[None], analysis, np.nan)
-                    background = background_cache[index]
+                    background = background_for(
+                        index, sampler_cfg.prior_temperature
+                    )
 
                     # HEADLINE: withheld stations only.
                     truth_eval = truth_at_stations[eval_idx]
