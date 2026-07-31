@@ -608,3 +608,44 @@ def test_step_line_does_not_say_ema():
     line = stream.getvalue()
     assert "smoothed" in line
     assert "ema" not in line.lower()
+
+
+# --------------------------------------------------------------------------
+# guided sampling must not be wrapped in torch.inference_mode()
+# --------------------------------------------------------------------------
+
+
+def test_no_guided_sampler_call_runs_under_inference_mode():
+    """inference_mode() permanently bars its tensors from autograd.
+
+    Guidance differentiates the observation likelihood back through the network,
+    so a guided call inside inference_mode fails deep in the backward engine with
+    "element 0 of tensors does not require grad" -- a message that points
+    nowhere. This scan catches it at the call site instead.
+    """
+    import ast
+
+    offenders = []
+    for path in sorted((ROOT / "scripts").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.With):
+                continue
+            if not any(
+                "inference_mode" in ast.dump(item.context_expr)
+                for item in node.items
+            ):
+                continue
+            body = ast.dump(node)
+            if "'H'" in body or "'gcfg'" in body:      # a guided sampler call
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, (
+        f"guided sampling inside torch.inference_mode(): {offenders}"
+    )
+
+
+def test_guidance_guards_against_inference_mode():
+    """The guard must exist and name the fix, not just fail."""
+    source = (ROOT / "src" / "bdhires" / "da" / "guidance.py").read_text()
+    assert "is_inference_mode_enabled" in source
+    assert "cannot run" in source and "no_grad" in source

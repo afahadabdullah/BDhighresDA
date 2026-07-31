@@ -100,6 +100,18 @@ def guidance_grad(
     reconstructed field, never on a bare residual.  The gradient still flows back
     through it to ``x_t`` because the mapping is affine and differentiable.
     """
+    # torch.inference_mode() is strictly stronger than no_grad(): tensors created
+    # inside it are permanently barred from autograd, and enable_grad() below
+    # cannot lift that.  The failure surfaces deep in the backward engine as
+    # "element 0 of tensors does not require grad", which points nowhere useful,
+    # so check for it here where the cause can be named.
+    if torch.is_inference_mode_enabled():
+        raise RuntimeError(
+            "guidance_grad differentiates through the network and cannot run "
+            "under torch.inference_mode(). Drop the inference_mode context "
+            "around the guided sampler call; use torch.no_grad() only for "
+            "UNGUIDED sampling, and .detach() the result instead."
+        )
     with torch.enable_grad():
         x = x_t.detach().requires_grad_(True)
         u = model(x, t, cond)

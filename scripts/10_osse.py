@@ -428,21 +428,25 @@ def main() -> None:
                         perturbed[:, None].astype(np.float32)
                     ).to(device)
 
-                    with torch.inference_mode():
-                        generated = run_assim(
-                            model,
-                            item["cond"][None].to(device),
-                            (args.members, 1, grid.nlat, grid.nlon),
-                            device,
-                            H=operator,
-                            y=y_tensor,
-                            R=R,
-                            cfg=replace(sampler_cfg, seed=args.seed + index),
-                            gcfg=guidance,
-                            flow=flow,
-                            mask=mask,
-                            to_precip=lambda x, b=base: residual.decode(x, b),
-                        )
+                    # NOT under torch.inference_mode(): guidance differentiates
+                    # the likelihood back through the network, and inference mode
+                    # permanently marks its tensors as unusable by autograd --
+                    # torch.enable_grad() inside it does not help.  The sampler
+                    # already applies no_grad() where it is safe to.
+                    generated = run_assim(
+                        model,
+                        item["cond"][None].to(device),
+                        (args.members, 1, grid.nlat, grid.nlon),
+                        device,
+                        H=operator,
+                        y=y_tensor,
+                        R=R,
+                        cfg=replace(sampler_cfg, seed=args.seed + index),
+                        gcfg=guidance,
+                        flow=flow,
+                        mask=mask,
+                        to_precip=lambda x, b=base: residual.decode(x, b),
+                    ).detach()
                     analysis = transform.inverse(
                         residual.decode(generated, base)[:, 0].float().cpu().numpy()
                     )
