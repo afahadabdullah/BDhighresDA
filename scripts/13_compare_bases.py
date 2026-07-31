@@ -80,7 +80,14 @@ def load_cpc(cpc_dir: Path, times, grid) -> np.ndarray | None:
         return None
 
     data = xr.open_mfdataset([str(p) for p in paths], combine="by_coords")
-    field = data["precip"]
+    # xarray normally decodes CPC's -9.96921e36 fill value to NaN.  Keep that
+    # convention explicit as a guard against files/backends that do not apply
+    # ``missing_value`` masking themselves.  Missing CPC cells remain missing;
+    # ``score`` below uses a pairwise-finite mask so they do not invalidate an
+    # otherwise valid CPC/CHIRPS comparison.
+    field = data["precip"].where(
+        np.isfinite(data["precip"]) & (data["precip"] >= 0.0) & (data["precip"] <= 1000.0)
+    )
     # CPC longitudes run 0..360; the BD domain does not wrap, so a plain sel works
     # once the coordinate is expressed the same way.
     if float(field.lon.min()) >= 0 and grid.lon_min < 0:
@@ -117,8 +124,26 @@ def block_mean(field: np.ndarray, factor: int) -> np.ndarray:
 
 def score(candidate: np.ndarray, target: np.ndarray, keep: np.ndarray,
           transform: PrecipTransform) -> dict:
-    a = candidate[keep].astype(np.float64)
-    b = target[keep].astype(np.float64)
+    # CPC is a land gauge analysis and has valid missing values.  A single
+    # missing pixel must reduce the matched sample count, not turn every metric
+    # for that candidate into NaN.  Apply this per candidate because ERA5 and
+    # climatology can have different coverage from CPC.
+    matched = keep & np.isfinite(candidate) & np.isfinite(target)
+    a = candidate[matched].astype(np.float64)
+    b = target[matched].astype(np.float64)
+    if not len(a):
+        return {
+            "n": 0,
+            "correlation": float("nan"),
+            "transformed_correlation": float("nan"),
+            "variance_explained": float("nan"),
+            "rmse_mm": float("nan"),
+            "bias_mm": float("nan"),
+            "mae_mm": float("nan"),
+            "candidate_std_mm": float("nan"),
+            "target_std_mm": float("nan"),
+            "std_ratio": float("nan"),
+        }
     difference = a - b
     correlation = (
         float(np.corrcoef(a, b)[0, 1]) if a.std() > 0 and b.std() > 0 else float("nan")
@@ -131,7 +156,7 @@ def score(candidate: np.ndarray, target: np.ndarray, keep: np.ndarray,
         if ta.std() > 0 and tb.std() > 0 else float("nan")
     )
     return {
-        "n": int(keep.sum()),
+        "n": int(matched.sum()),
         "correlation": correlation,
         "transformed_correlation": transformed,
         "variance_explained": float(max(correlation, 0.0) ** 2),
