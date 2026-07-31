@@ -120,6 +120,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="sweep gamma / sigma_obs / prior_temperature instead of network size",
     )
+    parser.add_argument(
+        "--station-layout",
+        default="random",
+        choices=["random", "spread"],
+        help="'spread' uses farthest-point sampling for even coverage, which is "
+             "what a real gauge network looks like. Matters most for sparse "
+             "networks, where a uniform draw leaves big gaps and clustered pairs.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
     parser.add_argument("--out-report", default="data/processed/osse.json")
@@ -155,9 +163,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def synthetic_network(
-    n: int, grid, valid: np.ndarray, rng: np.random.Generator
+    n: int, grid, valid: np.ndarray, rng: np.random.Generator,
+    layout: str = "random",
 ) -> StationSet:
-    """Random station locations over land, at least a cell from the boundary."""
+    """Station locations over land, at least a cell from the boundary.
+
+    ``layout="random"`` draws uniformly, which clusters: with 35 stations a
+    uniform draw leaves large gaps and several near-duplicate pairs, and a pair
+    two cells apart carries barely more information than one station.
+
+    ``layout="spread"`` uses greedy farthest-point sampling -- repeatedly add the
+    land cell furthest from everything chosen so far.  That is much closer to how
+    a real gauge network is laid out, and for a sparse network it is the
+    difference between covering the domain and sampling a few corners of it.
+    """
     land = np.argwhere(valid)
     margin = 2
     inside = land[
@@ -168,7 +187,25 @@ def synthetic_network(
     ]
     if n > len(inside):
         raise ValueError(f"cannot place {n} stations in {len(inside)} land cells")
-    picked = inside[rng.choice(len(inside), size=n, replace=False)]
+
+    if layout == "spread":
+        chosen = [int(rng.integers(len(inside)))]
+        distance = np.hypot(
+            inside[:, 0] - inside[chosen[0], 0],
+            inside[:, 1] - inside[chosen[0], 1],
+        ).astype(np.float64)
+        for _ in range(n - 1):
+            nxt = int(np.argmax(distance))
+            chosen.append(nxt)
+            distance = np.minimum(
+                distance,
+                np.hypot(inside[:, 0] - inside[nxt, 0], inside[:, 1] - inside[nxt, 1]),
+            )
+        picked = inside[np.array(chosen)]
+    elif layout == "random":
+        picked = inside[rng.choice(len(inside), size=n, replace=False)]
+    else:
+        raise ValueError(f"unknown station layout {layout!r}")
     # jitter within the cell so stations are not all exactly on grid centres
     lat = grid.lat[picked[:, 0]] + (rng.random(n) - 0.5) * grid.res
     lon = grid.lon[picked[:, 1]] + (rng.random(n) - 0.5) * grid.res
@@ -300,9 +337,27 @@ def main() -> None:
             networks[f"bmd ({len(bmd)})"] = bmd
         else:
             n = int(token)
-            networks[f"{n}"] = synthetic_network(n, grid, valid, rng)
+            networks[f"{n}"] = synthetic_network(
+                n, grid, valid, rng, layout=args.station_layout
+            )
     if not networks:
         raise ValueError("no station networks were built")
+    for name, stations in networks.items():
+        if len(stations) < 2:
+            continue
+        points = np.stack([stations.lat, stations.lon], axis=1)
+        gaps = np.hypot(
+            points[:, None, 0] - points[None, :, 0],
+            (points[:, None, 1] - points[None, :, 1])
+            * np.cos(np.radians(points[:, None, 0])),
+        )
+        np.fill_diagonal(gaps, np.inf)
+        nearest = gaps.min(axis=1) / grid.res
+        print(
+            f"[osse] network '{name}': layout={args.station_layout}, "
+            f"nearest-neighbour separation min {nearest.min():.1f} / "
+            f"median {np.median(nearest):.1f} cells"
+        )
 
     gauge_cfg = config["observations"]["gauges"]
     error_levels = {}

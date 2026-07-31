@@ -42,6 +42,7 @@ DAYS="${OSSE_DAYS:-20}"
 MEMBERS="${OSSE_MEMBERS:-16}"
 MONTH="${OSSE_MONTH:-7}"
 NETWORKS="${OSSE_NETWORKS:-10,25,50,100,200,bmd}"
+LAYOUT="${OSSE_LAYOUT:-random}"
 OBS_ERROR="${OSSE_OBS_ERROR:-realistic,perfect}"
 WITHHOLD="${OSSE_WITHHOLD:-0.4}"
 FIGURE="${OSSE_FIGURE:-data/processed/osse.png}"
@@ -63,7 +64,7 @@ if [[ "${OSSE_TUNE:-0}" == "1" ]]; then
 fi
 
 echo "Checkpoint: $CKPT"
-echo "Networks: $NETWORKS   Obs error: $OBS_ERROR"
+echo "Networks: $NETWORKS   Layout: $LAYOUT   Obs error: $OBS_ERROR"
 echo "Days: $DAYS   Members: $MEMBERS   Month: $MONTH   Withhold: $WITHHOLD"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
@@ -73,6 +74,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --members "$MEMBERS" \
     --month "$MONTH" \
     --networks "$NETWORKS" \
+    --station-layout "$LAYOUT" \
     --obs-error "$OBS_ERROR" \
     --withhold "$WITHHOLD" \
     "${EXTRA[@]}" \
