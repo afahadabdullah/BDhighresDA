@@ -136,6 +136,21 @@ def parse_args() -> argparse.Namespace:
         help="which network to dump (default: the largest synthetic one)",
     )
     parser.add_argument("--dump-obs-error", default="realistic")
+    parser.add_argument(
+        "--tune-network",
+        default=None,
+        help="network to tune on (default: the LARGEST). Tuning on a sparse "
+             "network is a trap: with 10 stations and 40%% withheld the score "
+             "rests on 4 stations and the setting-to-setting differences are "
+             "swamped by sampling noise.",
+    )
+    parser.add_argument(
+        "--tune-days",
+        type=int,
+        default=None,
+        help="days to use in tuning mode (default: --days). The grid is "
+             "gamma x sigma x temperature, so cost multiplies fast.",
+    )
     return parser.parse_args()
 
 
@@ -322,10 +337,32 @@ def main() -> None:
                 config["tuning"]["prior_temperature"],
             )
         ]
-        networks = {name: networks[name] for name in list(networks)[:1]}
+        if args.tune_network and args.tune_network in networks:
+            chosen_network = args.tune_network
+        else:
+            synthetic = [n for n in networks if n.replace(" ", "").isdigit()]
+            chosen_network = (
+                max(synthetic, key=int) if synthetic else list(networks)[0]
+            )
+        networks = {chosen_network: networks[chosen_network]}
         error_levels = {"realistic": error_levels.get("realistic", (0.1, 0.25))}
-        print(f"[osse] tuning mode: {len(combinations)} combinations on "
-              f"network '{list(networks)[0]}'")
+        if args.tune_days:
+            days = days[
+                np.linspace(0, len(days) - 1, min(args.tune_days, len(days)))
+                .astype(int)
+            ]
+        withheld = max(1, int(round(args.withhold * len(networks[chosen_network]))))
+        print(
+            f"[osse] tuning mode: {len(combinations)} combinations x "
+            f"{len(days)} days on network '{chosen_network}' "
+            f"({withheld} withheld stations)"
+        )
+        if withheld < 15:
+            print(
+                f"[osse] WARNING: only {withheld} withheld stations. Differences "
+                f"between settings will be dominated by sampling noise; prefer a "
+                f"denser --tune-network."
+            )
     else:
         combinations = [{}]
 

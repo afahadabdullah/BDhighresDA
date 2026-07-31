@@ -57,6 +57,8 @@ if [[ -n "${OSSE_DUMP:-}" ]]; then
 fi
 if [[ "${OSSE_TUNE:-0}" == "1" ]]; then
     EXTRA+=(--tune)
+    [[ -n "${OSSE_TUNE_NETWORK:-}" ]] && EXTRA+=(--tune-network "$OSSE_TUNE_NETWORK")
+    [[ -n "${OSSE_TUNE_DAYS:-}" ]] && EXTRA+=(--tune-days "$OSSE_TUNE_DAYS")
     echo "Mode: hyperparameter tuning"
 fi
 
