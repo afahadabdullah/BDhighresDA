@@ -86,3 +86,15 @@ if [[ -n "${OSSE_DUMP:-}" && -f "${OSSE_DUMP}" ]]; then
         --out-figure "${OSSE_DIAG_FIGURE:-data/processed/da_diagnostics.png}" \
         --out-report "${OSSE_DIAG_REPORT:-data/processed/da_diagnostics.json}"
 fi
+
+# Spatial impact maps from the same dump.
+if [[ -n "${OSSE_DUMP:-}" && -f "${OSSE_DUMP}" ]]; then
+    echo
+    echo "=============== DA impact maps ==============="
+    srun --ntasks=1 "$PYTHON_BIN" -u scripts/12_da_impact_maps.py \
+        --dump "$OSSE_DUMP" \
+        --cases "${OSSE_IMPACT_CASES:-3}" \
+        --out-cases "${OSSE_IMPACT_CASES_FIGURE:-data/processed/da_impact_cases.png}" \
+        --out-aggregate "${OSSE_IMPACT_FIGURE:-data/processed/da_impact_aggregate.png}" \
+        --out-report "${OSSE_IMPACT_REPORT:-data/processed/da_impact.json}"
+fi
