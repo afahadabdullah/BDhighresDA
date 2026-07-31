@@ -119,6 +119,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
     parser.add_argument("--out-report", default="data/processed/osse.json")
+    parser.add_argument(
+        "--dump",
+        default=None,
+        help="write the raw ensembles for ONE configuration to this .npz so "
+             "scripts/11_da_diagnostics.py can plot the verification suite "
+             "without re-running the sampling",
+    )
+    parser.add_argument(
+        "--dump-network",
+        default=None,
+        help="which network to dump (default: the largest synthetic one)",
+    )
+    parser.add_argument("--dump-obs-error", default="realistic")
     return parser.parse_args()
 
 
@@ -340,6 +353,12 @@ def main() -> None:
         truth_cache[int(index)] = np.where(valid, target, np.nan)
     print(f"[osse] cached {len(background_cache)} background ensembles", flush=True)
 
+    dump_target = args.dump_network
+    if args.dump and dump_target is None:
+        synthetic = [n for n in networks if n.replace(" ", "").isdigit()]
+        dump_target = max(synthetic, key=int) if synthetic else list(networks)[0]
+    dumped = None
+
     results = []
     for name, stations in networks.items():
         n_stations = len(stations)
@@ -374,6 +393,18 @@ def main() -> None:
                 field_background, field_analysis = [], []
                 assim_background, assim_analysis = [], []
                 fit_transformed = []
+                collect = (
+                    args.dump
+                    and name == dump_target
+                    and error_name == args.dump_obs_error
+                    and not setting
+                )
+                store: dict[str, list] = {
+                    k: [] for k in (
+                        "background", "analysis", "truth",
+                        "obs_transformed", "truth_at_stations",
+                    )
+                }
                 for index in days:
                     index = int(index)
                     position = int(np.where(dataset.index == index)[0][0])
@@ -469,6 +500,17 @@ def main() -> None:
                     field_background.append(score(background, truth))
                     field_analysis.append(score(analysis, truth))
 
+                    if collect:
+                        store["background"].append(background.astype(np.float32))
+                        store["analysis"].append(analysis.astype(np.float32))
+                        store["truth"].append(truth.astype(np.float32))
+                        store["obs_transformed"].append(
+                            y_transformed.astype(np.float32)
+                        )
+                        store["truth_at_stations"].append(
+                            truth_at_stations.astype(np.float32)
+                        )
+
                 entry = {
                     "network": name,
                     "n_stations": n_stations,
@@ -498,6 +540,30 @@ def main() -> None:
                             entry[f"{scope}_analysis"],
                             metric,
                         )
+                if collect and store["truth"]:
+                    dumped = dict(
+                        background=np.stack(store["background"]),
+                        analysis=np.stack(store["analysis"]),
+                        truth=np.stack(store["truth"]),
+                        obs_transformed=np.stack(store["obs_transformed"]),
+                        truth_at_stations=np.stack(store["truth_at_stations"]),
+                        station_lat=stations.lat,
+                        station_lon=stations.lon,
+                        assim_idx=assim_idx,
+                        eval_idx=eval_idx,
+                        valid=valid,
+                        obs_noise_sd=np.float32(noise_sd),
+                        grid_name=np.str_(grid.name),
+                        network=np.str_(name),
+                        obs_error=np.str_(error_name),
+                        days=np.array(
+                            [str(times[int(i)].astype("datetime64[D]")) for i in days]
+                        ),
+                        precip_transform=np.str_(
+                            json.dumps(stats["precip_transform"])
+                        ),
+                    )
+
                 results.append(entry)
                 print(
                     f"  {name:>12s}  {error_name:<9s} "
@@ -528,6 +594,17 @@ def main() -> None:
     }
     Path(args.out_report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_report).write_text(json.dumps(report, indent=2) + "\n")
+
+    if args.dump:
+        if dumped is None:
+            print(f"[osse] nothing dumped: no configuration matched "
+                  f"network={dump_target!r} obs_error={args.dump_obs_error!r}")
+        else:
+            Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(args.dump, **dumped)
+            size = Path(args.dump).stat().st_size / 2**20
+            print(f"wrote {args.dump} ({size:.0f} MiB) "
+                  f"-- network '{dumped['network']}', {dumped['obs_error']} obs")
 
     plot_results(results, args, Path(args.out_figure))
     print(f"\nwrote {args.out_figure}")

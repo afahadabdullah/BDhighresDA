@@ -50,6 +50,11 @@ REPORT="${OSSE_REPORT:-data/processed/osse.json}"
 [[ -f "$CKPT" ]] || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
 
 EXTRA=()
+if [[ -n "${OSSE_DUMP:-}" ]]; then
+    EXTRA+=(--dump "$OSSE_DUMP")
+    [[ -n "${OSSE_DUMP_NETWORK:-}" ]] && EXTRA+=(--dump-network "$OSSE_DUMP_NETWORK")
+    echo "Dumping raw ensembles to: $OSSE_DUMP"
+fi
 if [[ "${OSSE_TUNE:-0}" == "1" ]]; then
     EXTRA+=(--tune)
     echo "Mode: hyperparameter tuning"
@@ -71,3 +76,13 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     "${EXTRA[@]}" \
     --out-figure "$FIGURE" \
     --out-report "$REPORT"
+
+# Verification suite from the dumped ensembles, if one was written.
+if [[ -n "${OSSE_DUMP:-}" && -f "${OSSE_DUMP}" ]]; then
+    echo
+    echo "=============== DA verification suite ==============="
+    srun --ntasks=1 "$PYTHON_BIN" -u scripts/11_da_diagnostics.py \
+        --dump "$OSSE_DUMP" \
+        --out-figure "${OSSE_DIAG_FIGURE:-data/processed/da_diagnostics.png}" \
+        --out-report "${OSSE_DIAG_REPORT:-data/processed/da_diagnostics.json}"
+fi
