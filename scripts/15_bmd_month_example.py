@@ -6,10 +6,11 @@ The default May 2018 period is inside the CPC checkpoint's training years, but
 the withheld BMD gauges never enter this likelihood and therefore reveal
 whether real gauge ingestion, guidance, and station-space verification work.
 
-When ``--imerg`` is supplied, background, gauges-only, and gauges+IMERG are
-run with matched ensemble seeds.  This bounded real-data gate uses native
-IMERG V07B uncertainty but no fitted bias correction, so it remains a process
-experiment rather than a final product-skill claim.
+When ``--imerg`` is supplied, five controlled arms are run with matched seeds:
+background, gauges-only, IMERG-only, simultaneous gauges+IMERG, and a serial
+IMERG-then-gauges analysis. Satellite footprints are thinned and their
+variance is inflated by an approximate correlation area so thousands of
+correlated pixels are not treated as independent evidence.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from bdhires.da import (  # noqa: E402
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
+from bdhires.ensrf import localized_serial_ensrf  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
 from bdhires.grids import Grid, WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
@@ -66,6 +68,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--members", type=int, default=16)
     parser.add_argument("--withhold", type=float, default=0.2)
     parser.add_argument("--min-coverage", type=float, default=0.8)
+    parser.add_argument(
+        "--imerg-stride",
+        type=int,
+        default=3,
+        help="retain every Nth IMERG footprint in each direction (default: 3)",
+    )
+    parser.add_argument(
+        "--imerg-r-multiplier",
+        type=float,
+        default=1.0,
+        help="extra multiplier after spatial-correlation variance inflation",
+    )
+    parser.add_argument(
+        "--gauge-localization-km",
+        type=float,
+        default=150.0,
+        help="compact-support radius for the serial EnSRF gauge update",
+    )
     parser.add_argument("--seed", type=int, default=201805)
     parser.add_argument("--out", default="data/processed/bmd_may2018_example.npz")
     parser.add_argument("--report", default="data/processed/bmd_may2018_example.json")
@@ -78,6 +98,14 @@ def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) 
         required = {"precipitation", "randomError", "precipitation_cnt"}
         if not required.issubset(dataset):
             raise ValueError(f"{path} lacks required IMERG variables {sorted(required)}")
+        for variable in ("precipitation", "randomError"):
+            units = str(dataset[variable].attrs.get("units", ""))
+            if units.lower().replace(" ", "") not in {
+                "mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"
+            }:
+                raise ValueError(
+                    f"{path} {variable} units are {units!r}; expected mm/day"
+                )
         imerg_time = np.asarray(dataset.time.values).astype("datetime64[D]")
         expected_time = np.asarray(times).astype("datetime64[D]")
         if not np.array_equal(imerg_time, expected_time):
@@ -183,6 +211,20 @@ def deterministic_score(predicted: np.ndarray, observed: np.ndarray) -> dict:
     }
 
 
+def physical_summary(ensemble: np.ndarray) -> dict:
+    values = np.asarray(ensemble)
+    finite = values[np.isfinite(values)]
+    if not finite.size:
+        return {"n": 0}
+    return {
+        "n": int(finite.size),
+        "mean_mm": float(finite.mean()),
+        "p99_mm": float(np.percentile(finite, 99.0)),
+        "p99_9_mm": float(np.percentile(finite, 99.9)),
+        "max_mm": float(finite.max()),
+    }
+
+
 def percent_reduction(background: dict, analysis: dict, metric: str) -> float:
     before = background.get(metric, float("nan"))
     after = analysis.get(metric, float("nan"))
@@ -195,6 +237,12 @@ def main() -> None:
     args = parse_args()
     if not 0 < args.withhold < 1:
         raise ValueError("--withhold must lie strictly between zero and one")
+    if args.imerg_stride < 1:
+        raise ValueError("--imerg-stride must be at least one")
+    if args.imerg_r_multiplier <= 0:
+        raise ValueError("--imerg-r-multiplier must be positive")
+    if args.gauge_localization_km <= 0:
+        raise ValueError("--gauge-localization-km must be positive")
     config = yaml.safe_load(Path(args.config).read_text())
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     training_config = checkpoint["cfg"]
@@ -324,19 +372,43 @@ def main() -> None:
     satellite_operator = None
     satellite_keep = None
     combined_operator = None
+    satellite_correlation_inflation = 1.0
     if imerg is not None:
         satellite_operator = PhysicalBlockAverageObsOperator(
             imerg_factor, transform, valid=valid
         ).to(device)
         satellite_keep = satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
+        coarse_shape = imerg["precipitation"].shape[1:]
+        thinning = np.zeros(coarse_shape, dtype=bool)
+        offset = args.imerg_stride // 2
+        thinning[offset::args.imerg_stride, offset::args.imerg_stride] = True
+        satellite_keep &= thinning.reshape(-1)
+        error_corr_cells = float(imerg_config.get("error_corr_cells", 0.0))
+        # Approximate the integral correlation area on the retained-footprint
+        # lattice. This turns a diagonal-R likelihood into a conservative
+        # effective-sample approximation without pretending 4k pixels are
+        # independent. The extra multiplier supports a controlled sensitivity.
+        satellite_correlation_inflation = max(
+            1.0,
+            2.0 * np.pi * (error_corr_cells / args.imerg_stride) ** 2,
+        ) * args.imerg_r_multiplier
         combined_operator = CompositeObsOperator(
             [gauge_operator, satellite_operator]
         ).to(device)
+        print(
+            f"[imerg] controlled likelihood: stride={args.imerg_stride}, "
+            f"selected land footprints={satellite_keep.sum()}/{satellite_keep.size}, "
+            f"R inflation={satellite_correlation_inflation:.2f}x",
+            flush=True,
+        )
 
     shape = (len(selected), args.members, grid.nlat, grid.nlon)
     background = np.empty(shape, dtype=np.float32)
     analysis_gauge = np.empty(shape, dtype=np.float32)
+    analysis_imerg = np.empty(shape, dtype=np.float32) if imerg is not None else None
     analysis_combined = np.empty(shape, dtype=np.float32) if imerg is not None else None
+    analysis_sequential = np.empty(shape, dtype=np.float32) if imerg is not None else None
+    sequential_diagnostics: list[dict] = []
     chirps = np.empty((len(selected), grid.nlat, grid.nlon), dtype=np.float32)
     condition = np.empty_like(chirps)
     cpc_full_index = (
@@ -354,10 +426,9 @@ def main() -> None:
         day_sampler = replace(sampler, seed=day_seed)
         day_background_sampler = replace(background_sampler, seed=day_seed)
 
-        # All arms share the same seed. The two guided arms additionally share
-        # the same sampler and prior temperature, so their difference isolates
-        # the addition of IMERG. The background uses the configured production
-        # background sampler, which deliberately has no analysis inflation.
+        # All generative arms share the same seed; all guided arms additionally
+        # share the sampler and prior temperature. The background uses the
+        # production background sampler, which has no analysis inflation.
         with torch.inference_mode():
             generated_background = run_assim(
                 model,
@@ -413,6 +484,7 @@ def main() -> None:
                 sigma_floor=float(imerg_config["sigma_obs"]),
                 representativeness=float(imerg_config["representativeness"]),
             )
+            satellite_variance *= np.float32(satellite_correlation_inflation)
             satellite_valid = (
                 satellite_keep
                 & np.isfinite(satellite_observation)
@@ -423,27 +495,53 @@ def main() -> None:
             # their unused R entries a finite value so tensor arithmetic stays
             # clean at every guidance time.
             satellite_variance[~satellite_valid] = 1.0
-            combined_observation = np.concatenate(
-                [observation, satellite_observation]
-            ).astype(np.float32)
-            combined_R = torch.cat(
-                [gauge_R, torch.from_numpy(satellite_variance).to(device)]
-            )
-            combined_perturbed = perturb_observations(
-                combined_observation,
-                combined_R,
+            satellite_R = torch.from_numpy(satellite_variance).to(device)
+            satellite_perturbed = perturb_observations(
+                satellite_observation,
+                satellite_R,
                 args.members,
-                seed=day_seed + 1_000_000,
+                seed=day_seed + 2_000_000,
                 corr_blocks=[
                     (
-                        len(assim_idx),
+                        0,
                         imerg["precipitation"].shape[1],
                         imerg["precipitation"].shape[2],
                         float(imerg_config.get("error_corr_cells", 0.0)),
                     )
                 ],
             ).astype(np.float32)
-            combined_perturbed[:, ~np.isfinite(combined_observation)] = np.nan
+            satellite_perturbed[:, ~np.isfinite(satellite_observation)] = np.nan
+            satellite_y = torch.from_numpy(satellite_perturbed[:, None]).to(device)
+
+            # Arm 3: satellite-only generative posterior. This must remain
+            # physically bounded before it is allowed to seed a serial update.
+            generated_imerg = run_assim(
+                model,
+                cond,
+                (args.members, 1, grid.nlat, grid.nlon),
+                device,
+                H=satellite_operator,
+                y=satellite_y,
+                R=satellite_R,
+                cfg=day_sampler,
+                gcfg=guidance,
+                flow=flow,
+                mask=mask,
+                to_precip=lambda x, b=base: residual.decode(x, b),
+            ).detach()
+            imerg_analysis_mm = transform.inverse(
+                residual.decode(generated_imerg, base)[:, 0].float().cpu().numpy()
+            )
+            analysis_imerg[day_position] = np.where(
+                valid[None], imerg_analysis_mm, np.nan
+            )
+
+            # Arm 4: stabilized simultaneous likelihood. Reuse exactly the
+            # gauge and satellite perturbations from their single-stream arms.
+            combined_R = torch.cat([gauge_R, satellite_R])
+            combined_perturbed = np.concatenate(
+                [perturbed, satellite_perturbed], axis=1
+            ).astype(np.float32)
             combined_y = torch.from_numpy(combined_perturbed[:, None]).to(device)
             generated_combined = run_assim(
                 model,
@@ -466,6 +564,31 @@ def main() -> None:
                 valid[None], combined_mm, np.nan
             )
 
+            # Arm 5: a true sequence. The IMERG posterior ensemble becomes the
+            # background of a compactly localized serial square-root gauge
+            # update; the generative sampler is not restarted from noise.
+            gauge_variance = float(
+                float(gauge_config["sigma_obs"]) ** 2
+                + float(gauge_config["representativeness"]) ** 2
+            )
+            sequential_mm, sequential_day = localized_serial_ensrf(
+                analysis_imerg[day_position],
+                gauge_mm[day_position, assim_idx],
+                stations.lat[assim_idx],
+                stations.lon[assim_idx],
+                grid,
+                transform,
+                valid,
+                observation_variance=gauge_variance,
+                localization_km=args.gauge_localization_km,
+                seed=day_seed + 3_000_000,
+            )
+            analysis_sequential[day_position] = sequential_mm
+            sequential_day["date"] = str(
+                selected_times[day_position].astype("datetime64[D]")
+            )
+            sequential_diagnostics.append(sequential_day)
+
         chirps[day_position] = np.asarray(dataset.z["target"][int(data_index)][slices])
         if cpc_full_index is not None:
             condition[day_position] = np.asarray(
@@ -479,17 +602,27 @@ def main() -> None:
             flush=True,
         )
 
-    analysis = analysis_combined if analysis_combined is not None else analysis_gauge
+    analysis = analysis_sequential if analysis_sequential is not None else analysis_gauge
     background_at_stations = sample_at_stations(background, grid, stations.lat, stations.lon)
     gauge_at_stations = sample_at_stations(
         analysis_gauge, grid, stations.lat, stations.lon
+    )
+    imerg_analysis_at_stations = (
+        sample_at_stations(analysis_imerg, grid, stations.lat, stations.lon)
+        if analysis_imerg is not None
+        else gauge_at_stations
     )
     combined_at_stations = (
         sample_at_stations(analysis_combined, grid, stations.lat, stations.lon)
         if analysis_combined is not None
         else gauge_at_stations
     )
-    analysis_at_stations = combined_at_stations
+    sequential_at_stations = (
+        sample_at_stations(analysis_sequential, grid, stations.lat, stations.lon)
+        if analysis_sequential is not None
+        else gauge_at_stations
+    )
+    analysis_at_stations = sequential_at_stations
     chirps_at_stations = sample_at_stations(chirps, grid, stations.lat, stations.lon)
     condition_at_stations = sample_at_stations(condition, grid, stations.lat, stations.lon)
     imerg_at_stations = None
@@ -507,12 +640,18 @@ def main() -> None:
         )
     background_eval = np.moveaxis(background_at_stations[:, :, eval_idx], 1, 0)
     gauge_eval = np.moveaxis(gauge_at_stations[:, :, eval_idx], 1, 0)
+    imerg_analysis_eval = np.moveaxis(
+        imerg_analysis_at_stations[:, :, eval_idx], 1, 0
+    )
     combined_eval = np.moveaxis(combined_at_stations[:, :, eval_idx], 1, 0)
+    sequential_eval = np.moveaxis(sequential_at_stations[:, :, eval_idx], 1, 0)
     observed_eval = gauge_mm[:, eval_idx]
     background_score = ensemble_score(background_eval, observed_eval)
     gauge_score = ensemble_score(gauge_eval, observed_eval)
+    imerg_analysis_score = ensemble_score(imerg_analysis_eval, observed_eval)
     combined_score = ensemble_score(combined_eval, observed_eval)
-    analysis_score = combined_score
+    sequential_score = ensemble_score(sequential_eval, observed_eval)
+    analysis_score = sequential_score
     chirps_score = deterministic_score(chirps_at_stations[:, eval_idx], observed_eval)
     condition_score = deterministic_score(condition_at_stations[:, eval_idx], observed_eval)
     imerg_score = (
@@ -526,29 +665,53 @@ def main() -> None:
     gauge_mean_grid = np.where(
         valid[None], np.nan_to_num(analysis_gauge, nan=0.0).mean(axis=1), np.nan
     )
+    imerg_analysis_mean_grid = np.where(
+        valid[None],
+        np.nan_to_num(
+            analysis_imerg if analysis_imerg is not None else analysis_gauge, nan=0.0
+        ).mean(axis=1),
+        np.nan,
+    )
     combined_mean_grid = np.where(
+        valid[None],
+        np.nan_to_num(
+            analysis_combined if analysis_combined is not None else analysis_gauge,
+            nan=0.0,
+        ).mean(axis=1),
+        np.nan,
+    )
+    sequential_mean_grid = np.where(
         valid[None], np.nan_to_num(analysis, nan=0.0).mean(axis=1), np.nan
     )
     grid_background = deterministic_score(background_mean_grid, chirps)
     grid_gauge = deterministic_score(gauge_mean_grid, chirps)
+    grid_imerg = deterministic_score(imerg_analysis_mean_grid, chirps)
     grid_combined = deterministic_score(combined_mean_grid, chirps)
+    grid_sequential = deterministic_score(sequential_mean_grid, chirps)
 
     daily = []
     for day in range(len(selected)):
         b = ensemble_score(background_eval[:, day], observed_eval[day])
         g = ensemble_score(gauge_eval[:, day], observed_eval[day])
+        satellite = ensemble_score(imerg_analysis_eval[:, day], observed_eval[day])
         c = ensemble_score(combined_eval[:, day], observed_eval[day])
+        sequence = ensemble_score(sequential_eval[:, day], observed_eval[day])
         daily.append(
             {
                 "date": str(selected_times[day].astype("datetime64[D]")),
                 "background": b,
                 "gauges_only": g,
-                "gauges_plus_imerg": c,
+                "imerg_only": satellite,
+                "simultaneous": c,
+                "imerg_then_gauges": sequence,
                 "background_to_gauges_crps_reduction_percent": percent_reduction(
                     b, g, "crps_mm"
                 ),
-                "background_to_combined_crps_reduction_percent": percent_reduction(
+                "background_to_simultaneous_crps_reduction_percent": percent_reduction(
                     b, c, "crps_mm"
+                ),
+                "imerg_to_sequential_crps_reduction_percent": percent_reduction(
+                    satellite, sequence, "crps_mm"
                 ),
             }
         )
@@ -561,7 +724,7 @@ def main() -> None:
     )
     report = {
         "experiment": (
-            "May 2018 real-BMD plus real-IMERG DA process example"
+            "May 2018 controlled five-arm real-BMD plus real-IMERG DA example"
             if imerg is not None
             else "May 2018 real-BMD gauge-only DA process example"
         ),
@@ -582,8 +745,8 @@ def main() -> None:
             "imerg_file": args.imerg,
             "imerg_note": (
                 "Native GPM IMERG Final V07B precipitation and randomError are used. "
-                "No fitted bias correction is applied, so this is a bounded process "
-                "test and not the final real-data configuration."
+                "Both are mm/day. No fitted bias correction is applied, so this is a "
+                "bounded process test and not the final real-data configuration."
                 if imerg is not None
                 else "Gauge-only run; no IMERG observation was supplied."
             ),
@@ -625,7 +788,15 @@ def main() -> None:
                     "spatial_correlation_cells": float(
                         imerg_config.get("error_corr_cells", 0.0)
                     ),
-                    "valid_footprints": int(np.isfinite(imerg["precipitation"]).sum()),
+                    "footprint_stride": int(args.imerg_stride),
+                    "selected_land_footprints_per_day": int(satellite_keep.sum()),
+                    "correlation_variance_inflation": float(
+                        satellite_correlation_inflation
+                    ),
+                    "extra_r_multiplier": float(args.imerg_r_multiplier),
+                    "valid_raw_footprints": int(
+                        np.isfinite(imerg["precipitation"]).sum()
+                    ),
                 }
                 if imerg is not None
                 else None
@@ -635,16 +806,18 @@ def main() -> None:
         "withheld_gauges": {
             "background": background_score,
             "gauges_only": gauge_score,
-            "gauges_plus_imerg": combined_score,
+            "imerg_only": imerg_analysis_score,
+            "simultaneous": combined_score,
+            "imerg_then_gauges": sequential_score,
             "analysis": analysis_score,
             "background_to_gauges_crps_reduction_percent": percent_reduction(
                 background_score, gauge_score, "crps_mm"
             ),
-            "background_to_combined_crps_reduction_percent": percent_reduction(
+            "background_to_simultaneous_crps_reduction_percent": percent_reduction(
                 background_score, combined_score, "crps_mm"
             ),
-            "gauges_to_combined_crps_reduction_percent": percent_reduction(
-                gauge_score, combined_score, "crps_mm"
+            "imerg_to_sequential_crps_reduction_percent": percent_reduction(
+                imerg_analysis_score, sequential_score, "crps_mm"
             ),
             "chirps": chirps_score,
             "cpc_condition": condition_score,
@@ -653,10 +826,35 @@ def main() -> None:
         "chirps_grid_consistency": {
             "background": grid_background,
             "gauges_only": grid_gauge,
-            "gauges_plus_imerg": grid_combined,
+            "imerg_only": grid_imerg,
+            "simultaneous": grid_combined,
+            "imerg_then_gauges": grid_sequential,
             "interpretation": (
                 "CHIRPS is the checkpoint target and May 2018 is in training; these are "
                 "consistency diagnostics, not independent truth scores."
+            ),
+        },
+        "sequential_update": {
+            "method": "localized serial deterministic ensemble square-root filter",
+            "state_space": "checkpoint precipitation-transform space",
+            "observation_operator": "physical bilinear point gauge then transform",
+            "localization": "Gaspari-Cohn compact support",
+            "support_km": float(args.gauge_localization_km),
+            "daily_innovations": sequential_diagnostics,
+        },
+        "physical_ranges": {
+            "background": physical_summary(background),
+            "gauges_only": physical_summary(analysis_gauge),
+            "imerg_only": physical_summary(
+                analysis_imerg if analysis_imerg is not None else analysis_gauge
+            ),
+            "simultaneous": physical_summary(
+                analysis_combined if analysis_combined is not None else analysis_gauge
+            ),
+            "imerg_then_gauges": physical_summary(analysis),
+            "interpretation": (
+                "Compare p99, p99.9 and max across arms. Very large satellite-arm "
+                "values indicate guidance instability even if a station metric improves."
             ),
         },
         "daily_withheld_scores": daily,
@@ -668,7 +866,13 @@ def main() -> None:
         background=background,
         analysis=analysis,
         analysis_gauge=analysis_gauge,
-        analysis_combined=(analysis if analysis_combined is None else analysis_combined),
+        analysis_imerg=(analysis_gauge if analysis_imerg is None else analysis_imerg),
+        analysis_combined=(
+            analysis_gauge if analysis_combined is None else analysis_combined
+        ),
+        analysis_sequential=(
+            analysis_gauge if analysis_sequential is None else analysis_sequential
+        ),
         chirps=chirps,
         condition=condition,
         imerg=(
@@ -685,7 +889,9 @@ def main() -> None:
         background_at_stations=background_at_stations,
         analysis_at_stations=analysis_at_stations,
         gauge_analysis_at_stations=gauge_at_stations,
+        imerg_analysis_at_stations=imerg_analysis_at_stations,
         combined_analysis_at_stations=combined_at_stations,
+        sequential_analysis_at_stations=sequential_at_stations,
         chirps_at_stations=chirps_at_stations,
         condition_at_stations=condition_at_stations,
         imerg_at_stations=(
@@ -709,7 +915,10 @@ def main() -> None:
     print(f"wrote {args.report}")
     print(
         f"withheld CRPS background {background_score['crps_mm']:.2f}; "
-        f"gauges {gauge_score['crps_mm']:.2f}; combined {combined_score['crps_mm']:.2f}"
+        f"gauges {gauge_score['crps_mm']:.2f}; "
+        f"IMERG {imerg_analysis_score['crps_mm']:.2f}; "
+        f"simultaneous {combined_score['crps_mm']:.2f}; "
+        f"IMERG->gauges {sequential_score['crps_mm']:.2f}"
     )
 
 

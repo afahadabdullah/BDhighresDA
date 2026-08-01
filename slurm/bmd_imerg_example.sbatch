@@ -9,9 +9,9 @@
 #SBATCH --time=18:00:00
 #SBATCH --output=logs/%x-%j.out
 
-# Bounded May 2018 real-observation experiment: compare the same CPC-driven
-# prior as background, gauges-only DA, and gauges+IMERG DA. Six spatially
-# spread BMD stations are withheld from every likelihood and used for scoring.
+# Bounded May 2018 real-observation experiment: background, gauges-only,
+# correlation-controlled IMERG-only, stabilized simultaneous DA, and a serial
+# IMERG-to-localized-gauges update. Six spread BMD stations remain withheld.
 
 set -euo pipefail
 
@@ -45,6 +45,9 @@ CONFIG="${BMD_CONFIG:-configs/da.yaml}"
 MEMBERS="${BMD_MEMBERS:-16}"
 WITHHOLD="${BMD_WITHHOLD:-0.2}"
 IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-40}"
+IMERG_STRIDE="${IMERG_STRIDE:-3}"
+IMERG_R_MULTIPLIER="${IMERG_R_MULTIPLIER:-1.0}"
+GAUGE_LOCALIZATION_KM="${GAUGE_LOCALIZATION_KM:-150}"
 
 DAILY="${BMD_DAILY:-data/processed/bmd_daily_may2018.csv}"
 STATION_SUMMARY="${BMD_STATION_SUMMARY:-data/processed/bmd_stations_may2018.csv}"
@@ -67,6 +70,8 @@ echo "IMERG daily directory: $IMERG_DIR"
 echo "Period: $START to $END"
 echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
+echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
+echo "Sequential gauge localization: $GAUGE_LOCALIZATION_KM km"
 echo "NOTE: 2018 is in checkpoint training; this is a process test, not final skill."
 echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 
@@ -96,6 +101,9 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --end "$END" \
     --members "$MEMBERS" \
     --withhold "$WITHHOLD" \
+    --imerg-stride "$IMERG_STRIDE" \
+    --imerg-r-multiplier "$IMERG_R_MULTIPLIER" \
+    --gauge-localization-km "$GAUGE_LOCALIZATION_KM" \
     --out "$DUMP" \
     --report "$REPORT"
 

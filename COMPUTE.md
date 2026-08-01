@@ -423,11 +423,16 @@ data/imerg/3B-DAY.MS.MRG.3IMERG.20180501-S000000-E235959.V07B.nc4
 data/imerg/3B-DAY.MS.MRG.3IMERG.20180531-S000000-E235959.V07B.nc4
 ```
 
-Submit from the repository root:
+For the required five-day controlled test, submit from the repository root:
 
 ```bash
-slurm/submit_bmd_imerg_example.sh
+slurm/submit_bmd_imerg_controlled_5day.sh
 ```
+
+This wrapper fixes the period to May 1–5 and writes `controlled` outputs, so it
+cannot overwrite the completed unstable experiment. The general full-period
+entry point remains `slurm/submit_bmd_imerg_example.sh` but should not be used
+until the five-day gate passes.
 
 Before requesting a GPU analysis, the job performs two strict preflights. It
 converts the two legacy BMD files to the canonical daily table, and it requires
@@ -437,25 +442,39 @@ granule must contain `precipitation`, `randomError`, and
 footprints nested over the model's 0.05-degree grid and, by default, rejects a
 footprint when fewer than 40 of 48 half-hourly estimates contributed.
 
-The GPU stage uses identical analysis-sampler seeds for the gauges-only and
-gauges+IMERG arms, always with the same six BMD stations withheld. IMERG enters
-through a physical 2x2 block-mean operator. Its per-footprint native
-`randomError` is converted from mm/day into the checkpoint's precipitation
-transform, combined with an uncertainty floor and representativeness term, and
-perturbed with the configured spatial correlation. Outputs are:
+The GPU stage evaluates five matched arms: background, gauges only, IMERG only,
+simultaneous gauges+IMERG, and IMERG followed by a localized serial deterministic
+ensemble square-root gauge update. The same six stations remain withheld in all
+arms. By default only every third IMERG footprint in each direction enters the
+likelihood, and its variance is inflated by the approximate residual correlation
+area. With a three-cell error length this is about 6.3x after thinning. This is
+an effective-sample approximation; it replaces the demonstrably invalid
+assumption that thousands of correlated pixels are independent.
+
+IMERG enters through a physical 2x2 block-mean operator. V07B daily
+`precipitation` and `randomError` are both in mm/day; do not multiply either by
+24. BMD values and model output are also mm/day, but spatial and temporal
+support differ: IMERG is a 0.1-degree footprint, BMD is a point gauge, and the
+BMD reporting-day boundary must still be checked against IMERG's 00–24 UTC day.
+The native error is transformed, combined with an uncertainty floor and
+representativeness, correlation-inflated, and spatially perturbed.
+
+Controlled outputs are:
 
 ```text
-data/processed/imerg_bd_may2018.nc
-data/processed/imerg_bd_may2018_qc.json
-data/processed/bmd_imerg_may2018_example.npz
-data/processed/bmd_imerg_may2018_example.json
-data/processed/bmd_imerg_may2018_diagnostics.png
-data/processed/bmd_imerg_may2018_spatial.png
+data/processed/imerg_bd_controlled_20180501_05.nc
+data/processed/imerg_bd_controlled_20180501_05_qc.json
+data/processed/bmd_imerg_controlled_20180501_05.npz
+data/processed/bmd_imerg_controlled_20180501_05.json
+data/processed/bmd_imerg_controlled_20180501_05_diagnostics.png
+data/processed/bmd_imerg_controlled_20180501_05_spatial.png
 ```
 
-The metric matrix, withheld-station scatter/rank histograms, and spatial case
-suite compare background, gauges only, and gauges+IMERG. Read the withheld-BMD
-CRPS/RMSE first; a visually sharper map is not evidence of improvement.
+The metric matrix, withheld-station scatter/rank histograms, and ten-column
+spatial suite compare all five arms. The JSON also records sequential gauge
+innovation RMSE before and after each update. Read withheld-BMD CRPS/RMSE and
+the IMERG-only physical range first; a visually sharper map is not evidence of
+improvement.
 
 If assimilation completed and only the plotting stage failed, preserve the
 expensive NPZ and resume on a CPU node:

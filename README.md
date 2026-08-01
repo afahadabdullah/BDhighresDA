@@ -170,17 +170,20 @@ station-space diagnostics plus spatial maps. May 2018 is inside the CPC
 checkpoint's training period, so this is a workflow demonstration rather than
 an independent temporal skill estimate.
 
-If the 31 already-downloaded daily V07B files are under `data/imerg`, run the
-three-arm background versus gauges versus gauges+IMERG process experiment:
+If the daily V07B files are under `data/imerg`, first run the five-day,
+five-arm controlled experiment:
 
 ```bash
-slurm/submit_bmd_imerg_example.sh
+slurm/submit_bmd_imerg_controlled_5day.sh
 ```
 
-It strictly validates the daily inventory and IMERG variables, uses native
-`randomError` and retrieval-count QC, and creates metric-matrix, calibration,
-and spatial-map suites. The bounded run is intentionally unbias-corrected;
-passing it validates ingestion and DA behavior, not final product skill.
+It compares background, gauges-only, correlation-controlled IMERG-only,
+stabilized simultaneous DA, and IMERG followed by a localized serial gauge
+update. It strictly validates the daily inventory and variables, uses native
+`randomError` plus retrieval-count QC, and creates metric-matrix, calibration,
+and ten-column spatial-map suites. The bounded run is intentionally
+unbias-corrected; passing it validates ingestion and DA behavior, not final
+product skill.
 
 ## Conditioning experiments
 

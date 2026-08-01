@@ -74,12 +74,31 @@ def main() -> None:
         if "gauge_analysis_at_stations" in data
         else data["analysis_at_stations"]
     )
+    imerg_station = (
+        data["imerg_analysis_at_stations"]
+        if "imerg_analysis_at_stations" in data
+        else data["analysis_at_stations"]
+    )
     combined_station = (
         data["combined_analysis_at_stations"]
         if "combined_analysis_at_stations" in data
         else data["analysis_at_stations"]
     )
+    sequential_station = (
+        data["sequential_analysis_at_stations"]
+        if "sequential_analysis_at_stations" in data
+        else data["analysis_at_stations"]
+    )
     has_imerg = bool(report.get("scope", {}).get("imerg_assimilated", False))
+    imerg_error = report.get("observation_error", {}).get("imerg") or {}
+    sequential_config = report.get("sequential_update", {})
+    control_text = (
+        f"stride {imerg_error.get('footprint_stride', '?')}; "
+        f"R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
+        f"gauge localization {sequential_config.get('support_km', np.nan):.0f} km"
+        if has_imerg and imerg_error
+        else "gauge-only configuration"
+    )
 
     # -------------------- station-space diagnostic suite --------------------
     figure, axes = plt.subplots(2, 3, figsize=(17, 10), constrained_layout=True)
@@ -130,7 +149,20 @@ def main() -> None:
                 for key in keys
             ],
             [
-                gauge_report.get("gauges_plus_imerg", gauge_report["analysis"]).get(
+                gauge_report.get("imerg_only", gauge_report["analysis"]).get(
+                    key, np.nan
+                )
+                for key in keys
+            ],
+            [
+                gauge_report.get(
+                    "simultaneous",
+                    gauge_report.get("gauges_plus_imerg", gauge_report["analysis"]),
+                ).get(key, np.nan)
+                for key in keys
+            ],
+            [
+                gauge_report.get("imerg_then_gauges", gauge_report["analysis"]).get(
                     key, np.nan
                 )
                 for key in keys
@@ -150,9 +182,11 @@ def main() -> None:
     axis.imshow(colour, cmap="Blues", vmin=0, vmax=1, aspect="auto")
     axis.set_xticks(np.arange(len(metric_names)))
     axis.set_xticklabels(metric_names, rotation=35, ha="right")
-    axis.set_yticks([0, 1, 2])
-    axis.set_yticklabels(["Background", "Gauges", "Gauges + IMERG"])
-    for row in range(3):
+    axis.set_yticks(np.arange(5))
+    axis.set_yticklabels(
+        ["Background", "Gauges", "IMERG", "Simultaneous", "IMERG → gauges"]
+    )
+    for row in range(5):
         for column in range(len(metric_names)):
             value = matrix[row, column]
             axis.text(column, row, f"{value:.2f}", ha="center", va="center", fontsize=8)
@@ -161,14 +195,21 @@ def main() -> None:
     observed = gauge[:, eval_idx]
     background_eval = np.moveaxis(background_station[:, :, eval_idx], 1, 0)
     gauge_eval = np.moveaxis(gauge_station[:, :, eval_idx], 1, 0)
+    imerg_eval = np.moveaxis(imerg_station[:, :, eval_idx], 1, 0)
     combined_eval = np.moveaxis(combined_station[:, :, eval_idx], 1, 0)
+    sequential_eval = np.moveaxis(sequential_station[:, :, eval_idx], 1, 0)
     background_mean = np.nanmean(background_eval, axis=0)
     gauge_mean = np.nanmean(gauge_eval, axis=0)
+    imerg_mean = np.nanmean(imerg_eval, axis=0)
     combined_mean = np.nanmean(combined_eval, axis=0)
+    sequential_mean = np.nanmean(sequential_eval, axis=0)
     valid_obs = np.isfinite(observed)
     limit = float(
         np.nanpercentile(
-            np.concatenate([observed[valid_obs], combined_mean[valid_obs]]), 99
+            np.concatenate(
+                [observed[valid_obs], combined_mean[valid_obs], sequential_mean[valid_obs]]
+            ),
+            99,
         )
     )
     limit = max(10.0, limit)
@@ -178,8 +219,12 @@ def main() -> None:
     axis.scatter(observed[valid_obs], gauge_mean[valid_obs], s=13, alpha=0.45,
                  color="#0077B6", label="gauges")
     if has_imerg:
+        axis.scatter(observed[valid_obs], imerg_mean[valid_obs], s=13, alpha=0.4,
+                     color="#F4A261", label="IMERG")
         axis.scatter(observed[valid_obs], combined_mean[valid_obs], s=13, alpha=0.45,
-                     color="#D1495B", label="gauges + IMERG")
+                     color="#D1495B", label="simultaneous")
+        axis.scatter(observed[valid_obs], sequential_mean[valid_obs], s=18, alpha=0.55,
+                     color="#2A9D8F", label="IMERG → gauges")
     axis.plot([0, limit], [0, limit], "k--", lw=1)
     axis.set_xlim(0, limit)
     axis.set_ylim(0, limit)
@@ -191,16 +236,22 @@ def main() -> None:
     axis = axes[1, 2]
     ranks_background = rank_histogram(background_eval, observed)
     ranks_gauge = rank_histogram(gauge_eval, observed)
+    ranks_imerg = rank_histogram(imerg_eval, observed)
     ranks_combined = rank_histogram(combined_eval, observed)
+    ranks_sequential = rank_histogram(sequential_eval, observed)
     ranks = np.arange(len(ranks_background))
-    width = 0.27
-    axis.bar(ranks - width, ranks_background / ranks_background.sum(), width,
+    width = 0.16
+    axis.bar(ranks - 2 * width, ranks_background / ranks_background.sum(), width,
              color="#ADB5BD", label="background")
-    axis.bar(ranks, ranks_gauge / ranks_gauge.sum(), width,
+    axis.bar(ranks - width, ranks_gauge / ranks_gauge.sum(), width,
              color="#0077B6", label="gauges")
     if has_imerg:
+        axis.bar(ranks, ranks_imerg / ranks_imerg.sum(), width,
+                 color="#F4A261", label="IMERG")
         axis.bar(ranks + width, ranks_combined / ranks_combined.sum(), width,
-                 color="#D1495B", label="gauges + IMERG")
+                 color="#D1495B", label="simultaneous")
+        axis.bar(ranks + 2 * width, ranks_sequential / ranks_sequential.sum(), width,
+                 color="#2A9D8F", label="IMERG → gauges")
     axis.axhline(1 / len(ranks), color="black", ls="--", lw=1, label="flat")
     axis.set_xlabel("Ensemble rank")
     axis.set_ylabel("Relative frequency")
@@ -212,7 +263,7 @@ def main() -> None:
         f"{len(assim_idx)} stations assimilated; "
         f"{len(eval_idx)} spatially spread stations withheld; "
         f"IMERG {'assimilated' if has_imerg else 'not assimilated'}; "
-        "2018 is inside checkpoint training years",
+        f"2018 is inside checkpoint training years\n{control_text}",
         fontsize=15,
     )
     Path(args.out_diagnostics).parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +274,13 @@ def main() -> None:
     chirps, condition = data["chirps"], data["condition"]
     background = data["background"]
     analysis_gauge = data["analysis_gauge"] if "analysis_gauge" in data else data["analysis"]
-    analysis = data["analysis_combined"] if "analysis_combined" in data else data["analysis"]
+    analysis_imerg = data["analysis_imerg"] if "analysis_imerg" in data else data["analysis"]
+    analysis_combined = (
+        data["analysis_combined"] if "analysis_combined" in data else data["analysis"]
+    )
+    analysis = (
+        data["analysis_sequential"] if "analysis_sequential" in data else data["analysis"]
+    )
     imerg = data["imerg"] if "imerg" in data else None
     valid_grid = data["valid"].astype(bool)
     background_mean_field = np.where(
@@ -231,6 +288,12 @@ def main() -> None:
     )
     gauge_mean_field = np.where(
         valid_grid[None], np.nan_to_num(analysis_gauge, nan=0.0).mean(axis=1), np.nan
+    )
+    imerg_mean_field = np.where(
+        valid_grid[None], np.nan_to_num(analysis_imerg, nan=0.0).mean(axis=1), np.nan
+    )
+    combined_mean_field = np.where(
+        valid_grid[None], np.nan_to_num(analysis_combined, nan=0.0).mean(axis=1), np.nan
     )
     analysis_mean_field = np.where(
         valid_grid[None], np.nan_to_num(analysis, nan=0.0).mean(axis=1), np.nan
@@ -254,31 +317,44 @@ def main() -> None:
 
     grid_lat, grid_lon = data["grid_lat"], data["grid_lon"]
     extent = [grid_lon[0], grid_lon[-1], grid_lat[0], grid_lat[-1]]
-    n_columns = 8 if has_imerg else 7
+    n_columns = 10 if has_imerg else 7
     figure, axes = plt.subplots(
         len(selected_days), n_columns, figsize=(3.3 * n_columns, 10), constrained_layout=True
     )
     if len(selected_days) == 1:
         axes = axes[None, :]
-    column_titles = ["CPC condition"]
     if has_imerg:
-        column_titles.append("IMERG 0.1° observation")
-    column_titles.extend(
-        [
-            "CHIRPS reference", "Background mean", "Gauges-only mean",
-            "Gauges + IMERG mean", "Combined − background", "Combined spread",
+        column_titles = [
+            "CPC condition", "IMERG 0.1° observation", "CHIRPS reference",
+            "Background mean", "Gauges-only mean", "IMERG-only mean",
+            "Simultaneous mean", "IMERG → gauges mean",
+            "Sequential − background", "Sequential spread",
         ]
-    )
+    else:
+        column_titles = [
+            "CPC condition", "CHIRPS reference", "Background mean",
+            "Gauges-only mean", "Analysis mean", "Analysis − background",
+            "Analysis spread",
+        ]
     for row, day in enumerate(selected_days):
         precip_fields = [condition[day]]
         if has_imerg:
             precip_fields.append(imerg[day])
-        precip_fields.extend(
-            [
-                chirps[day], background_mean_field[day], gauge_mean_field[day],
-                analysis_mean_field[day],
-            ]
-        )
+        if has_imerg:
+            precip_fields.extend(
+                [
+                    chirps[day], background_mean_field[day], gauge_mean_field[day],
+                    imerg_mean_field[day], combined_mean_field[day],
+                    analysis_mean_field[day],
+                ]
+            )
+        else:
+            precip_fields.extend(
+                [
+                    chirps[day], background_mean_field[day], gauge_mean_field[day],
+                    analysis_mean_field[day],
+                ]
+            )
         rain_vmax = max(
             10.0,
             max(float(np.nanpercentile(field, 99)) for field in precip_fields),
@@ -303,7 +379,7 @@ def main() -> None:
             axes[row, spread_column].imshow(analysis_spread[day], origin="lower", extent=extent,
                                 cmap="magma", vmin=0, vmax=spread_limit)
         )
-        analysis_column = 5 if has_imerg else 4
+        analysis_column = 7 if has_imerg else 4
         add_station_markers(axes[row, analysis_column], lon, lat, assim_idx, eval_idx)
         axes[row, 0].set_ylabel(
             f"{time[day]}\nBMD mean {np.nanmean(gauge[day]):.1f} mm",
@@ -320,7 +396,8 @@ def main() -> None:
     figure.suptitle(
         "BMD May 2018 real-observation DA spatial cases\n"
         "CHIRPS is a consistency reference; withheld BMD gauges provide the score; "
-        "IMERG is native V07B without fitted bias correction",
+        "IMERG is thinned/correlation-weighted native V07B without fitted bias correction\n"
+        + control_text,
         fontsize=14,
     )
     Path(args.out_spatial).parent.mkdir(parents=True, exist_ok=True)

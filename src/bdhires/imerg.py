@@ -148,6 +148,18 @@ def _regional_array(
     return np.asarray(array.isel({lat_name: lat_index, lon_name: lon_index}).values)
 
 
+def _require_mm_per_day(dataset: xr.Dataset, path: Path) -> None:
+    accepted = {"mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"}
+    for variable in ("precipitation", "randomError"):
+        units = str(dataset[variable].attrs.get("units", ""))
+        normalized = units.lower().replace(" ", "")
+        if normalized not in accepted:
+            raise ValueError(
+                f"{path} {variable} units are {units!r}, expected daily millimetres; "
+                "do not assimilate or apply a factor-of-24 conversion implicitly"
+            )
+
+
 def load_imerg_daily(
     directory: str | Path,
     start: str | np.datetime64,
@@ -172,6 +184,7 @@ def load_imerg_daily(
     for path in files:
         dataset = _open_granule(path)
         try:
+            _require_mm_per_day(dataset, path)
             p = _regional_array(dataset, "precipitation", expected_lat, expected_lon)
             e = _regional_array(dataset, "randomError", expected_lat, expected_lon)
             c = _regional_array(dataset, "precipitation_cnt", expected_lat, expected_lon)

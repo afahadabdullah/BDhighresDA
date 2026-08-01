@@ -6,8 +6,8 @@ kept outside the training Zarr and enters the inference-time likelihood through
 the physical block-average observation operator; it is not a conditioning
 channel.
 
-Availability: 2000-06-01 onwards (V07 Final).  This is why the training plan
-has two stages -- see docs/METHODOLOGY.md.
+Availability: 2000-06-01 onwards (V07 Final). The prior can still train before
+the satellite era because IMERG is used only at inference.
 
 Auth: needs an Earthdata login and a ~/.netrc entry:
     machine urs.earthdata.nasa.gov login <user> password <pass>

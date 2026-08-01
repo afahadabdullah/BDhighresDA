@@ -18,8 +18,13 @@ def _write(path: Path, day: int, bad_count: bool = False) -> None:
         count[2, 3] = 12
     xr.Dataset(
         {
-            "precipitation": (("time", "lon", "lat"), values[None]),
-            "randomError": (("time", "lon", "lat"), np.full((1, 64, 64), 2.0)),
+            "precipitation": (
+                ("time", "lon", "lat"), values[None], {"units": "mm/day"}
+            ),
+            "randomError": (
+                ("time", "lon", "lat"), np.full((1, 64, 64), 2.0),
+                {"units": "mm/day"},
+            ),
             "precipitation_cnt": (("time", "lon", "lat"), count[None]),
         },
         coords={"time": [np.datetime64(f"2018-05-{day:02d}")], "lon": lon, "lat": lat},
@@ -42,3 +47,14 @@ def test_discover_imerg_files_rejects_missing_date(tmp_path: Path) -> None:
     _write(path, 1)
     with pytest.raises(ValueError, match="missing dates: 2018-05-02"):
         discover_imerg_files(tmp_path, "2018-05-01", "2018-05-02")
+
+
+def test_load_imerg_daily_rejects_wrong_units(tmp_path: Path) -> None:
+    path = tmp_path / "3B-DAY.MS.MRG.3IMERG.20180501-S000000-E235959.V07B.nc4"
+    _write(path, 1)
+    with xr.open_dataset(path) as source:
+        dataset = source.load()
+    dataset["precipitation"].attrs["units"] = "mm/hr"
+    dataset.to_netcdf(path, mode="w")
+    with pytest.raises(ValueError, match="expected daily millimetres"):
+        load_imerg_daily(tmp_path, "2018-05-01", "2018-05-01")
