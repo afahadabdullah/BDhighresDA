@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from ..grids import Grid
+from ..transforms import PrecipTransform
 
 
 @dataclass
@@ -119,6 +120,70 @@ class BlockAverageObsOperator(torch.nn.Module):
 
     def valid_mask(self) -> torch.Tensor | None:
         return self.keep if self.keep.numel() else None
+
+
+class PhysicalBilinearObsOperator(BilinearObsOperator):
+    """Gauge operator that interpolates in physical precipitation space.
+
+    The sampler hands observation operators transformed precipitation.  A point
+    gauge, however, measures precipitation in mm/day.  For nonlinear transforms
+    such as log1p or sqrt, interpolating first and transforming afterward is not
+    the same as interpolating transformed neighbouring cells.  This operator
+    implements the physically consistent order while remaining differentiable.
+    """
+
+    def __init__(
+        self,
+        grid: Grid,
+        lat: np.ndarray,
+        lon: np.ndarray,
+        transform: PrecipTransform,
+        valid: np.ndarray | None = None,
+    ):
+        super().__init__(grid, lat, lon)
+        self.transform = transform
+        physical_valid = (
+            torch.as_tensor(valid, dtype=torch.float32)[None, None]
+            if valid is not None
+            else torch.empty(0)
+        )
+        self.register_buffer("physical_valid", physical_valid)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        physical = self.transform.inverse(x)
+        if self.physical_valid.numel():
+            # A residual checkpoint can reintroduce its CPC/ERA5 base after the
+            # network-space ocean mask is applied. Gauges near the coast must
+            # still interpolate physical zero over ocean, just as the nature
+            # truth sampler does.
+            physical = physical * self.physical_valid.to(physical.dtype)
+        sampled = super().forward(physical)
+        return self.transform.forward(sampled)
+
+
+class PhysicalBlockAverageObsOperator(BlockAverageObsOperator):
+    """Satellite operator: average mm/day footprints, then transform.
+
+    A 0.1-degree satellite footprint is a physical area mean of four nested
+    0.05-degree cells.  Averaging transformed precipitation would bias that
+    footprint because the precipitation transform is nonlinear.  The returned
+    values are still in transformed units, as required by the likelihood.
+    """
+
+    def __init__(
+        self,
+        factor: int,
+        transform: PrecipTransform,
+        valid: np.ndarray | None = None,
+        min_valid_frac: float = 0.999,
+    ):
+        super().__init__(factor=factor, valid=valid, min_valid_frac=min_valid_frac)
+        self.transform = transform
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        physical = self.transform.inverse(x)
+        coarse = super().forward(physical)
+        return self.transform.forward(coarse)
 
 
 class CompositeObsOperator(torch.nn.Module):

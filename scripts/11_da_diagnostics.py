@@ -176,6 +176,11 @@ def main() -> None:
     obs_transformed = data["obs_transformed"]        # (D, S)
     truth_at_stations = data["truth_at_stations"]    # (D, S) mm
     obs_noise_sd = float(data["obs_noise_sd"])
+    pseudo_satellite = (
+        bool(data["pseudo_satellite_enabled"])
+        if "pseudo_satellite_enabled" in data.files
+        else False
+    )
     n_days, n_members = background.shape[0], background.shape[1]
 
     import sys
@@ -425,8 +430,15 @@ def main() -> None:
     axis.set_xscale("log")
     axis.set_xlabel("Distance to nearest assimilated station (cells)")
     axis.set_ylabel("|analysis - background| (mm day$^{-1}$)")
-    axis.set_title("G.  How far does one observation reach?\nflat = not "
-                   "localising, cliff = barely spreading", fontsize=10.5)
+    axis.set_title(
+        "G.  Increment versus gauge distance\n"
+        + (
+            "dense satellite is present: not a gauge-localisation test"
+            if pseudo_satellite
+            else "flat = not localising, cliff = barely spreading"
+        ),
+        fontsize=10.5,
+    )
     axis.grid(alpha=0.2, which="both")
     report["increment_profile"] = {
         "distance_cells": centres, "increment_mm": values
@@ -511,7 +523,8 @@ def main() -> None:
         f"{report['obs_error']} observations   |   {n_days} days x {n_members} "
         f"members   |   {report['n_assimilated']} assimilated, "
         f"{report['n_withheld']} withheld\n"
-        "Dashed/blue = background (no observations), solid/red = analysis",
+        + ("0.1° pseudo-satellite is also assimilated\n" if pseudo_satellite else "")
+        + "Dashed/blue = background (no observations), solid/red = analysis",
         fontsize=14,
     )
     Path(args.out_figure).parent.mkdir(parents=True, exist_ok=True)

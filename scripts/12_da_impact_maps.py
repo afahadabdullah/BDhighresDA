@@ -103,6 +103,11 @@ def main() -> None:
     assim_idx, eval_idx = data["assim_idx"], data["eval_idx"]
     lat, lon = data["station_lat"], data["station_lon"]
     truth_at_stations = data["truth_at_stations"]
+    pseudo_satellite = (
+        bool(data["pseudo_satellite_enabled"])
+        if "pseudo_satellite_enabled" in data.files
+        else False
+    )
     day_labels = [str(d) for d in data["days"]]
     n_days = truth.shape[0]
 
@@ -257,8 +262,15 @@ def main() -> None:
     axis.set_xscale("log")
     axis.set_xlabel("Distance to nearest assimilated station (cells)")
     axis.set_ylabel("Mean error reduction (mm day$^{-1}$)")
-    axis.set_title("D.  Does the benefit decay with distance?\n"
-                   "above zero = still helping", fontsize=10)
+    axis.set_title(
+        "D.  Error reduction versus gauge distance\n"
+        + (
+            "dense satellite is present: distance is descriptive only"
+            if pseudo_satellite
+            else "above zero = still helping"
+        ),
+        fontsize=10,
+    )
     axis.grid(alpha=0.25, which="both")
 
     # E. withheld-station scatter

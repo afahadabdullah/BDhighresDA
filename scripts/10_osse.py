@@ -2,10 +2,13 @@
 """Observing-system simulation experiment: how much does assimilation buy?
 
 CHIRPS is treated as the nature run.  Pseudo-gauges sample it at station
-locations, observation error is added, a subset is assimilated, and the analysis
-is scored against the truth.  Because the true full field is known, this answers
-questions that real gauges never can: how much skill the DA adds, how that scales
-with network density, and whether the guidance hyperparameters are set sensibly.
+locations and, optionally, exact nested 2x2 means provide a 0.1-degree
+pseudo-satellite. Observation error is added, a subset of gauges plus the dense
+satellite are assimilated, and the 0.05-degree analysis is scored against the
+truth. Because the true full field is known, this answers questions that real
+gauges never can: how much skill the DA adds, whether it reconstructs subgrid
+structure rather than merely copying coarse footprints, and whether the guidance
+hyperparameters are set sensibly.
 
 THREE SCOPES, WHICH ANSWER DIFFERENT QUESTIONS
     assimilated  Does the analysis actually move to the observations it was
@@ -17,16 +20,17 @@ THREE SCOPES, WHICH ANSWER DIFFERENT QUESTIONS
                  (gamma too large, or R too loose); much closer, and it is
                  over-fitting noise it should be smoothing.
 
-    withheld     Stations excluded from the assimilation.  This is the honest
-                 skill number and the headline.
+    withheld     Stations excluded from the gauge likelihood.  This is honest
+                 spatial validation in a gauge-only run.  With a dense
+                 pseudo-satellite it is not fully independent: it tests how the
+                 model allocates rain inside an observed coarse footprint.
 
-    full field   Every land cell.  Secondary, but informative: only a few hundred
-                 of ~13.5k cells are ever constrained, so most of the domain is
-                 genuinely out of sample even though the observations came from
-                 CHIRPS.
+    full field   Every land cell.  Separate coarse-footprint skill from the
+                 unobserved 0.05-degree subgrid residual when satellite data are
+                 present; otherwise direct coarse constraints can dominate.
 
 WHAT IS MEASURED
-    background   ERA5-conditioned generation, no observations   (the control)
+    background   checkpoint-conditioned generation, no observations (control)
     analysis     the same, guided by the assimilated pseudo-gauges
     improvement  the reduction in error from one to the other
 
@@ -48,8 +52,9 @@ OBSERVATION ERROR
     assimilated.  That is a property of the guidance formulation, not of the
     model, and it is why R is floored at 0.05.
 
-    python scripts/10_osse.py --ckpt runs/prior_h100_v5/best.pt \
-        --networks 10,25,50,100,200,bmd --days 20 --members 16
+    python scripts/10_osse.py --ckpt runs/prior_h100_cpc/best.pt \
+        --networks 40 --station-layout spread --withhold 0.2 \
+        --pseudo-satellite --days 30 --members 16
 """
 from __future__ import annotations
 
@@ -72,10 +77,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
+    CompositeObsOperator,
     GuidanceConfig,
+    PhysicalBilinearObsOperator,
+    PhysicalBlockAverageObsOperator,
     SamplerConfig,
     StationSet,
-    build_R,
+    build_R_multi,
     perturb_observations,
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
@@ -109,6 +117,13 @@ def parse_args() -> argparse.Namespace:
         "--obs-error",
         default="realistic,perfect",
         help="comma-separated: 'realistic' uses da.yaml, 'perfect' uses ~0",
+    )
+    parser.add_argument(
+        "--pseudo-satellite",
+        action="store_true",
+        help="also assimilate CHIRPS averaged to exact nested 0.1-degree "
+             "footprints; this is the pseudo-IMERG OSSE requested for the "
+             "combined satellite + station experiment",
     )
     parser.add_argument(
         "--withhold",
@@ -222,6 +237,30 @@ def sample_at_stations(field_mm: np.ndarray, grid, stations: StationSet) -> np.n
     return operator(tensor[:, None])[:, 0].numpy()
 
 
+def block_mean_mm(
+    field_mm: np.ndarray,
+    valid: np.ndarray,
+    factor: int = 2,
+    min_valid_fraction: float = 0.999,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Physical footprint means and validity on the nested coarse grid.
+
+    The mean is taken in mm/day, before any nonlinear precipitation transform.
+    Footprints touching the CHIRPS ocean mask are excluded from assimilation so
+    zeros used for the numerical mean cannot leak into coastal observations.
+    """
+    if field_mm.shape != valid.shape:
+        raise ValueError(f"field {field_mm.shape} and valid mask {valid.shape} differ")
+    height, width = field_mm.shape
+    if height % factor or width % factor:
+        raise ValueError(f"grid {field_mm.shape} is not divisible by factor {factor}")
+    shape = (height // factor, factor, width // factor, factor)
+    support = valid.reshape(shape).mean(axis=(1, 3)) >= min_valid_fraction
+    filled = np.where(valid, field_mm, 0.0)
+    coarse = filled.reshape(shape).mean(axis=(1, 3)).astype(np.float32)
+    return np.where(support, coarse, np.nan), support
+
+
 def score(members_mm: np.ndarray, truth: np.ndarray) -> dict:
     """Ensemble scores for (M, ...) members against (...) truth."""
     finite = np.isfinite(truth)
@@ -270,30 +309,52 @@ def improvement(background: dict, analysis: dict, key: str) -> float:
 
 def main() -> None:
     args = parse_args()
+    if not 0.0 <= args.withhold < 1.0:
+        raise ValueError("--withhold must satisfy 0 <= fraction < 1")
     config = yaml.safe_load(Path(args.config).read_text())
-    stats = json.loads(Path(config["data"]["stats"]).read_text())
+    checkpoint = torch.load(args.ckpt, map_location="cpu")
+    training_config = checkpoint["cfg"]
+
+    # The input representation is part of the checkpoint.  The CPC prior uses
+    # a different Zarr store, statistics, residual base and conditioning subset
+    # than the older ERA5 prior, so never take those values blindly from da.yaml.
+    training_data = training_config["data"]
+    data_zarr = str(training_data.get("zarr", config["data"]["zarr"]))
+    data_stats = str(training_data.get("stats", config["data"]["stats"]))
+    stats = json.loads(Path(data_stats).read_text())
     transform = PrecipTransform.from_dict(stats["precip_transform"])
     residual = ResidualSpec.from_stats(stats)
     grid = get_grid(config["data"]["grid"])
 
+    selected_channels = training_data.get("cond_channels")
+    print(
+        f"[osse] checkpoint-bound data: {data_zarr} | {data_stats} | "
+        f"channels={selected_channels or 'all'}",
+        flush=True,
+    )
+
     dataset = PrecipDataset(
         DatasetConfig(
-            root=config["data"]["zarr"],
+            root=data_zarr,
             crop=grid.nlon,
             random_crop=False,
             crop_origin=crop_offsets(WIDE, grid),
+            seasonal_encoding=bool(training_data.get("seasonal_encoding", True)),
+            cond_channels=(
+                tuple(selected_channels) if selected_channels is not None else None
+            ),
+            min_valid_fraction=float(training_data.get("min_valid_fraction", 0.3)),
         ),
         transform,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
         residual=residual,
+        climatology=load_climatology(data_stats, stats),
     )
     valid = dataset.fixed_valid > 0
     slices = dataset.fixed_spatial_slices()
 
-    checkpoint = torch.load(args.ckpt, map_location="cpu")
-    training_config = checkpoint["cfg"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet(
         in_channels=1,
@@ -361,6 +422,20 @@ def main() -> None:
         )
 
     gauge_cfg = config["observations"]["gauges"]
+    satellite_cfg = config["observations"]["imerg"]
+    satellite_factor = int(satellite_cfg["factor"])
+    if args.pseudo_satellite and (
+        grid.nlat % satellite_factor or grid.nlon % satellite_factor
+    ):
+        raise ValueError(
+            f"grid {grid.nlat}x{grid.nlon} is not divisible by satellite factor "
+            f"{satellite_factor}"
+        )
+    satellite_shape = (
+        grid.nlat // satellite_factor,
+        grid.nlon // satellite_factor,
+    )
+    satellite_count = int(np.prod(satellite_shape)) if args.pseudo_satellite else 0
     error_levels = {}
     for token in args.obs_error.split(","):
         token = token.strip().lower()
@@ -407,7 +482,11 @@ def main() -> None:
                 np.linspace(0, len(days) - 1, min(args.tune_days, len(days)))
                 .astype(int)
             ]
-        withheld = max(1, int(round(args.withhold * len(networks[chosen_network]))))
+        tune_station_count = len(networks[chosen_network])
+        withheld = min(
+            tune_station_count - 1,
+            max(1, int(round(args.withhold * tune_station_count))),
+        )
         print(
             f"[osse] tuning mode: {len(combinations)} combinations x "
             f"{len(days)} days on network '{chosen_network}' "
@@ -477,7 +556,11 @@ def main() -> None:
     results = []
     for name, stations in networks.items():
         n_stations = len(stations)
-        n_withhold = max(1, int(round(args.withhold * n_stations)))
+        if n_stations < 2:
+            raise ValueError(f"network {name!r} needs at least two stations")
+        n_withhold = min(
+            n_stations - 1, max(1, int(round(args.withhold * n_stations)))
+        )
         split_rng = np.random.default_rng(args.seed + n_stations)
         order = split_rng.permutation(n_stations)
         eval_idx = np.sort(order[:n_withhold])
@@ -495,13 +578,53 @@ def main() -> None:
                         "prior_temperature", base_sampler.prior_temperature
                     ),
                 )
-                R = build_R(
-                    len(assim_idx), sigma_used, device=device,
-                    representativeness=representativeness,
+                gauge_noise_sd = float(
+                    np.sqrt(sigma_used**2 + representativeness**2)
                 )
-                noise_sd = float(np.sqrt(sigma**2 + representativeness**2))
-                operator = BilinearObsOperator(
-                    grid, stations.lat[assim_idx], stations.lon[assim_idx]
+                operators = [
+                    PhysicalBilinearObsOperator(
+                        grid,
+                        stations.lat[assim_idx],
+                        stations.lon[assim_idx],
+                        transform,
+                        valid=valid,
+                    )
+                ]
+                r_specs = [(len(assim_idx), sigma_used, representativeness)]
+                corr_blocks: list[tuple[int, int, int, float]] = []
+                satellite_noise_sd = float("nan")
+                if args.pseudo_satellite:
+                    operators.append(
+                        PhysicalBlockAverageObsOperator(
+                            satellite_factor, transform, valid=valid
+                        )
+                    )
+                    if error_name == "perfect":
+                        satellite_sigma, satellite_repr = 0.05, 0.0
+                    else:
+                        satellite_sigma = float(satellite_cfg["sigma_obs"])
+                        satellite_repr = float(
+                            satellite_cfg["representativeness"]
+                        )
+                    r_specs.append(
+                        (satellite_count, satellite_sigma, satellite_repr)
+                    )
+                    satellite_noise_sd = float(
+                        np.sqrt(satellite_sigma**2 + satellite_repr**2)
+                    )
+                    corr_blocks.append(
+                        (
+                            len(assim_idx),
+                            satellite_shape[0],
+                            satellite_shape[1],
+                            float(satellite_cfg.get("error_corr_cells", 0.0)),
+                        )
+                    )
+                R = build_R_multi(r_specs, device=device)
+                operator = (
+                    CompositeObsOperator(operators)
+                    if len(operators) > 1
+                    else operators[0]
                 ).to(device)
 
                 background_days, analysis_days = [], []
@@ -518,6 +641,7 @@ def main() -> None:
                     k: [] for k in (
                         "background", "analysis", "truth",
                         "obs_transformed", "truth_at_stations",
+                        "pseudo_satellite_mm", "pseudo_satellite_truth_mm",
                     )
                 }
                 for index in days:
@@ -531,13 +655,65 @@ def main() -> None:
                     # TRANSFORMED space so it matches what R claims.
                     truth_at_stations = sample_at_stations(truth, grid, stations)[0]
                     observation_rng = np.random.default_rng(args.seed + index)
-                    y_transformed = transform.forward(
+                    gauge_obs_transformed = transform.forward(
                         np.clip(truth_at_stations, 0.0, None)
-                    ) + observation_rng.normal(0.0, noise_sd, n_stations)
-                    y_assim = y_transformed[assim_idx].astype(np.float32)
+                    ) + observation_rng.normal(
+                        0.0, gauge_noise_sd, n_stations
+                    )
+                    truth_obs = [
+                        transform.forward(
+                            np.clip(truth_at_stations[assim_idx], 0.0, None)
+                        ).astype(np.float32)
+                    ]
+                    observed = [gauge_obs_transformed[assim_idx].astype(np.float32)]
+                    satellite_truth_mm = None
+                    satellite_observed_mm = None
+                    if args.pseudo_satellite:
+                        satellite_truth_mm, _ = block_mean_mm(
+                            truth, valid, satellite_factor
+                        )
+                        satellite_truth_transformed = transform.forward(
+                            satellite_truth_mm
+                        ).astype(np.float32).reshape(-1)
+                        # One correlated error realisation creates the actual
+                        # pseudo-IMERG product.  Member-wise perturbations below
+                        # then preserve posterior ensemble variance.
+                        satellite_R = R[len(assim_idx):]
+                        satellite_observed = perturb_observations(
+                            satellite_truth_transformed,
+                            satellite_R,
+                            1,
+                            seed=args.seed + index + 100_000,
+                            corr_blocks=[
+                                (
+                                    0,
+                                    satellite_shape[0],
+                                    satellite_shape[1],
+                                    float(
+                                        satellite_cfg.get("error_corr_cells", 0.0)
+                                    ),
+                                )
+                            ],
+                        )[0].astype(np.float32)
+                        satellite_observed[
+                            ~np.isfinite(satellite_truth_transformed)
+                        ] = np.nan
+                        truth_obs.append(satellite_truth_transformed)
+                        observed.append(satellite_observed)
+                        satellite_observed_mm = transform.inverse(
+                            satellite_observed
+                        ).reshape(satellite_shape).astype(np.float32)
+
+                    y_truth = np.concatenate(truth_obs).astype(np.float32)
+                    y_assim = np.concatenate(observed).astype(np.float32)
+                    y_assim[~np.isfinite(y_truth)] = np.nan
 
                     perturbed = perturb_observations(
-                        y_assim, R, args.members, seed=index
+                        y_assim,
+                        R,
+                        args.members,
+                        seed=index,
+                        corr_blocks=corr_blocks,
                     )
                     y_tensor = torch.from_numpy(
                         perturbed[:, None].astype(np.float32)
@@ -584,8 +760,10 @@ def main() -> None:
                             truth_eval,
                         )
                     )
-                    # FIT: at the assimilated stations, against the observations
-                    # the DA was actually handed (not against the truth).
+                    # Circular but useful OSSE score at assimilated locations,
+                    # against nature truth. The transformed-space fit below is
+                    # the separate diagnostic against the noisy observation the
+                    # likelihood was actually handed.
                     analysis_at_assim = sample_at_stations(
                         analysis, grid, stations
                     )[:, assim_idx]
@@ -609,7 +787,7 @@ def main() -> None:
                                         transform.forward(
                                             np.clip(analysis_at_assim.mean(axis=0), 0, None)
                                         )
-                                        - y_assim
+                                        - gauge_obs_transformed[assim_idx]
                                     )
                                     ** 2
                                 )
@@ -626,11 +804,18 @@ def main() -> None:
                         store["analysis"].append(analysis.astype(np.float32))
                         store["truth"].append(truth.astype(np.float32))
                         store["obs_transformed"].append(
-                            y_transformed.astype(np.float32)
+                            gauge_obs_transformed.astype(np.float32)
                         )
                         store["truth_at_stations"].append(
                             truth_at_stations.astype(np.float32)
                         )
+                        if args.pseudo_satellite:
+                            store["pseudo_satellite_mm"].append(
+                                satellite_observed_mm
+                            )
+                            store["pseudo_satellite_truth_mm"].append(
+                                satellite_truth_mm.astype(np.float32)
+                            )
 
                 entry = {
                     "network": name,
@@ -638,7 +823,9 @@ def main() -> None:
                     "n_assimilated": int(len(assim_idx)),
                     "n_withheld": int(len(eval_idx)),
                     "obs_error": error_name,
-                    "obs_noise_sd_transformed": noise_sd,
+                    "obs_noise_sd_transformed": gauge_noise_sd,
+                    "pseudo_satellite": bool(args.pseudo_satellite),
+                    "satellite_noise_sd_transformed": satellite_noise_sd,
                     **{f"setting_{k}": v for k, v in setting.items()},
                     "withheld_background": aggregate(background_days),
                     "withheld_analysis": aggregate(analysis_days),
@@ -649,9 +836,9 @@ def main() -> None:
                     # Consistency check: analysis-minus-observation distance in
                     # transformed units against the sd the likelihood assumed.
                     "fit_rms_transformed": float(np.mean(fit_transformed)),
-                    "assumed_obs_sd_transformed": noise_sd,
-                    "fit_ratio": float(np.mean(fit_transformed) / noise_sd)
-                    if noise_sd > 0
+                    "assumed_obs_sd_transformed": gauge_noise_sd,
+                    "fit_ratio": float(np.mean(fit_transformed) / gauge_noise_sd)
+                    if gauge_noise_sd > 0
                     else float("nan"),
                 }
                 for metric in ("rmse_mm", "crps_mm", "mae_mm"):
@@ -673,7 +860,10 @@ def main() -> None:
                         assim_idx=assim_idx,
                         eval_idx=eval_idx,
                         valid=valid,
-                        obs_noise_sd=np.float32(noise_sd),
+                        obs_noise_sd=np.float32(gauge_noise_sd),
+                        satellite_obs_noise_sd=np.float32(satellite_noise_sd),
+                        pseudo_satellite_enabled=np.bool_(args.pseudo_satellite),
+                        satellite_factor=np.int32(satellite_factor),
                         grid_name=np.str_(grid.name),
                         network=np.str_(name),
                         obs_error=np.str_(error_name),
@@ -683,7 +873,18 @@ def main() -> None:
                         precip_transform=np.str_(
                             json.dumps(stats["precip_transform"])
                         ),
+                        checkpoint=np.str_(args.ckpt),
+                        checkpoint_epoch=np.int32(checkpoint.get("epoch", -1)),
+                        data_zarr=np.str_(data_zarr),
+                        data_stats=np.str_(data_stats),
                     )
+                    if args.pseudo_satellite:
+                        dumped["pseudo_satellite_mm"] = np.stack(
+                            store["pseudo_satellite_mm"]
+                        )
+                        dumped["pseudo_satellite_truth_mm"] = np.stack(
+                            store["pseudo_satellite_truth_mm"]
+                        )
 
                 results.append(entry)
                 print(
@@ -704,12 +905,19 @@ def main() -> None:
         "days": [str(times[int(i)].astype("datetime64[D]")) for i in days],
         "members": args.members,
         "withhold_fraction": args.withhold,
+        "data_zarr": data_zarr,
+        "data_stats": data_stats,
+        "pseudo_satellite": bool(args.pseudo_satellite),
+        "satellite_factor": satellite_factor if args.pseudo_satellite else None,
+        "station_layout": args.station_layout,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (
-            "Headline numbers are from WITHHELD stations. Observations are drawn "
-            "from CHIRPS, so scores at assimilated locations are circular. "
-            "Full-field scores are secondary but informative because only a few "
-            "hundred of ~13.5k land cells are ever constrained."
+            "This is an optimistic upper-bound OSSE because CHIRPS supplies both "
+            "the nature truth and pseudo-observations. Withheld gauges are not "
+            "fully independent when dense pseudo-satellite footprints are also "
+            "assimilated; they test sub-footprint allocation at unseen point "
+            "locations. Read the 0.1-degree footprint and 0.05-degree subgrid "
+            "scores separately before concluding that fine structure was recovered."
         ),
         "results": results,
     }
@@ -750,7 +958,7 @@ def plot_results(results: list[dict], args, output: Path) -> None:
         for number, level in enumerate(levels):
             rows = [r for r in results if r["obs_error"] == level]
             rows.sort(key=lambda r: r["n_stations"])
-            x = [r["n_stations"] for r in rows]
+            x = [r["n_assimilated"] for r in rows]
             axis.plot(
                 x, [r[f"{scope}_background"].get(metric, np.nan) for r in rows],
                 marker="s", ms=4, ls="--", color=colours[number],
@@ -774,12 +982,12 @@ def plot_results(results: list[dict], args, output: Path) -> None:
         rows = [r for r in results if r["obs_error"] == level]
         rows.sort(key=lambda r: r["n_stations"])
         axis.plot(
-            [r["n_stations"] for r in rows],
+            [r["n_assimilated"] for r in rows],
             [r["withheld_improvement_crps_mm"] for r in rows],
             marker="o", ms=5, color=colours[number], label=f"withheld ({level})",
         )
         axis.plot(
-            [r["n_stations"] for r in rows],
+            [r["n_assimilated"] for r in rows],
             [r["field_improvement_crps_mm"] for r in rows],
             marker="s", ms=4, ls="--", color=colours[number],
             label=f"full field ({level})", alpha=0.6,
@@ -793,7 +1001,9 @@ def plot_results(results: list[dict], args, output: Path) -> None:
     axis.legend(fontsize=7, frameon=False)
 
     figure.suptitle(
-        "BDhighresDA OSSE - pseudo-gauges drawn from CHIRPS, scored on WITHHELD stations\n"
+        "BDhighresDA OSSE - CHIRPS nature truth; "
+        + ("0.1-degree pseudo-satellite + " if args.pseudo_satellite else "")
+        + "pseudo-gauges\n"
         f"{args.ckpt}   |   {args.days} days   |   {args.members} members   |   "
         f"{args.withhold:.0%} of each network withheld from assimilation\n"
         "Dashed = background (no observations), solid = analysis. "

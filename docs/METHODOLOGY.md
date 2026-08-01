@@ -466,12 +466,19 @@ be at lag 0.
 
 ## 9. Experiment plan
 
-1. **Pseudo-observations first.** Sample CHIRPS at the 35 BMD coordinates over
-   the whole record and assimilate those. The true full field is known, so
-   this validates the whole DA machinery and lets you tune `Γ`, `σ_obs` and
-   `noise_scale` cleanly (Manshausen §4.1). Sweep gauge density
-   (5/10/20/35/100) to quantify what a denser BMD network would buy — directly
-   policy-relevant.
+1. **Pseudo-observations first.** Treat held-out CHIRPS as the nature truth,
+   form exact physical 2×2 means as a 0.1° pseudo-satellite, and sample a
+   spatially spread 40-station pseudo-network. Assimilate 32 stations plus the
+   satellite and retain eight station locations for sub-footprint checking.
+   Compare the guided analysis with a seed- and temperature-matched background.
+   Report 0.1° footprint scores separately from 0.05° subgrid residual scores:
+   dense satellite observations can make footprint RMSE look excellent without
+   demonstrating that the model recovered fine structure. Use reconstruction,
+   error and spread maps plus rank histograms, spread–skill, intensity-binned
+   CRPS, reliability, FSS, spectra, innovations, increment maps, and metric
+   matrices. This validates the machinery and lets `Γ`, observation error and
+   prior temperature be tuned (Manshausen §4.1). It remains an optimistic upper
+   bound because CHIRPS supplies both observations and truth.
 2. **Real gauges, 3-fold cross-validation.** Rotate the withheld third; report
    RMSE, MAE, CRPS, spread/skill overall and by intensity, and rank
    histograms at left-out stations. Manshausen et al.'s headline was **10%

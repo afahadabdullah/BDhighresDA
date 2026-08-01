@@ -303,7 +303,70 @@ national borders, and first-order boundaries. Boundary files are cached in
 `data/static/cartopy`. These target-selected cases are a visual stress test,
 not an aggregate test-period skill estimate.
 
-## Submit assimilation
+## Run the CPC-to-CHIRPS OSSE
+
+Before using real IMERG and BMD observations, run the CHIRPS observing-system
+simulation experiment (OSSE) with the best CPC checkpoint:
+
+```bash
+slurm/submit_osse.sh
+```
+
+The default is the requested upper-bound experiment:
+
+- `runs/prior_h100_cpc/best.pt` supplies the frozen generative prior. The OSSE
+  reads the Zarr path, normalization statistics, residual definition, and
+  conditioning-channel subset from that checkpoint, so it cannot accidentally
+  mix the CPC model with ERA5 inputs.
+- Held-out 2021–2025 July CHIRPS is the nature truth. Thirty days are evaluated.
+- Exact physical 2×2 means of CHIRPS create the 0.1° pseudo-satellite product.
+  The mean is taken in mm/day before applying the nonlinear precipitation
+  transform.
+- A spatially spread 40-station pseudo-network is drawn from CHIRPS. Thirty-two
+  stations are assimilated and eight are withheld. With dense satellite data,
+  those withheld points test unseen sub-footprint allocation; they are not an
+  independent validation dataset.
+- Sixteen members use spatially correlated satellite-observation perturbations
+  and independent gauge perturbations to diagnose posterior spread.
+
+The job writes the raw ensemble dump plus four complementary plotting suites:
+
+```text
+data/processed/osse_combined.png
+data/processed/da_diagnostics.png
+data/processed/da_impact_cases.png
+data/processed/da_impact_aggregate.png
+data/processed/osse_reconstruction_maps.png
+data/processed/osse_metric_matrix.png
+```
+
+The diagnostics include reconstruction/error/spread spatial maps, rank
+histograms, spread–skill, CRPS by intensity, reliability, fractions skill
+score by scale, power spectra, increment-versus-station-distance, normalized
+innovations, daily metric matrices, and a dedicated 0.05° subgrid matrix. Read
+`data/processed/osse_scale_summary.json` before deciding whether this prior is
+good enough for real DA. Improvement at 0.1° alone is not sufficient because
+that scale is directly observed; require improved subgrid RMSE/correlation and
+approximately nominal ensemble coverage as well.
+
+This CHIRPS-on-CHIRPS OSSE is deliberately optimistic: pseudo-observations and
+nature truth share one product and therefore omit real IMERG/BMD biases,
+timing errors, and representativeness differences. Passing it is necessary,
+not sufficient. The next gate is a real-observation experiment with IMERG bias
+correction fitted without test-period leakage and independent BMD cross-validation.
+
+Useful overrides include:
+
+```bash
+OSSE_DAYS=60 OSSE_MEMBERS=24 OSSE_WITHHOLD=0.25 slurm/submit_osse.sh
+OSSE_CKPT=runs/prior_h100_cpc/epoch_0040.pt slurm/submit_osse.sh
+```
+
+Do not choose a later checkpoint merely because it trained longer: use the
+checkpoint with the lowest fixed-case validation CRPS (currently the `best.pt`
+selection, observed near epoch 40 in the reported run).
+
+## Submit real-data assimilation
 
 After training has produced `runs/prior_h100/best.pt`, submit:
 

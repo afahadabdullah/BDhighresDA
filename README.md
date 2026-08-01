@@ -130,6 +130,10 @@ slurm/submit_train_cpc_v2_gh200.sh
 # Held-out best-checkpoint input/target/prediction/error/spread diagnostic:
 slurm/submit_test_predictions.sh
 
+# Before real DA: best CPC prior + 0.1-degree CHIRPS pseudo-satellite +
+# a 40-station CHIRPS pseudo-network, with full spatial/scale diagnostics:
+slurm/submit_osse.sh
+
 # 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
 python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
        --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
