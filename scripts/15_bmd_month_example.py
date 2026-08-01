@@ -1,14 +1,15 @@
 #!/usr/bin/env python
-"""One-month real-BMD gauge assimilation and withheld-station evaluation.
+"""One-month real BMD + IMERG assimilation and withheld-station evaluation.
 
 This is a process-validation experiment, not a final independent skill claim.
 The default May 2018 period is inside the CPC checkpoint's training years, but
-the withheld BMD gauges are independent observations and therefore reveal
+the withheld BMD gauges never enter this likelihood and therefore reveal
 whether real gauge ingestion, guidance, and station-space verification work.
 
-IMERG is intentionally excluded from this first real-data gate.  It isolates
-the BMD contribution and avoids pretending that the current packed Zarr store
-contains a real, bias-corrected IMERG observation field.
+When ``--imerg`` is supplied, background, gauges-only, and gauges+IMERG are
+run with matched ensemble seeds.  This bounded real-data gate uses native
+IMERG V07B uncertainty but no fitted bias correction, so it remains a process
+experiment rather than a final product-skill claim.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import xarray as xr
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -28,8 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.bmd import spread_holdout  # noqa: E402
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
+    CompositeObsOperator,
     GuidanceConfig,
     PhysicalBilinearObsOperator,
+    PhysicalBlockAverageObsOperator,
     SamplerConfig,
     build_R,
     perturb_observations,
@@ -37,7 +41,7 @@ from bdhires.da import (  # noqa: E402
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
-from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
+from bdhires.grids import Grid, WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     CondTransform,
@@ -52,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/da.yaml")
     parser.add_argument("--ckpt", default="runs/prior_h100_cpc/best.pt")
     parser.add_argument("--stations", default="data/processed/bmd_daily_may2018.csv")
+    parser.add_argument(
+        "--imerg",
+        default=None,
+        help="regional file produced by scripts/08_prepare_imerg_observations.py",
+    )
     parser.add_argument("--start", default="2018-05-01")
     parser.add_argument("--end", default="2018-05-31")
     parser.add_argument("--members", type=int, default=16)
@@ -61,6 +70,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default="data/processed/bmd_may2018_example.npz")
     parser.add_argument("--report", default="data/processed/bmd_may2018_example.json")
     return parser.parse_args()
+
+
+def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) -> dict:
+    """Load a compact regional file and enforce exact date/grid alignment."""
+    with xr.open_dataset(path) as dataset:
+        required = {"precipitation", "randomError", "precipitation_cnt"}
+        if not required.issubset(dataset):
+            raise ValueError(f"{path} lacks required IMERG variables {sorted(required)}")
+        imerg_time = np.asarray(dataset.time.values).astype("datetime64[D]")
+        expected_time = np.asarray(times).astype("datetime64[D]")
+        if not np.array_equal(imerg_time, expected_time):
+            raise ValueError(
+                f"IMERG dates do not exactly match checkpoint dates: "
+                f"{imerg_time[[0, -1]]} versus {expected_time[[0, -1]]}"
+            )
+        expected_lat = grid.lat.reshape(grid.nlat // factor, factor).mean(axis=1)
+        expected_lon = grid.lon.reshape(grid.nlon // factor, factor).mean(axis=1)
+        if not np.allclose(dataset.lat.values, expected_lat, atol=2e-3, rtol=0):
+            raise ValueError("prepared IMERG latitude does not nest on the model grid")
+        if not np.allclose(dataset.lon.values, expected_lon, atol=2e-3, rtol=0):
+            raise ValueError("prepared IMERG longitude does not nest on the model grid")
+        return {
+            "precipitation": np.asarray(dataset.precipitation.values, np.float32),
+            "random_error": np.asarray(dataset.randomError.values, np.float32),
+            "count": np.asarray(dataset.precipitation_cnt.values, np.int16),
+            "lat": np.asarray(dataset.lat.values, np.float32),
+            "lon": np.asarray(dataset.lon.values, np.float32),
+            "attrs": dict(dataset.attrs),
+        }
+
+
+def transformed_imerg_variance(
+    precipitation_mm: np.ndarray,
+    random_error_mm: np.ndarray,
+    transform: PrecipTransform,
+    sigma_floor: float,
+    representativeness: float,
+) -> np.ndarray:
+    """Delta-like conversion of native mm/day RMS error to model space.
+
+    A symmetric physical interval is transformed explicitly, which is more
+    stable near zero than dividing by precipitation under a log transform.
+    ``sigma_floor`` prevents unrealistically confident retrievals.
+    """
+    lower = np.clip(precipitation_mm - random_error_mm, 0.0, None)
+    upper = np.clip(precipitation_mm + random_error_mm, 0.0, None)
+    native_sigma = 0.5 * np.abs(transform.forward(upper) - transform.forward(lower))
+    sigma = np.maximum(native_sigma, sigma_floor)
+    return sigma.astype(np.float32) ** 2 + np.float32(representativeness**2)
 
 
 def sample_at_stations(field_mm: np.ndarray, grid, lat, lon) -> np.ndarray:
@@ -213,6 +271,21 @@ def main() -> None:
         flush=True,
     )
 
+    imerg = None
+    imerg_config = config["observations"]["imerg"]
+    imerg_factor = int(imerg_config.get("factor", 2))
+    if args.imerg:
+        imerg = load_prepared_imerg(args.imerg, selected_times, grid, imerg_factor)
+        print(
+            f"[imerg] {args.imerg}: {np.isfinite(imerg['precipitation']).mean():.1%} "
+            "regional footprints pass file QC; native randomError will set daily R",
+            flush=True,
+        )
+        print(
+            "[imerg] WARNING: no fitted bias correction in this bounded process run",
+            flush=True,
+        )
+
     valid = dataset.fixed_valid > 0
     slices = dataset.fixed_spatial_slices()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -229,25 +302,41 @@ def main() -> None:
     mask = torch.from_numpy(valid.astype(np.float32)[None, None]).to(device)
 
     sampler = replace(SamplerConfig(**config["sampler"]), mask_fill=dataset.mask_fill)
+    background_sampler = replace(
+        SamplerConfig(**config.get("background_sampler", config["sampler"])),
+        mask_fill=dataset.mask_fill,
+    )
     guidance = GuidanceConfig(**config["guidance"])
     gauge_config = config["observations"]["gauges"]
-    R = build_R(
+    gauge_R = build_R(
         len(assim_idx),
         float(gauge_config["sigma_obs"]),
         device=device,
         representativeness=float(gauge_config["representativeness"]),
     )
-    operator = PhysicalBilinearObsOperator(
+    gauge_operator = PhysicalBilinearObsOperator(
         grid,
         stations.lat[assim_idx],
         stations.lon[assim_idx],
         transform,
         valid=valid,
     ).to(device)
+    satellite_operator = None
+    satellite_keep = None
+    combined_operator = None
+    if imerg is not None:
+        satellite_operator = PhysicalBlockAverageObsOperator(
+            imerg_factor, transform, valid=valid
+        ).to(device)
+        satellite_keep = satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
+        combined_operator = CompositeObsOperator(
+            [gauge_operator, satellite_operator]
+        ).to(device)
 
     shape = (len(selected), args.members, grid.nlat, grid.nlon)
     background = np.empty(shape, dtype=np.float32)
-    analysis = np.empty(shape, dtype=np.float32)
+    analysis_gauge = np.empty(shape, dtype=np.float32)
+    analysis_combined = np.empty(shape, dtype=np.float32) if imerg is not None else None
     chirps = np.empty((len(selected), grid.nlat, grid.nlon), dtype=np.float32)
     condition = np.empty_like(chirps)
     cpc_full_index = (
@@ -263,16 +352,19 @@ def main() -> None:
         base = item["base"][None].to(device)
         day_seed = args.seed + int(data_index)
         day_sampler = replace(sampler, seed=day_seed)
+        day_background_sampler = replace(background_sampler, seed=day_seed)
 
-        # Same seed and prior temperature give the background and analysis the
-        # same initial ensemble; their difference isolates gauge guidance.
+        # All arms share the same seed. The two guided arms additionally share
+        # the same sampler and prior temperature, so their difference isolates
+        # the addition of IMERG. The background uses the configured production
+        # background sampler, which deliberately has no analysis inflation.
         with torch.inference_mode():
             generated_background = run_assim(
                 model,
                 cond,
                 (args.members, 1, grid.nlat, grid.nlon),
                 device,
-                cfg=day_sampler,
+                cfg=day_background_sampler,
                 flow=flow,
                 mask=mask,
                 to_precip=lambda x, b=base: residual.decode(x, b),
@@ -285,7 +377,7 @@ def main() -> None:
         observation = transform.forward(gauge_mm[day_position, assim_idx]).astype(np.float32)
         perturbed = perturb_observations(
             observation,
-            R,
+            gauge_R,
             args.members,
             seed=day_seed + 1_000_000,
         ).astype(np.float32)
@@ -296,9 +388,9 @@ def main() -> None:
             cond,
             (args.members, 1, grid.nlat, grid.nlon),
             device,
-            H=operator,
+            H=gauge_operator,
             y=y,
-            R=R,
+            R=gauge_R,
             cfg=day_sampler,
             gcfg=guidance,
             flow=flow,
@@ -308,7 +400,71 @@ def main() -> None:
         analysis_mm = transform.inverse(
             residual.decode(generated_analysis, base)[:, 0].float().cpu().numpy()
         )
-        analysis[day_position] = np.where(valid[None], analysis_mm, np.nan)
+        analysis_gauge[day_position] = np.where(valid[None], analysis_mm, np.nan)
+
+        if imerg is not None:
+            satellite_mm = imerg["precipitation"][day_position].reshape(-1)
+            satellite_error_mm = imerg["random_error"][day_position].reshape(-1)
+            satellite_observation = transform.forward(satellite_mm).astype(np.float32)
+            satellite_variance = transformed_imerg_variance(
+                satellite_mm,
+                satellite_error_mm,
+                transform,
+                sigma_floor=float(imerg_config["sigma_obs"]),
+                representativeness=float(imerg_config["representativeness"]),
+            )
+            satellite_valid = (
+                satellite_keep
+                & np.isfinite(satellite_observation)
+                & np.isfinite(satellite_variance)
+            )
+            satellite_observation[~satellite_valid] = np.nan
+            # Missing observations are masked by NaN in the likelihood.  Give
+            # their unused R entries a finite value so tensor arithmetic stays
+            # clean at every guidance time.
+            satellite_variance[~satellite_valid] = 1.0
+            combined_observation = np.concatenate(
+                [observation, satellite_observation]
+            ).astype(np.float32)
+            combined_R = torch.cat(
+                [gauge_R, torch.from_numpy(satellite_variance).to(device)]
+            )
+            combined_perturbed = perturb_observations(
+                combined_observation,
+                combined_R,
+                args.members,
+                seed=day_seed + 1_000_000,
+                corr_blocks=[
+                    (
+                        len(assim_idx),
+                        imerg["precipitation"].shape[1],
+                        imerg["precipitation"].shape[2],
+                        float(imerg_config.get("error_corr_cells", 0.0)),
+                    )
+                ],
+            ).astype(np.float32)
+            combined_perturbed[:, ~np.isfinite(combined_observation)] = np.nan
+            combined_y = torch.from_numpy(combined_perturbed[:, None]).to(device)
+            generated_combined = run_assim(
+                model,
+                cond,
+                (args.members, 1, grid.nlat, grid.nlon),
+                device,
+                H=combined_operator,
+                y=combined_y,
+                R=combined_R,
+                cfg=day_sampler,
+                gcfg=guidance,
+                flow=flow,
+                mask=mask,
+                to_precip=lambda x, b=base: residual.decode(x, b),
+            ).detach()
+            combined_mm = transform.inverse(
+                residual.decode(generated_combined, base)[:, 0].float().cpu().numpy()
+            )
+            analysis_combined[day_position] = np.where(
+                valid[None], combined_mm, np.nan
+            )
 
         chirps[day_position] = np.asarray(dataset.z["target"][int(data_index)][slices])
         if cpc_full_index is not None:
@@ -323,38 +479,77 @@ def main() -> None:
             flush=True,
         )
 
-    background_at_stations = sample_at_stations(
-        background, grid, stations.lat, stations.lon
+    analysis = analysis_combined if analysis_combined is not None else analysis_gauge
+    background_at_stations = sample_at_stations(background, grid, stations.lat, stations.lon)
+    gauge_at_stations = sample_at_stations(
+        analysis_gauge, grid, stations.lat, stations.lon
     )
-    analysis_at_stations = sample_at_stations(analysis, grid, stations.lat, stations.lon)
+    combined_at_stations = (
+        sample_at_stations(analysis_combined, grid, stations.lat, stations.lon)
+        if analysis_combined is not None
+        else gauge_at_stations
+    )
+    analysis_at_stations = combined_at_stations
     chirps_at_stations = sample_at_stations(chirps, grid, stations.lat, stations.lon)
     condition_at_stations = sample_at_stations(condition, grid, stations.lat, stations.lon)
+    imerg_at_stations = None
+    if imerg is not None:
+        imerg_grid = Grid(
+            "imerg_bd",
+            grid.lon_min,
+            grid.lat_min,
+            grid.nlon // imerg_factor,
+            grid.nlat // imerg_factor,
+            grid.res * imerg_factor,
+        )
+        imerg_at_stations = sample_at_stations(
+            imerg["precipitation"], imerg_grid, stations.lat, stations.lon
+        )
     background_eval = np.moveaxis(background_at_stations[:, :, eval_idx], 1, 0)
-    analysis_eval = np.moveaxis(analysis_at_stations[:, :, eval_idx], 1, 0)
+    gauge_eval = np.moveaxis(gauge_at_stations[:, :, eval_idx], 1, 0)
+    combined_eval = np.moveaxis(combined_at_stations[:, :, eval_idx], 1, 0)
     observed_eval = gauge_mm[:, eval_idx]
     background_score = ensemble_score(background_eval, observed_eval)
-    analysis_score = ensemble_score(analysis_eval, observed_eval)
+    gauge_score = ensemble_score(gauge_eval, observed_eval)
+    combined_score = ensemble_score(combined_eval, observed_eval)
+    analysis_score = combined_score
     chirps_score = deterministic_score(chirps_at_stations[:, eval_idx], observed_eval)
     condition_score = deterministic_score(condition_at_stations[:, eval_idx], observed_eval)
+    imerg_score = (
+        deterministic_score(imerg_at_stations[:, eval_idx], observed_eval)
+        if imerg_at_stations is not None
+        else None
+    )
     background_mean_grid = np.where(
         valid[None], np.nan_to_num(background, nan=0.0).mean(axis=1), np.nan
     )
-    analysis_mean_grid = np.where(
+    gauge_mean_grid = np.where(
+        valid[None], np.nan_to_num(analysis_gauge, nan=0.0).mean(axis=1), np.nan
+    )
+    combined_mean_grid = np.where(
         valid[None], np.nan_to_num(analysis, nan=0.0).mean(axis=1), np.nan
     )
     grid_background = deterministic_score(background_mean_grid, chirps)
-    grid_analysis = deterministic_score(analysis_mean_grid, chirps)
+    grid_gauge = deterministic_score(gauge_mean_grid, chirps)
+    grid_combined = deterministic_score(combined_mean_grid, chirps)
 
     daily = []
     for day in range(len(selected)):
         b = ensemble_score(background_eval[:, day], observed_eval[day])
-        a = ensemble_score(analysis_eval[:, day], observed_eval[day])
+        g = ensemble_score(gauge_eval[:, day], observed_eval[day])
+        c = ensemble_score(combined_eval[:, day], observed_eval[day])
         daily.append(
             {
                 "date": str(selected_times[day].astype("datetime64[D]")),
                 "background": b,
-                "analysis": a,
-                "crps_reduction_percent": percent_reduction(b, a, "crps_mm"),
+                "gauges_only": g,
+                "gauges_plus_imerg": c,
+                "background_to_gauges_crps_reduction_percent": percent_reduction(
+                    b, g, "crps_mm"
+                ),
+                "background_to_combined_crps_reduction_percent": percent_reduction(
+                    b, c, "crps_mm"
+                ),
             }
         )
 
@@ -365,7 +560,11 @@ def main() -> None:
         and int(str(np.datetime64(args.end, "Y"))[:4]) <= int(train_years[1])
     )
     report = {
-        "experiment": "May 2018 real-BMD gauge-only DA process example",
+        "experiment": (
+            "May 2018 real-BMD plus real-IMERG DA process example"
+            if imerg is not None
+            else "May 2018 real-BMD gauge-only DA process example"
+        ),
         "scope": {
             "start": args.start,
             "end": args.end,
@@ -379,9 +578,19 @@ def main() -> None:
                 if in_training_period
                 else "temporally independent if checkpoint metadata are correct"
             ),
-            "imerg_assimilated": False,
+            "imerg_assimilated": imerg is not None,
+            "imerg_file": args.imerg,
             "imerg_note": (
-                "Gauge-only gate; real IMERG ingestion and bias correction remain separate."
+                "Native GPM IMERG Final V07B precipitation and randomError are used. "
+                "No fitted bias correction is applied, so this is a bounded process "
+                "test and not the final real-data configuration."
+                if imerg is not None
+                else "Gauge-only run; no IMERG observation was supplied."
+            ),
+            "independence_note": (
+                "IMERG Final is gauge-adjusted and CHIRPS is gauge-based; neither should "
+                "be treated as independent truth against the same BMD network. Headline "
+                "scores use BMD stations withheld from this assimilation only."
             ),
             "timing_note": (
                 "Confirm the BMD 24-hour accumulation boundary against CPC/CHIRPS dates "
@@ -399,25 +608,52 @@ def main() -> None:
             "selection": "deterministic farthest-point spatial holdout",
         },
         "observation_error": {
-            "sigma_transformed": float(gauge_config["sigma_obs"]),
-            "representativeness_transformed": float(gauge_config["representativeness"]),
-            "note": "Provisional OSSE values; tune with rotated real-gauge withholding later.",
+            "gauges": {
+                "sigma_transformed": float(gauge_config["sigma_obs"]),
+                "representativeness_transformed": float(
+                    gauge_config["representativeness"]
+                ),
+            },
+            "imerg": (
+                {
+                    "native": "per-footprint V07B randomError in mm/day",
+                    "conversion": "symmetric physical interval transformed to model space",
+                    "sigma_floor_transformed": float(imerg_config["sigma_obs"]),
+                    "representativeness_transformed": float(
+                        imerg_config["representativeness"]
+                    ),
+                    "spatial_correlation_cells": float(
+                        imerg_config.get("error_corr_cells", 0.0)
+                    ),
+                    "valid_footprints": int(np.isfinite(imerg["precipitation"]).sum()),
+                }
+                if imerg is not None
+                else None
+            ),
+            "note": "Provisional values; tune with rotated real-gauge withholding later.",
         },
         "withheld_gauges": {
             "background": background_score,
+            "gauges_only": gauge_score,
+            "gauges_plus_imerg": combined_score,
             "analysis": analysis_score,
-            "crps_reduction_percent": percent_reduction(
-                background_score, analysis_score, "crps_mm"
+            "background_to_gauges_crps_reduction_percent": percent_reduction(
+                background_score, gauge_score, "crps_mm"
             ),
-            "rmse_reduction_percent": percent_reduction(
-                background_score, analysis_score, "rmse_mm"
+            "background_to_combined_crps_reduction_percent": percent_reduction(
+                background_score, combined_score, "crps_mm"
+            ),
+            "gauges_to_combined_crps_reduction_percent": percent_reduction(
+                gauge_score, combined_score, "crps_mm"
             ),
             "chirps": chirps_score,
             "cpc_condition": condition_score,
+            "imerg": imerg_score,
         },
         "chirps_grid_consistency": {
             "background": grid_background,
-            "analysis": grid_analysis,
+            "gauges_only": grid_gauge,
+            "gauges_plus_imerg": grid_combined,
             "interpretation": (
                 "CHIRPS is the checkpoint target and May 2018 is in training; these are "
                 "consistency diagnostics, not independent truth scores."
@@ -431,13 +667,30 @@ def main() -> None:
         args.out,
         background=background,
         analysis=analysis,
+        analysis_gauge=analysis_gauge,
+        analysis_combined=(analysis if analysis_combined is None else analysis_combined),
         chirps=chirps,
         condition=condition,
+        imerg=(
+            np.full((len(selected), grid.nlat // imerg_factor, grid.nlon // imerg_factor), np.nan)
+            if imerg is None
+            else imerg["precipitation"]
+        ),
+        imerg_random_error=(
+            np.full((len(selected), grid.nlat // imerg_factor, grid.nlon // imerg_factor), np.nan)
+            if imerg is None
+            else imerg["random_error"]
+        ),
         gauge_mm=gauge_mm,
         background_at_stations=background_at_stations,
         analysis_at_stations=analysis_at_stations,
+        gauge_analysis_at_stations=gauge_at_stations,
+        combined_analysis_at_stations=combined_at_stations,
         chirps_at_stations=chirps_at_stations,
         condition_at_stations=condition_at_stations,
+        imerg_at_stations=(
+            np.full_like(gauge_mm, np.nan) if imerg_at_stations is None else imerg_at_stations
+        ),
         station_id=stations.ids,
         station_name=station_names,
         station_lat=stations.lat,
@@ -453,9 +706,8 @@ def main() -> None:
     print(f"wrote {args.out}")
     print(f"wrote {args.report}")
     print(
-        f"withheld CRPS {background_score['crps_mm']:.2f} -> "
-        f"{analysis_score['crps_mm']:.2f} "
-        f"({report['withheld_gauges']['crps_reduction_percent']:+.1f}%)"
+        f"withheld CRPS background {background_score['crps_mm']:.2f}; "
+        f"gauges {gauge_score['crps_mm']:.2f}; combined {combined_score['crps_mm']:.2f}"
     )
 
 

@@ -168,8 +168,19 @@ The job converts the source without modifying it, assimilates 24 of the 30
 available stations, withholds six geographically spread stations, and writes
 station-space diagnostics plus spatial maps. May 2018 is inside the CPC
 checkpoint's training period, so this is a workflow demonstration rather than
-an independent temporal skill estimate. The example is gauge-only by design;
-real IMERG ingestion and bias correction remain the next observing-system gate.
+an independent temporal skill estimate.
+
+If the 31 already-downloaded daily V07B files are under `data/imerg`, run the
+three-arm background versus gauges versus gauges+IMERG process experiment:
+
+```bash
+slurm/submit_bmd_imerg_example.sh
+```
+
+It strictly validates the daily inventory and IMERG variables, uses native
+`randomError` and retrieval-count QC, and creates metric-matrix, calibration,
+and spatial-map suites. The bounded run is intentionally unbias-corrected;
+passing it validates ingestion and DA behavior, not final product skill.
 
 ## Conditioning experiments
 

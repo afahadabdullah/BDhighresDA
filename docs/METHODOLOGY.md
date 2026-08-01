@@ -457,8 +457,10 @@ The most common silent bug in this kind of study.
 - ERA5 `tp` is a *backward* hourly accumulation, so day D = sum of steps
   01:00(D) … 00:00(D+1). The Earthmover extraction script applies this shift
   before writing each daily annual file.
-- IMERG `3IMERGDF` is already 00–24 UTC but stores a **rate in mm/hr** —
-  multiply by 24.
+- IMERG `3IMERGDF` is already 00–24 UTC and V07 daily `precipitation` is stored
+  in **mm/day**. Do not multiply it by 24. The daily field was formed upstream
+  from the valid half-hourly retrievals; ingest `precipitation_cnt` and
+  `randomError` alongside it for coverage QC and observation uncertainty.
 - State variables are averaged over 00–24 UTC of day D.
 
 Verify by correlating ERA5 `tp` with CHIRPS at lags −2…+2 days. The peak must

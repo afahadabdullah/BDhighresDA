@@ -410,6 +410,59 @@ Do not choose a later checkpoint merely because it trained longer: use the
 checkpoint with the lowest fixed-case validation CRPS (currently the `best.pt`
 selection, observed near epoch 40 in the reported run).
 
+## Run the May 2018 BMD + real-IMERG experiment
+
+The combined experiment uses the existing remote inputs without moving or
+renaming them:
+
+```text
+data/bmd/bmd.csv
+data/bmd/Stations.csv
+data/imerg/3B-DAY.MS.MRG.3IMERG.20180501-S000000-E235959.V07B.nc4
+...
+data/imerg/3B-DAY.MS.MRG.3IMERG.20180531-S000000-E235959.V07B.nc4
+```
+
+Submit from the repository root:
+
+```bash
+slurm/submit_bmd_imerg_example.sh
+```
+
+Before requesting a GPU analysis, the job performs two strict preflights. It
+converts the two legacy BMD files to the canonical daily table, and it requires
+exactly one IMERG V07B granule for every date from May 1 through May 31. Each
+granule must contain `precipitation`, `randomError`, and
+`precipitation_cnt`. The regional preparation keeps exact 0.1-degree
+footprints nested over the model's 0.05-degree grid and, by default, rejects a
+footprint when fewer than 40 of 48 half-hourly estimates contributed.
+
+The GPU stage uses identical analysis-sampler seeds for the gauges-only and
+gauges+IMERG arms, always with the same six BMD stations withheld. IMERG enters
+through a physical 2x2 block-mean operator. Its per-footprint native
+`randomError` is converted from mm/day into the checkpoint's precipitation
+transform, combined with an uncertainty floor and representativeness term, and
+perturbed with the configured spatial correlation. Outputs are:
+
+```text
+data/processed/imerg_bd_may2018.nc
+data/processed/imerg_bd_may2018_qc.json
+data/processed/bmd_imerg_may2018_example.npz
+data/processed/bmd_imerg_may2018_example.json
+data/processed/bmd_imerg_may2018_diagnostics.png
+data/processed/bmd_imerg_may2018_spatial.png
+```
+
+The metric matrix, withheld-station scatter/rank histograms, and spatial case
+suite compare background, gauges only, and gauges+IMERG. Read the withheld-BMD
+CRPS/RMSE first; a visually sharper map is not evidence of improvement.
+
+This is still a process experiment. The CPC prior was trained through 2018;
+IMERG Final is gauge-adjusted; CHIRPS is gauge-based; and this first bounded
+run does not fit an IMERG-to-reference bias correction. The next scientific
+gate is rotated station withholding, a bias-correction fit outside the test
+period, and evaluation in years excluded from prior training.
+
 ## Submit real-data assimilation
 
 After training has produced `runs/prior_h100/best.pt`, submit:

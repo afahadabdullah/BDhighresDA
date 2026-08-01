@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """Download GPM IMERG Final Run daily precipitation (0.1 deg) from GES DISC.
 
-IMERG is the *first-stage correction*: it is an independent, multi-satellite
-observation of where and how much it rained, at 10 km, and it enters the model
-as a conditioning channel.  ERA5 alone is known to badly misplace monsoon
-convection over the Bay of Bengal / Meghalaya barrier; IMERG fixes most of
-that before the station guidance ever runs.
+IMERG is an observation of where and how much it rained at 0.1 degrees.  It is
+kept outside the training Zarr and enters the inference-time likelihood through
+the physical block-average observation operator; it is not a conditioning
+channel.
 
 Availability: 2000-06-01 onwards (V07 Final).  This is why the training plan
 has two stages -- see docs/METHODOLOGY.md.
@@ -51,11 +50,10 @@ def main():
 
     urls = []
     for d in daterange(a, b):
-        doy = d.timetuple().tm_yday
         fn = FNAME.format(ymd=d.strftime("%Y%m%d"))
         if (out / fn).exists():
             continue
-        urls.append(f"{BASE}/{d.year}/{doy:03d}/{fn}")
+        urls.append(f"{BASE}/{d.year}/{d.month:02d}/{fn}")
 
     if not urls:
         print("nothing to download")
@@ -71,7 +69,7 @@ def main():
          "--save-cookies", str(Path.home() / ".urs_cookies"),
          "--keep-session-cookies", "--auth-no-challenge=on", "--content-disposition",
          "-q", "-nc", "-P", str(out)],
-        check=False,
+        check=True,
     )
     listfile.unlink(missing_ok=True)
 
