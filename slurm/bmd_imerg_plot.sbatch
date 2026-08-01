@@ -34,8 +34,11 @@ mkdir -p "$MPLCONFIGDIR" data/processed logs
 DUMP="${BMD_DUMP:-data/processed/bmd_imerg_may2018_example.npz}"
 REPORT="${BMD_REPORT:-data/processed/bmd_imerg_may2018_example.json}"
 DIAGNOSTICS="${BMD_DIAGNOSTICS:-data/processed/bmd_imerg_may2018_diagnostics.png}"
+EVENTS="${BMD_EVENTS:-data/processed/bmd_imerg_may2018_events.png}"
+STATION_COMPARISON="${BMD_STATION_COMPARISON:-data/processed/bmd_imerg_may2018_station_comparison.png}"
 SPATIAL="${BMD_SPATIAL:-data/processed/bmd_imerg_may2018_spatial.png}"
-CHIRPS_SPATIAL="${BMD_CHIRPS_SPATIAL:-data/processed/bmd_imerg_may2018_chirps_spatial.png}"
+INTERCOMPARISON="${BMD_INTERCOMPARISON:-${BMD_CHIRPS_SPATIAL:-data/processed/bmd_imerg_may2018_intercomparison.png}}"
+EVALUATION="${BMD_EVALUATION:-data/processed/bmd_imerg_may2018_evaluation.json}"
 
 for required in "$DUMP" "$REPORT"; do
     [[ -f "$required" ]] || { echo "ERROR: required file not found: $required"; exit 1; }
@@ -45,10 +48,16 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --dump "$DUMP" \
     --report "$REPORT" \
     --out-diagnostics "$DIAGNOSTICS" \
+    --out-events "$EVENTS" \
+    --out-station-comparison "$STATION_COMPARISON" \
     --out-spatial "$SPATIAL" \
-    --out-chirps-spatial "$CHIRPS_SPATIAL"
+    --out-intercomparison "$INTERCOMPARISON" \
+    --out-evaluation "$EVALUATION"
 
 echo "Plot recovery complete."
 echo "Diagnostics: $DIAGNOSTICS"
+echo "Rainfall-event evaluation: $EVENTS"
+echo "Station-collocated product comparison: $STATION_COMPARISON"
 echo "Spatial cases: $SPATIAL"
-echo "CHIRPS spatial evaluation: $CHIRPS_SPATIAL"
+echo "Non-independent product intercomparison: $INTERCOMPARISON"
+echo "Withheld-BMD evaluation: $EVALUATION"

@@ -22,8 +22,11 @@ export IMERG_QC="${IMERG_QC:-data/processed/imerg_bd_controlled_20180501_05_qc.j
 export BMD_DUMP="${BMD_DUMP:-data/processed/bmd_imerg_controlled_20180501_05.npz}"
 export BMD_REPORT="${BMD_REPORT:-data/processed/bmd_imerg_controlled_20180501_05.json}"
 export BMD_DIAGNOSTICS="${BMD_DIAGNOSTICS:-data/processed/bmd_imerg_controlled_20180501_05_diagnostics.png}"
+export BMD_EVENTS="${BMD_EVENTS:-data/processed/bmd_imerg_controlled_20180501_05_events.png}"
+export BMD_STATION_COMPARISON="${BMD_STATION_COMPARISON:-data/processed/bmd_imerg_controlled_20180501_05_station_comparison.png}"
 export BMD_SPATIAL="${BMD_SPATIAL:-data/processed/bmd_imerg_controlled_20180501_05_spatial.png}"
-export BMD_CHIRPS_SPATIAL="${BMD_CHIRPS_SPATIAL:-data/processed/bmd_imerg_controlled_20180501_05_chirps_spatial.png}"
+export BMD_INTERCOMPARISON="${BMD_INTERCOMPARISON:-data/processed/bmd_imerg_controlled_20180501_05_intercomparison.png}"
+export BMD_EVALUATION="${BMD_EVALUATION:-data/processed/bmd_imerg_controlled_20180501_05_evaluation.json}"
 
 mkdir -p logs
 exec sbatch "$@" slurm/bmd_imerg_example.sbatch

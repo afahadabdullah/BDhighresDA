@@ -466,9 +466,12 @@ data/processed/imerg_bd_controlled_20180501_05.nc
 data/processed/imerg_bd_controlled_20180501_05_qc.json
 data/processed/bmd_imerg_controlled_20180501_05.npz
 data/processed/bmd_imerg_controlled_20180501_05.json
+data/processed/bmd_imerg_controlled_20180501_05_evaluation.json
 data/processed/bmd_imerg_controlled_20180501_05_diagnostics.png
+data/processed/bmd_imerg_controlled_20180501_05_events.png
+data/processed/bmd_imerg_controlled_20180501_05_station_comparison.png
 data/processed/bmd_imerg_controlled_20180501_05_spatial.png
-data/processed/bmd_imerg_controlled_20180501_05_chirps_spatial.png
+data/processed/bmd_imerg_controlled_20180501_05_intercomparison.png
 ```
 
 The metric matrix, withheld-station scatter/rank histograms, and ten-column
@@ -476,6 +479,35 @@ spatial suite compare all five arms. The JSON also records sequential gauge
 innovation RMSE before and after each update. Read withheld-BMD CRPS/RMSE and
 the IMERG-only physical range first; a visually sharper map is not evidence of
 improvement.
+
+The plotting stage now treats the identical withheld BMD station-days as the
+only primary reference. It collocates raw CPC, raw IMERG, CHIRPS, an IDW gauge
+baseline, the background ensemble mean, and every DA ensemble mean at those
+stations. Probabilistic DA rows additionally receive CRPS/CRPSS, rank,
+50/80/90-percent coverage, Brier/reliability and threshold CSI diagnostics.
+CHIRPS is retained only in a plot explicitly labelled as a non-independent
+gridded-product intercomparison.
+
+Completed controlled and sensitivity dumps can all be re-evaluated without a
+GPU or a new DA run:
+
+```bash
+slurm/submit_bmd_imerg_replot_all_5day.sh
+```
+
+The CPU job skips unavailable cases, produces `*_evaluation.json`,
+`*_diagnostics.png`, `*_events.png`, `*_station_comparison.png`,
+`*_spatial.png`, and `*_intercomparison.png` for each available dump, then
+writes the cross-case selection products:
+
+```text
+data/processed/bmd_imerg_5day_method_selection.json
+data/processed/bmd_imerg_5day_method_selection.png
+```
+
+The fusion gate is strict: simultaneous or sequential DA must have lower
+withheld-BMD CRPS than gauges-only. Five days and one station split remain a
+process gate; they cannot support a final product-skill claim.
 
 After the baseline controlled run, submit the requested satellite-weight and
 localization sensitivity:
@@ -490,13 +522,9 @@ gauge localizations from the same generated IMERG ensemble, so localization
 does not duplicate GPU sampling. Files are labelled `r2_l75-100`,
 `r4_l75-100`, and `r8_l75-100`.
 
-Every report includes `chirps_spatial_evaluation`, where CHIRPS is explicitly
-the 0.05-degree gridded target and every background/DA ensemble is scored using
-gridpoint CRPS, ensemble-mean RMSE/MAE/bias/correlation, spread/skill and 90%
-coverage. Each case also writes `*_chirps_spatial.png`: period-mean fields,
-mean-error maps and temporal-RMSE maps for CHIRPS, background, gauges-only,
-IMERG-only, simultaneous, and IMERG-to-gauges products. These remain
-training-period consistency evaluations, not independent validation.
+Legacy run reports still contain `chirps_spatial_evaluation` for reproducibility,
+but it is no longer used for method selection. Newly generated plots do not
+call CHIRPS a target or label differences from it as model error.
 
 If IMERG and CHIRPS features look displaced, do not shift either product by
 eye. Run the footprint-matched timing/geolocation diagnostic on the completed

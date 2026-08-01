@@ -185,6 +185,18 @@ and ten-column spatial-map suites. The bounded run is intentionally
 unbias-corrected; passing it validates ingestion and DA behavior, not final
 product skill.
 
+Regenerate the scientifically revised evaluation for every completed five-day
+case on a CPU node:
+
+```bash
+slurm/submit_bmd_imerg_replot_all_5day.sh
+```
+
+This collocates CPC, IMERG, CHIRPS, IDW, background, and all DA products to the
+same withheld BMD station-days. Method ranking uses withheld-BMD CRPS and
+event/calibration diagnostics only. The gridded CHIRPS figure is replaced by a
+clearly labelled non-independent product intercomparison.
+
 Run the follow-up IMERG-weight/localization sensitivity with:
 
 ```bash
@@ -192,8 +204,8 @@ slurm/submit_bmd_imerg_sensitivity_5day.sh
 ```
 
 It tests extra satellite R multipliers 2/4/8 and serial gauge localization at
-75/100 km. Each case treats CHIRPS as the explicit gridded target and writes a
-dedicated mean/bias/temporal-RMSE spatial comparison for all DA products.
+75/100 km. Use the CPU replot command above after the array completes to apply
+one consistent withheld-BMD fusion gate across every case.
 
 To test whether an apparent IMERG/CHIRPS displacement is a date lag or a fixed
 grid shift, use the CPU-only, footprint-matched diagnostic:
