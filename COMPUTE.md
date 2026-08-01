@@ -457,6 +457,13 @@ The metric matrix, withheld-station scatter/rank histograms, and spatial case
 suite compare background, gauges only, and gauges+IMERG. Read the withheld-BMD
 CRPS/RMSE first; a visually sharper map is not evidence of improvement.
 
+If assimilation completed and only the plotting stage failed, preserve the
+expensive NPZ and resume on a CPU node:
+
+```bash
+slurm/submit_bmd_imerg_plot.sh
+```
+
 This is still a process experiment. The CPC prior was trained through 2018;
 IMERG Final is gauge-adjusted; CHIRPS is gauge-based; and this first bounded
 run does not fit an IMERG-to-reference bias correction. The next scientific

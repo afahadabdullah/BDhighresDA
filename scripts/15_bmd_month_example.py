@@ -256,7 +256,7 @@ def main() -> None:
         .first()
         .reindex(stations.ids)
         .astype(str)
-        .to_numpy()
+        .to_numpy(dtype=str)
     )
     print(
         f"[bmd] {selected_times[0].astype('datetime64[D]')} to "
@@ -691,8 +691,10 @@ def main() -> None:
         imerg_at_stations=(
             np.full_like(gauge_mm, np.nan) if imerg_at_stations is None else imerg_at_stations
         ),
-        station_id=stations.ids,
-        station_name=station_names,
+        # Fixed-width Unicode keeps the NPZ non-pickled and safely loadable
+        # with allow_pickle=False.
+        station_id=np.asarray(stations.ids).astype(str),
+        station_name=np.asarray(station_names).astype(str),
         station_lat=stations.lat,
         station_lon=stations.lon,
         assim_idx=assim_idx,

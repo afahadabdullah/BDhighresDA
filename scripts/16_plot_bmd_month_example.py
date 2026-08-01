@@ -48,7 +48,20 @@ def add_station_markers(axis, lon, lat, assim_idx, eval_idx, labels=False):
 
 def main() -> None:
     args = parse_args()
-    data = np.load(args.dump, allow_pickle=False)
+    try:
+        data = np.load(args.dump, allow_pickle=False)
+        # Access the legacy troublemaker immediately: NpzFile defers array
+        # decoding until __getitem__, so np.load alone does not raise.
+        _ = data["station_name"]
+    except ValueError as exc:
+        if "Object arrays cannot be loaded" not in str(exc):
+            raise
+        # Backward compatibility for dumps created before station labels were
+        # stored as fixed-width Unicode. These files are generated locally by
+        # script 15; never enable pickle for an untrusted external NPZ.
+        data.close()
+        data = np.load(args.dump, allow_pickle=True)
+        print("WARNING: loading legacy locally-generated object-string labels")
     report = json.loads(Path(args.report).read_text())
     time = data["time"].astype("datetime64[ns]").astype("datetime64[D]")
     names = data["station_name"].astype(str)
