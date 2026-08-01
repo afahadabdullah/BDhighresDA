@@ -362,6 +362,50 @@ OSSE_DAYS=60 OSSE_MEMBERS=24 OSSE_WITHHOLD=0.25 slurm/submit_osse.sh
 OSSE_CKPT=runs/prior_h100_cpc/epoch_0040.pt slurm/submit_osse.sh
 ```
 
+## Run the May 2018 real-BMD process example
+
+The historical BMD files on Prism are expected at:
+
+```text
+data/bmd/bmd.csv
+data/bmd/Stations.csv
+```
+
+The rainfall file is a station-month matrix with day-of-month columns and
+`***` missing values, not the canonical long-form table expected by the DA
+loader. The dedicated job converts it, preserves the source files, performs
+the real-gauge analysis, and creates the evaluation plots:
+
+```bash
+slurm/submit_bmd_example.sh
+```
+
+May 2018 was selected because it provides 930 valid observations from 30
+stations, a 54.7% wet-station-day fraction, and events up to 179 mm/day. June
+has only 23 stations and July only 16. Six geographically spread stations are
+withheld and never enter the likelihood; all headline scores use those gauges.
+
+Outputs are:
+
+```text
+data/processed/bmd_daily_may2018.csv
+data/processed/bmd_stations_may2018.csv
+data/processed/bmd_qc_may2018.json
+data/processed/bmd_may2018_example.npz
+data/processed/bmd_may2018_example.json
+data/processed/bmd_may2018_diagnostics.png
+data/processed/bmd_may2018_spatial.png
+```
+
+This is deliberately a process gate, not the paper's final validation: 2018 is
+inside the CPC checkpoint's 1981-2018 training period. It tests the legacy BMD
+conversion, physical observation operator, perturbed-observation guidance,
+spatial withholding, ensemble calibration, and plot suite. The first run is
+gauge-only because the packed prior dataset does not yet contain an ingestible,
+bias-corrected real IMERG observation stream. After this passes, add real IMERG
+and repeat with temporally held-out BMD data or a retrained prior whose test
+period overlaps the BMD archive.
+
 Do not choose a later checkpoint merely because it trained longer: use the
 checkpoint with the lowest fixed-case validation CRPS (currently the `best.pt`
 selection, observed near epoch 40 in the reported run).

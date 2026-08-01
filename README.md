@@ -155,6 +155,22 @@ python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.
 | **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
 | **DEM access** | No key required; Copernicus GLO-90 is downloaded anonymously from the AWS Open Data Registry |
 
+The available historical BMD delivery uses a different station-month matrix
+format (`data/bmd/bmd.csv`) plus a coordinate catalogue
+(`data/bmd/Stations.csv`). Convert and run the bounded May 2018 real-gauge
+process example on Prism with:
+
+```bash
+slurm/submit_bmd_example.sh
+```
+
+The job converts the source without modifying it, assimilates 24 of the 30
+available stations, withholds six geographically spread stations, and writes
+station-space diagnostics plus spatial maps. May 2018 is inside the CPC
+checkpoint's training period, so this is a workflow demonstration rather than
+an independent temporal skill estimate. The example is gauge-only by design;
+real IMERG ingestion and bias correction remain the next observing-system gate.
+
 ## Conditioning experiments
 
 `tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·
