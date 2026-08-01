@@ -498,6 +498,23 @@ mean-error maps and temporal-RMSE maps for CHIRPS, background, gauges-only,
 IMERG-only, simultaneous, and IMERG-to-gauges products. These remain
 training-period consistency evaluations, not independent validation.
 
+If IMERG and CHIRPS features look displaced, do not shift either product by
+eye. Run the footprint-matched timing/geolocation diagnostic on the completed
+five-day dump:
+
+```bash
+slurm/submit_imerg_chirps_alignment.sh
+```
+
+It first averages each 2x2 group of 0.05-degree CHIRPS cells into the exact
+0.1-degree IMERG support, then searches +/-2 days and +/-4 coarse cells. In the
+report, positive `lag_days` compares CHIRPS day `t` with IMERG day `t+lag`;
+positive `dx_cells` shifts IMERG east and positive `dy_cells` shifts it north.
+The output files are
+`data/processed/imerg_chirps_alignment_20180501_05.{json,png}`. Five days can
+identify an obvious ingestion error, but a proposed timestamp or coordinate
+change must be reproduced over at least a full month.
+
 If assimilation completed and only the plotting stage failed, preserve the
 expensive NPZ and resume on a CPU node:
 

@@ -195,6 +195,17 @@ It tests extra satellite R multipliers 2/4/8 and serial gauge localization at
 75/100 km. Each case treats CHIRPS as the explicit gridded target and writes a
 dedicated mean/bias/temporal-RMSE spatial comparison for all DA products.
 
+To test whether an apparent IMERG/CHIRPS displacement is a date lag or a fixed
+grid shift, use the CPU-only, footprint-matched diagnostic:
+
+```bash
+slurm/submit_imerg_chirps_alignment.sh
+```
+
+It scores +/-2-day lags separately from small two-dimensional shifts and
+records explicit sign conventions in the output JSON. Treat a five-day result
+as exploratory; confirm it over a full month before altering data coordinates.
+
 ## Conditioning experiments
 
 `tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·
