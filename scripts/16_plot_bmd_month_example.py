@@ -22,6 +22,10 @@ def parse_args() -> argparse.Namespace:
         "--out-diagnostics", default="data/processed/bmd_may2018_diagnostics.png"
     )
     parser.add_argument("--out-spatial", default="data/processed/bmd_may2018_spatial.png")
+    parser.add_argument(
+        "--out-chirps-spatial",
+        default="data/processed/bmd_may2018_chirps_spatial.png",
+    )
     return parser.parse_args()
 
 
@@ -95,7 +99,8 @@ def main() -> None:
     control_text = (
         f"stride {imerg_error.get('footprint_stride', '?')}; "
         f"R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
-        f"gauge localization {sequential_config.get('support_km', np.nan):.0f} km"
+        f"gauge localization "
+        f"{sequential_config.get('primary_support_km', sequential_config.get('support_km', np.nan)):.0f} km"
         if has_imerg and imerg_error
         else "gauge-only configuration"
     )
@@ -141,33 +146,38 @@ def main() -> None:
     gauge_report = report["withheld_gauges"]
     metric_names = ["RMSE", "MAE", "Bias", "CRPS", "Spread/skill", "Cover90"]
     keys = ["rmse_mm", "mae_mm", "bias_mm", "crps_mm", "spread_skill", "coverage_90"]
+    metric_rows = [
+        ("Background", gauge_report["background"]),
+        ("Gauges", gauge_report.get("gauges_only", gauge_report["analysis"])),
+        ("IMERG", gauge_report.get("imerg_only", gauge_report["analysis"])),
+        (
+            "Simultaneous",
+            gauge_report.get(
+                "simultaneous",
+                gauge_report.get("gauges_plus_imerg", gauge_report["analysis"]),
+            ),
+        ),
+    ]
+    localization_sensitivity = sequential_config.get("localization_sensitivity", {})
+    if localization_sensitivity:
+        metric_rows.extend(
+            (
+                f"IMERG → gauges {value.get('support_km', key)} km",
+                value["withheld_gauges"],
+            )
+            for key, value in sorted(
+                localization_sensitivity.items(), key=lambda item: float(item[0])
+            )
+        )
+    else:
+        metric_rows.append(
+            (
+                "IMERG → gauges",
+                gauge_report.get("imerg_then_gauges", gauge_report["analysis"]),
+            )
+        )
     matrix = np.array(
-        [
-            [gauge_report["background"].get(key, np.nan) for key in keys],
-            [
-                gauge_report.get("gauges_only", gauge_report["analysis"]).get(key, np.nan)
-                for key in keys
-            ],
-            [
-                gauge_report.get("imerg_only", gauge_report["analysis"]).get(
-                    key, np.nan
-                )
-                for key in keys
-            ],
-            [
-                gauge_report.get(
-                    "simultaneous",
-                    gauge_report.get("gauges_plus_imerg", gauge_report["analysis"]),
-                ).get(key, np.nan)
-                for key in keys
-            ],
-            [
-                gauge_report.get("imerg_then_gauges", gauge_report["analysis"]).get(
-                    key, np.nan
-                )
-                for key in keys
-            ],
-        ],
+        [[score.get(key, np.nan) for key in keys] for _, score in metric_rows],
         dtype=float,
     )
     # Normalize each column only for colouring; annotations retain physical values.
@@ -182,11 +192,9 @@ def main() -> None:
     axis.imshow(colour, cmap="Blues", vmin=0, vmax=1, aspect="auto")
     axis.set_xticks(np.arange(len(metric_names)))
     axis.set_xticklabels(metric_names, rotation=35, ha="right")
-    axis.set_yticks(np.arange(5))
-    axis.set_yticklabels(
-        ["Background", "Gauges", "IMERG", "Simultaneous", "IMERG → gauges"]
-    )
-    for row in range(5):
+    axis.set_yticks(np.arange(len(metric_rows)))
+    axis.set_yticklabels([label for label, _ in metric_rows])
+    for row in range(len(metric_rows)):
         for column in range(len(metric_names)):
             value = matrix[row, column]
             axis.text(column, row, f"{value:.2f}", ha="center", va="center", fontsize=8)
@@ -403,8 +411,103 @@ def main() -> None:
     Path(args.out_spatial).parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(args.out_spatial, dpi=180)
     plt.close(figure)
+
+    # ------------------ explicit gridded CHIRPS evaluation ------------------
+    products = [
+        ("Background", background),
+        ("Gauges only", analysis_gauge),
+        ("IMERG only", analysis_imerg),
+        ("Simultaneous", analysis_combined),
+        ("IMERG → gauges", analysis),
+    ]
+    target_mean = np.where(
+        valid_grid, np.nan_to_num(chirps, nan=0.0).mean(axis=0), np.nan
+    )
+    product_daily_means = [
+        np.where(
+            valid_grid[None], np.nan_to_num(value, nan=0.0).mean(axis=1), np.nan
+        )
+        for _, value in products
+    ]
+    product_period_means = [
+        np.where(valid_grid, np.nan_to_num(value, nan=0.0).mean(axis=0), np.nan)
+        for value in product_daily_means
+    ]
+    bias_maps = [
+        np.where(
+            valid_grid, np.nan_to_num(value - chirps, nan=0.0).mean(axis=0), np.nan
+        )
+        for value in product_daily_means
+    ]
+    rmse_maps = [
+        np.where(
+            valid_grid,
+            np.sqrt(np.nan_to_num((value - chirps) ** 2, nan=0.0).mean(axis=0)),
+            np.nan,
+        )
+        for value in product_daily_means
+    ]
+    rain_limit = max(
+        10.0,
+        float(
+            np.nanpercentile(
+                np.stack([target_mean, *product_period_means]), 99
+            )
+        ),
+    )
+    bias_limit = max(
+        1.0, float(np.nanpercentile(np.abs(np.stack(bias_maps)), 99))
+    )
+    rmse_limit = max(1.0, float(np.nanpercentile(np.stack(rmse_maps), 99)))
+    figure, axes = plt.subplots(3, 6, figsize=(23, 11), constrained_layout=True)
+    chirps_scores = report.get("chirps_spatial_evaluation", {})
+    column_names = ["CHIRPS target", *[name for name, _ in products]]
+    row_fields = [
+        [target_mean, *product_period_means],
+        [np.where(valid_grid, 0.0, np.nan), *bias_maps],
+        [np.where(valid_grid, 0.0, np.nan), *rmse_maps],
+    ]
+    row_specs = [
+        ("viridis", 0.0, rain_limit, "Period mean (mm day$^{-1}$)"),
+        ("RdBu_r", -bias_limit, bias_limit, "Mean error vs CHIRPS (mm day$^{-1}$)"),
+        ("magma", 0.0, rmse_limit, "Temporal RMSE vs CHIRPS (mm day$^{-1}$)"),
+    ]
+    score_keys = [None, "background", "gauges_only", "imerg_only", "simultaneous",
+                  "imerg_then_gauges"]
+    for row, (cmap, lower, upper, row_label) in enumerate(row_specs):
+        for column, field in enumerate(row_fields[row]):
+            image = axes[row, column].imshow(
+                field, origin="lower", extent=extent, cmap=cmap, vmin=lower, vmax=upper
+            )
+            if row == 0:
+                title = column_names[column]
+                key = score_keys[column]
+                if key and key in chirps_scores:
+                    score = chirps_scores[key]
+                    title += (
+                        f"\nCRPS {score.get('crps_mm', np.nan):.2f}; "
+                        f"r {score.get('correlation', np.nan):.2f}"
+                    )
+                axes[row, column].set_title(title, fontsize=10)
+            if column == 0:
+                axes[row, column].set_ylabel(row_label, fontsize=9)
+            axes[row, column].tick_params(labelsize=7)
+            figure.colorbar(
+                image, ax=axes[row, column], orientation="horizontal",
+                fraction=0.045, pad=0.04,
+            )
+    figure.suptitle(
+        "CHIRPS-target spatial evaluation of background and DA products\n"
+        f"{time[0]} to {time[-1]}; all valid 0.05° land cells; training-period consistency, "
+        "not independent validation\n" + control_text,
+        fontsize=14,
+    )
+    Path(args.out_chirps_spatial).parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(args.out_chirps_spatial, dpi=180)
+    plt.close(figure)
     print(f"wrote {args.out_diagnostics}")
     print(f"wrote {args.out_spatial}")
+    print(f"wrote {args.out_chirps_spatial}")
 
 
 if __name__ == "__main__":

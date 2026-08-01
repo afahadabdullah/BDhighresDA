@@ -185,6 +185,16 @@ and ten-column spatial-map suites. The bounded run is intentionally
 unbias-corrected; passing it validates ingestion and DA behavior, not final
 product skill.
 
+Run the follow-up IMERG-weight/localization sensitivity with:
+
+```bash
+slurm/submit_bmd_imerg_sensitivity_5day.sh
+```
+
+It tests extra satellite R multipliers 2/4/8 and serial gauge localization at
+75/100 km. Each case treats CHIRPS as the explicit gridded target and writes a
+dedicated mean/bias/temporal-RMSE spatial comparison for all DA products.
+
 ## Conditioning experiments
 
 `tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·

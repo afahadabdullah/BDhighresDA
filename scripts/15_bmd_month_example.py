@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         default=150.0,
         help="compact-support radius for the serial EnSRF gauge update",
     )
+    parser.add_argument(
+        "--gauge-localizations-km",
+        default=None,
+        help="comma-separated localization sensitivity; last value is primary",
+    )
     parser.add_argument("--seed", type=int, default=201805)
     parser.add_argument("--out", default="data/processed/bmd_may2018_example.npz")
     parser.add_argument("--report", default="data/processed/bmd_may2018_example.json")
@@ -235,14 +240,23 @@ def percent_reduction(background: dict, analysis: dict, metric: str) -> float:
 
 def main() -> None:
     args = parse_args()
+    localization_values = (
+        [float(value) for value in args.gauge_localizations_km.split(",") if value]
+        if args.gauge_localizations_km
+        else [float(args.gauge_localization_km)]
+    )
+    if not localization_values:
+        raise ValueError("at least one gauge localization is required")
+    primary_localization = localization_values[-1]
+    localization_key = lambda value: f"{value:g}"  # noqa: E731
     if not 0 < args.withhold < 1:
         raise ValueError("--withhold must lie strictly between zero and one")
     if args.imerg_stride < 1:
         raise ValueError("--imerg-stride must be at least one")
     if args.imerg_r_multiplier <= 0:
         raise ValueError("--imerg-r-multiplier must be positive")
-    if args.gauge_localization_km <= 0:
-        raise ValueError("--gauge-localization-km must be positive")
+    if any(value <= 0 for value in localization_values):
+        raise ValueError("all gauge localizations must be positive")
     config = yaml.safe_load(Path(args.config).read_text())
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     training_config = checkpoint["cfg"]
@@ -407,8 +421,17 @@ def main() -> None:
     analysis_gauge = np.empty(shape, dtype=np.float32)
     analysis_imerg = np.empty(shape, dtype=np.float32) if imerg is not None else None
     analysis_combined = np.empty(shape, dtype=np.float32) if imerg is not None else None
-    analysis_sequential = np.empty(shape, dtype=np.float32) if imerg is not None else None
-    sequential_diagnostics: list[dict] = []
+    sequential_variants = (
+        {
+            localization_key(value): np.empty(shape, dtype=np.float32)
+            for value in localization_values
+        }
+        if imerg is not None
+        else {}
+    )
+    sequential_diagnostics: dict[str, list[dict]] = {
+        localization_key(value): [] for value in localization_values
+    }
     chirps = np.empty((len(selected), grid.nlat, grid.nlon), dtype=np.float32)
     condition = np.empty_like(chirps)
     cpc_full_index = (
@@ -571,23 +594,25 @@ def main() -> None:
                 float(gauge_config["sigma_obs"]) ** 2
                 + float(gauge_config["representativeness"]) ** 2
             )
-            sequential_mm, sequential_day = localized_serial_ensrf(
-                analysis_imerg[day_position],
-                gauge_mm[day_position, assim_idx],
-                stations.lat[assim_idx],
-                stations.lon[assim_idx],
-                grid,
-                transform,
-                valid,
-                observation_variance=gauge_variance,
-                localization_km=args.gauge_localization_km,
-                seed=day_seed + 3_000_000,
-            )
-            analysis_sequential[day_position] = sequential_mm
-            sequential_day["date"] = str(
-                selected_times[day_position].astype("datetime64[D]")
-            )
-            sequential_diagnostics.append(sequential_day)
+            for localization in localization_values:
+                key = localization_key(localization)
+                sequential_mm, sequential_day = localized_serial_ensrf(
+                    analysis_imerg[day_position],
+                    gauge_mm[day_position, assim_idx],
+                    stations.lat[assim_idx],
+                    stations.lon[assim_idx],
+                    grid,
+                    transform,
+                    valid,
+                    observation_variance=gauge_variance,
+                    localization_km=localization,
+                    seed=day_seed + 3_000_000,
+                )
+                sequential_variants[key][day_position] = sequential_mm
+                sequential_day["date"] = str(
+                    selected_times[day_position].astype("datetime64[D]")
+                )
+                sequential_diagnostics[key].append(sequential_day)
 
         chirps[day_position] = np.asarray(dataset.z["target"][int(data_index)][slices])
         if cpc_full_index is not None:
@@ -602,6 +627,11 @@ def main() -> None:
             flush=True,
         )
 
+    analysis_sequential = (
+        sequential_variants[localization_key(primary_localization)]
+        if sequential_variants
+        else None
+    )
     analysis = analysis_sequential if analysis_sequential is not None else analysis_gauge
     background_at_stations = sample_at_stations(background, grid, stations.lat, stations.lon)
     gauge_at_stations = sample_at_stations(
@@ -622,6 +652,10 @@ def main() -> None:
         if analysis_sequential is not None
         else gauge_at_stations
     )
+    sequential_variant_at_stations = {
+        key: sample_at_stations(value, grid, stations.lat, stations.lon)
+        for key, value in sequential_variants.items()
+    }
     analysis_at_stations = sequential_at_stations
     chirps_at_stations = sample_at_stations(chirps, grid, stations.lat, stations.lon)
     condition_at_stations = sample_at_stations(condition, grid, stations.lat, stations.lon)
@@ -651,6 +685,12 @@ def main() -> None:
     imerg_analysis_score = ensemble_score(imerg_analysis_eval, observed_eval)
     combined_score = ensemble_score(combined_eval, observed_eval)
     sequential_score = ensemble_score(sequential_eval, observed_eval)
+    sequential_variant_scores = {
+        key: ensemble_score(
+            np.moveaxis(value[:, :, eval_idx], 1, 0), observed_eval
+        )
+        for key, value in sequential_variant_at_stations.items()
+    }
     analysis_score = sequential_score
     chirps_score = deterministic_score(chirps_at_stations[:, eval_idx], observed_eval)
     condition_score = deterministic_score(condition_at_stations[:, eval_idx], observed_eval)
@@ -688,6 +728,36 @@ def main() -> None:
     grid_imerg = deterministic_score(imerg_analysis_mean_grid, chirps)
     grid_combined = deterministic_score(combined_mean_grid, chirps)
     grid_sequential = deterministic_score(sequential_mean_grid, chirps)
+    grid_sequential_variants = {
+        key: deterministic_score(
+            np.where(
+                valid[None], np.nan_to_num(value, nan=0.0).mean(axis=1), np.nan
+            ),
+            chirps,
+        )
+        for key, value in sequential_variants.items()
+    }
+    chirps_ensemble_scores = {
+        "background": ensemble_score(np.moveaxis(background, 1, 0), chirps),
+        "gauges_only": ensemble_score(np.moveaxis(analysis_gauge, 1, 0), chirps),
+        "imerg_only": ensemble_score(
+            np.moveaxis(
+                analysis_imerg if analysis_imerg is not None else analysis_gauge,
+                1,
+                0,
+            ),
+            chirps,
+        ),
+        "simultaneous": ensemble_score(
+            np.moveaxis(
+                analysis_combined if analysis_combined is not None else analysis_gauge,
+                1,
+                0,
+            ),
+            chirps,
+        ),
+        "imerg_then_gauges": ensemble_score(np.moveaxis(analysis, 1, 0), chirps),
+    }
 
     daily = []
     for day in range(len(selected)):
@@ -834,13 +904,39 @@ def main() -> None:
                 "consistency diagnostics, not independent truth scores."
             ),
         },
+        "chirps_spatial_evaluation": {
+            **chirps_ensemble_scores,
+            "target": "checkpoint-bound CHIRPS daily 0.05-degree field",
+            "domain": "all valid land grid cells and requested days, unweighted",
+            "interpretation": (
+                "CHIRPS is treated as the gridded target for comparing products, but "
+                "May 2018 lies inside checkpoint training and CHIRPS is gauge-based; "
+                "these are consistency scores, not independent validation."
+            ),
+            "sequential_localization_sensitivity": {
+                key: ensemble_score(np.moveaxis(value, 1, 0), chirps)
+                for key, value in sequential_variants.items()
+            },
+        },
         "sequential_update": {
             "method": "localized serial deterministic ensemble square-root filter",
             "state_space": "checkpoint precipitation-transform space",
             "observation_operator": "physical bilinear point gauge then transform",
             "localization": "Gaspari-Cohn compact support",
-            "support_km": float(args.gauge_localization_km),
-            "daily_innovations": sequential_diagnostics,
+            "primary_support_km": float(primary_localization),
+            "tested_support_km": localization_values,
+            "daily_innovations": sequential_diagnostics[
+                localization_key(primary_localization)
+            ],
+            "localization_sensitivity": {
+                key: {
+                    "support_km": float(key),
+                    "withheld_gauges": sequential_variant_scores[key],
+                    "chirps_grid_consistency": grid_sequential_variants[key],
+                    "daily_innovations": sequential_diagnostics[key],
+                }
+                for key in sequential_variants
+            },
         },
         "physical_ranges": {
             "background": physical_summary(background),
@@ -909,6 +1005,10 @@ def main() -> None:
         grid_lat=grid.lat,
         grid_lon=grid.lon,
         valid=valid,
+        **{
+            f"analysis_sequential_l{key}": value
+            for key, value in sequential_variants.items()
+        },
     )
     Path(args.report).write_text(json.dumps(report, indent=2, allow_nan=True) + "\n")
     print(f"wrote {args.out}")

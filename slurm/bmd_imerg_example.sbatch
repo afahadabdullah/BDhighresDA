@@ -48,6 +48,7 @@ IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-40}"
 IMERG_STRIDE="${IMERG_STRIDE:-3}"
 IMERG_R_MULTIPLIER="${IMERG_R_MULTIPLIER:-1.0}"
 GAUGE_LOCALIZATION_KM="${GAUGE_LOCALIZATION_KM:-150}"
+GAUGE_LOCALIZATIONS_KM="${GAUGE_LOCALIZATIONS_KM:-}"
 
 DAILY="${BMD_DAILY:-data/processed/bmd_daily_may2018.csv}"
 STATION_SUMMARY="${BMD_STATION_SUMMARY:-data/processed/bmd_stations_may2018.csv}"
@@ -58,6 +59,7 @@ DUMP="${BMD_DUMP:-data/processed/bmd_imerg_may2018_example.npz}"
 REPORT="${BMD_REPORT:-data/processed/bmd_imerg_may2018_example.json}"
 DIAGNOSTICS="${BMD_DIAGNOSTICS:-data/processed/bmd_imerg_may2018_diagnostics.png}"
 SPATIAL="${BMD_SPATIAL:-data/processed/bmd_imerg_may2018_spatial.png}"
+CHIRPS_SPATIAL="${BMD_CHIRPS_SPATIAL:-data/processed/bmd_imerg_may2018_chirps_spatial.png}"
 
 for required in "$RAINFALL" "$STATIONS" "$CKPT" "$CONFIG"; do
     [[ -f "$required" ]] || { echo "ERROR: required file not found: $required"; exit 1; }
@@ -72,6 +74,7 @@ echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
 echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
 echo "Sequential gauge localization: $GAUGE_LOCALIZATION_KM km"
+[[ -z "$GAUGE_LOCALIZATIONS_KM" ]] || echo "Localization sensitivity: $GAUGE_LOCALIZATIONS_KM km"
 echo "NOTE: 2018 is in checkpoint training; this is a process test, not final skill."
 echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 
@@ -104,6 +107,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --imerg-stride "$IMERG_STRIDE" \
     --imerg-r-multiplier "$IMERG_R_MULTIPLIER" \
     --gauge-localization-km "$GAUGE_LOCALIZATION_KM" \
+    --gauge-localizations-km "$GAUGE_LOCALIZATIONS_KM" \
     --out "$DUMP" \
     --report "$REPORT"
 
@@ -111,10 +115,12 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --dump "$DUMP" \
     --report "$REPORT" \
     --out-diagnostics "$DIAGNOSTICS" \
-    --out-spatial "$SPATIAL"
+    --out-spatial "$SPATIAL" \
+    --out-chirps-spatial "$CHIRPS_SPATIAL"
 
 echo "BMD + IMERG May 2018 experiment complete."
 echo "Metrics: $REPORT"
 echo "IMERG QC: $IMERG_QC"
 echo "Diagnostics: $DIAGNOSTICS"
 echo "Spatial cases: $SPATIAL"
+echo "CHIRPS spatial evaluation: $CHIRPS_SPATIAL"

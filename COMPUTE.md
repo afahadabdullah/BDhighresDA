@@ -468,6 +468,7 @@ data/processed/bmd_imerg_controlled_20180501_05.npz
 data/processed/bmd_imerg_controlled_20180501_05.json
 data/processed/bmd_imerg_controlled_20180501_05_diagnostics.png
 data/processed/bmd_imerg_controlled_20180501_05_spatial.png
+data/processed/bmd_imerg_controlled_20180501_05_chirps_spatial.png
 ```
 
 The metric matrix, withheld-station scatter/rank histograms, and ten-column
@@ -475,6 +476,27 @@ spatial suite compare all five arms. The JSON also records sequential gauge
 innovation RMSE before and after each update. Read withheld-BMD CRPS/RMSE and
 the IMERG-only physical range first; a visually sharper map is not evidence of
 improvement.
+
+After the baseline controlled run, submit the requested satellite-weight and
+localization sensitivity:
+
+```bash
+slurm/submit_bmd_imerg_sensitivity_5day.sh
+```
+
+This is a three-element GPU array for extra IMERG R multipliers 2, 4 and 8,
+limited to two concurrent GPUs. Each element evaluates 75 and 100 km sequential
+gauge localizations from the same generated IMERG ensemble, so localization
+does not duplicate GPU sampling. Files are labelled `r2_l75-100`,
+`r4_l75-100`, and `r8_l75-100`.
+
+Every report includes `chirps_spatial_evaluation`, where CHIRPS is explicitly
+the 0.05-degree gridded target and every background/DA ensemble is scored using
+gridpoint CRPS, ensemble-mean RMSE/MAE/bias/correlation, spread/skill and 90%
+coverage. Each case also writes `*_chirps_spatial.png`: period-mean fields,
+mean-error maps and temporal-RMSE maps for CHIRPS, background, gauges-only,
+IMERG-only, simultaneous, and IMERG-to-gauges products. These remain
+training-period consistency evaluations, not independent validation.
 
 If assimilation completed and only the plotting stage failed, preserve the
 expensive NPZ and resume on a CPU node:
