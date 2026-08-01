@@ -98,6 +98,24 @@ def subgrid_component(field: np.ndarray, factor: int) -> np.ndarray:
     return field - upsample_blocks(coarsen(field, factor), factor)
 
 
+def masked_member_moment(
+    field: np.ndarray, valid: np.ndarray, *, standard_deviation: bool = False
+) -> np.ndarray:
+    """Member mean/std without warnings from all-NaN ocean slices.
+
+    ``field`` is ``(..., member, H, W)``. Land values are finite in the OSSE;
+    ocean values are deliberately NaN. Computing only on the land vector keeps
+    NumPy from warning once for every ocean cell while preserving the mask.
+    """
+    output = np.full((*field.shape[:-3], *field.shape[-2:]), np.nan, dtype=np.float64)
+    land = field[..., valid]
+    if standard_deviation:
+        output[..., valid] = np.std(land, axis=-2, ddof=1)
+    else:
+        output[..., valid] = np.mean(land, axis=-2)
+    return output
+
+
 def bilinear_sample(field: np.ndarray, lat: np.ndarray, lon: np.ndarray, grid) -> np.ndarray:
     """Bilinear physical-space sample for arrays ending in (H, W)."""
     values = np.nan_to_num(field, nan=0.0)
@@ -178,10 +196,15 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
     days = data["days"].astype(str)
     station_lat, station_lon = data["station_lat"], data["station_lon"]
     assim_idx, eval_idx = data["assim_idx"], data["eval_idx"]
-    satellite = (
+    satellite_truth = (
+        data["pseudo_satellite_truth_mm"]
+        if "pseudo_satellite_truth_mm" in data.files
+        else coarsen(truth, factor)
+    )
+    satellite_observed = (
         data["pseudo_satellite_mm"]
         if "pseudo_satellite_mm" in data.files
-        else coarsen(truth, factor)
+        else satellite_truth
     )
 
     domain_mean = np.nanmean(truth, axis=(1, 2))
@@ -189,8 +212,8 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
     quantiles = np.linspace(0.10, 0.95, min(max(n_cases, 1), len(order)))
     selected = np.unique(order[np.round(quantiles * (len(order) - 1)).astype(int)])
     n_rows = len(selected)
-    selected_bg_mean = np.nanmean(background[selected], axis=1)
-    selected_an_mean = np.nanmean(analysis[selected], axis=1)
+    selected_bg_mean = masked_member_moment(background[selected], valid)
+    selected_an_mean = masked_member_moment(analysis[selected], valid)
     rain_values = np.concatenate(
         [
             truth[selected][:, valid].ravel(),
@@ -207,12 +230,14 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         ]
     )
     error_max = max(1.0, float(np.nanpercentile(np.abs(selected_errors), 99)))
-    selected_spread = np.nanstd(analysis[selected], axis=1, ddof=1)
+    selected_spread = masked_member_moment(
+        analysis[selected], valid, standard_deviation=True
+    )
     spread_max = max(
         1.0, float(np.nanpercentile(selected_spread[:, valid], 99))
     )
     figure, axes = plt.subplots(
-        n_rows, 8, figsize=(24, 3.65 * n_rows), squeeze=False, constrained_layout=True
+        n_rows, 9, figsize=(27, 3.65 * n_rows), squeeze=False, constrained_layout=True
     )
     extent = [
         grid.lon[0] - grid.res / 2,
@@ -223,7 +248,8 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
     precip_images, error_images, spread_images = [], [], []
     titles = [
         "CHIRPS truth\n0.05° nature run",
-        "Pseudo-satellite\n0.1° footprints",
+        "Exact CHIRPS mean\n0.1° noiseless",
+        "Pseudo-satellite\n0.1° with error",
         "Background mean\n0.05°",
         "Analysis mean\n0.05°",
         "Analysis member 1\ntexture check",
@@ -235,13 +261,16 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         axes[0, column].set_title(title, fontsize=10)
 
     for row, day_index in enumerate(selected):
-        bg_mean = np.nanmean(background[day_index], axis=0)
-        an_mean = np.nanmean(analysis[day_index], axis=0)
+        bg_mean = masked_member_moment(background[day_index], valid)
+        an_mean = masked_member_moment(analysis[day_index], valid)
         errors = [bg_mean - truth[day_index], an_mean - truth[day_index]]
-        spread = np.nanstd(analysis[day_index], axis=0, ddof=1)
+        spread = masked_member_moment(
+            analysis[day_index], valid, standard_deviation=True
+        )
         panels = [
             truth[day_index],
-            satellite[day_index],
+            satellite_truth[day_index],
+            satellite_observed[day_index],
             bg_mean,
             an_mean,
             analysis[day_index, 0],
@@ -250,19 +279,19 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
             spread,
         ]
         for column, field in enumerate(panels):
-            if column == 1:
+            if column in (1, 2):
                 image = axes[row, column].imshow(
                     field, origin="lower", extent=extent, cmap="viridis",
                     vmin=0, vmax=rain_max, interpolation="nearest", aspect="auto"
                 )
                 precip_images.append(image)
-            elif column <= 4:
+            elif column <= 5:
                 image = axes[row, column].imshow(
                     field, origin="lower", extent=extent, cmap="viridis",
                     vmin=0, vmax=rain_max, aspect="auto"
                 )
                 precip_images.append(image)
-            elif column <= 6:
+            elif column <= 7:
                 image = axes[row, column].imshow(
                     field, origin="lower", extent=extent, cmap="RdBu_r",
                     vmin=-error_max, vmax=error_max, aspect="auto"
@@ -277,7 +306,7 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
             axes[row, column].set_xticks([])
             axes[row, column].set_yticks([])
 
-        for column in (1, 3):
+        for column in (2, 4):
             axes[row, column].scatter(
                 station_lon[assim_idx], station_lat[assim_idx], s=10,
                 c="black", marker="o", linewidths=0.2, edgecolors="white",
@@ -304,13 +333,13 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
             fontsize=8.5,
         )
 
-    figure.colorbar(precip_images[-1], ax=axes[:, :5], orientation="horizontal",
+    figure.colorbar(precip_images[-1], ax=axes[:, :6], orientation="horizontal",
                     fraction=0.025, pad=0.025, label="Daily precipitation (mm day⁻¹)")
-    figure.colorbar(error_images[-1], ax=axes[:, 5:7], orientation="horizontal",
+    figure.colorbar(error_images[-1], ax=axes[:, 6:8], orientation="horizontal",
                     fraction=0.025, pad=0.025, label="Error (mm day⁻¹)")
-    figure.colorbar(spread_images[-1], ax=axes[:, 7], orientation="horizontal",
+    figure.colorbar(spread_images[-1], ax=axes[:, 8], orientation="horizontal",
                     fraction=0.025, pad=0.025, label="Spread (mm day⁻¹)")
-    axes[0, 3].legend(loc="lower left", fontsize=6.5, frameon=True)
+    axes[0, 4].legend(loc="lower left", fontsize=6.5, frameon=True)
     figure.suptitle(
         "CHIRPS OSSE reconstruction: coarse observations versus fine-scale recovery\n"
         "Filled black = assimilated gauges; cyan rings = withheld gauges. "
@@ -351,6 +380,14 @@ def main() -> None:
         "background": ensemble_score(np.moveaxis(background_coarse, 1, 0), truth_coarse),
         "analysis": ensemble_score(np.moveaxis(analysis_coarse, 1, 0), truth_coarse),
     }
+    satellite_observed = (
+        data["pseudo_satellite_mm"]
+        if "pseudo_satellite_mm" in data.files
+        else truth_coarse
+    )
+    satellite_observation_score = ensemble_score(
+        satellite_observed[None], truth_coarse
+    )
     background_subgrid = subgrid_component(background, factor)
     analysis_subgrid = subgrid_component(analysis, factor)
     truth_subgrid = subgrid_component(truth, factor)
@@ -421,8 +458,16 @@ def main() -> None:
         ("Subgrid variance ratio", subgrid_scores, "variance_ratio", ".2f"),
     ]
     scale_matrix = np.array(
-        [[scores[name][key] for name in ("background", "analysis")]
-         for _, scores, key, _ in scale_metrics]
+        [
+            [
+                scores["background"][key],
+                satellite_observation_score[key]
+                if scores is coarse_scores
+                else np.nan,
+                scores["analysis"][key],
+            ]
+            for _, scores, key, _ in scale_metrics
+        ]
     )
 
     daily_matrix = []
@@ -445,7 +490,7 @@ def main() -> None:
     )
     heatmap(
         axes[1, 0], scale_matrix, [x[0] for x in scale_metrics],
-        ["Background", "Analysis"],
+        ["Background", "Noisy satellite", "Analysis"],
         "C. Scale separation — does 0.05° structure improve?",
         formats=[x[3] for x in scale_metrics],
     )
@@ -480,6 +525,7 @@ def main() -> None:
         else False,
         "field_0p05": field_scores,
         "footprint_0p1": coarse_scores,
+        "pseudo_satellite_error_0p1": satellite_observation_score,
         "subgrid_0p05": subgrid_scores,
         "withheld_gauges": withheld_scores,
         "directional_improvement_percent": {
@@ -507,6 +553,33 @@ def main() -> None:
     }
     Path(args.out_report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_report).write_text(json.dumps(report, indent=2) + "\n")
+    print("scale-aware gate:")
+    print(
+        "  field CRPS       "
+        f"{field_scores['background']['crps_mm']:.3f} -> "
+        f"{field_scores['analysis']['crps_mm']:.3f}"
+    )
+    print(
+        "  pseudo-sat RMSE  "
+        f"{satellite_observation_score['rmse_mm']:.3f} "
+        f"(correlation {satellite_observation_score['correlation']:.3f})"
+    )
+    print(
+        "  subgrid RMSE     "
+        f"{subgrid_scores['background']['rmse_mm']:.3f} -> "
+        f"{subgrid_scores['analysis']['rmse_mm']:.3f}"
+    )
+    print(
+        "  subgrid corr     "
+        f"{subgrid_scores['background']['correlation']:.3f} -> "
+        f"{subgrid_scores['analysis']['correlation']:.3f}"
+    )
+    print(
+        "  analysis cover90 "
+        f"{field_scores['analysis']['coverage_90']:.3f}"
+    )
+    for name, passed in report["gate"].items():
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}")
     print(f"wrote {args.out_reconstruction}")
     print(f"wrote {args.out_matrix}")
     print(f"wrote {args.out_report}")

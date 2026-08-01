@@ -45,6 +45,7 @@ MONTH="${OSSE_MONTH:-7}"
 NETWORKS="${OSSE_NETWORKS:-40}"
 LAYOUT="${OSSE_LAYOUT:-spread}"
 OBS_ERROR="${OSSE_OBS_ERROR:-realistic}"
+DUMP_OBS_ERROR="${OSSE_DUMP_OBS_ERROR:-${OBS_ERROR%%,*}}"
 WITHHOLD="${OSSE_WITHHOLD:-0.2}"
 PSEUDO_SATELLITE="${OSSE_PSEUDO_SATELLITE:-1}"
 FIGURE="${OSSE_FIGURE:-data/processed/osse_combined.png}"
@@ -53,7 +54,7 @@ DUMP="${OSSE_DUMP:-data/processed/osse_chirps_satellite_40stations.npz}"
 
 [[ -f "$CKPT" ]] || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
 
-EXTRA=(--dump "$DUMP")
+EXTRA=(--dump "$DUMP" --dump-obs-error "$DUMP_OBS_ERROR")
 [[ -n "${OSSE_DUMP_NETWORK:-}" ]] && EXTRA+=(--dump-network "$OSSE_DUMP_NETWORK")
 if [[ "$PSEUDO_SATELLITE" == "1" ]]; then
     EXTRA+=(--pseudo-satellite)
@@ -68,6 +69,7 @@ fi
 
 echo "Checkpoint: $CKPT"
 echo "Networks: $NETWORKS   Layout: $LAYOUT   Obs error: $OBS_ERROR"
+echo "Dump observation-error case: $DUMP_OBS_ERROR"
 echo "Days: $DAYS   Members: $MEMBERS   Month: $MONTH   Withhold: $WITHHOLD"
 echo "Pseudo-satellite: $PSEUDO_SATELLITE (factor 2 = exact 0.1-degree footprints)"
 

@@ -31,8 +31,9 @@ F  POWER SPECTRUM         Does the analysis have the right variance at each
                           scale?  The specific failure mode of a generative
                           downscaler is a field that scores well but is too
                           smooth.  The ensemble MEAN is expected to be smooth --
-                          it is a mean -- so a single member is plotted too, and
-                          that is the one that should track the truth.
+                          it is a mean -- so background and analysis members are
+                          plotted too. Their contrast identifies whether bad
+                          texture came from the prior or from DA guidance.
 
 G  INCREMENT vs DISTANCE  How far does one observation reach?  |analysis -
                           background| against distance to the nearest assimilated
@@ -381,6 +382,7 @@ def main() -> None:
         ("CHIRPS truth", truth),
         ("background mean", background.mean(axis=1)),
         ("analysis mean", analysis.mean(axis=1)),
+        ("background member", background[:, 0]),
         ("analysis member", analysis[:, 0]),
     ]:
         accumulated = None
@@ -396,6 +398,11 @@ def main() -> None:
         )
     report["spectral_ratio_member_to_truth"] = float(
         np.nanmean(spectra["analysis member"][-20:] / spectra["CHIRPS truth"][-20:])
+    )
+    report["spectral_ratio_background_member_to_truth"] = float(
+        np.nanmean(
+            spectra["background member"][-20:] / spectra["CHIRPS truth"][-20:]
+        )
     )
     report["spectral_ratio_mean_to_truth"] = float(
         np.nanmean(spectra["analysis mean"][-20:] / spectra["CHIRPS truth"][-20:])
@@ -490,16 +497,25 @@ def main() -> None:
     deviation = report["rank_histogram_deviation_analysis"]
     verdicts.append(verdict(
         f"rank-histogram deviation {deviation:.3f} (flat = 0)", deviation < 0.35))
+    background_spectral = report["spectral_ratio_background_member_to_truth"]
     spectral = report["spectral_ratio_member_to_truth"]
     verdicts.append(verdict(
-        f"fine-scale power, member/truth {spectral:.2f}", 0.5 <= spectral <= 2.0))
+        f"fine power, background/truth {background_spectral:.2f}",
+        0.5 <= background_spectral <= 2.0))
+    verdicts.append(verdict(
+        f"fine power, analysis/truth {spectral:.2f}", 0.5 <= spectral <= 2.0))
     increment_reach = (
         report["increment_profile"]["increment_mm"][0]
         / max(report["increment_profile"]["increment_mm"][-1], 1e-6)
     )
-    verdicts.append(verdict(
-        f"increment near/far ratio {increment_reach:.1f} (want > 1)",
-        increment_reach > 1.2))
+    if pseudo_satellite:
+        verdicts.append(
+            f"INFO  increment near/far {increment_reach:.1f}; dense satellite present"
+        )
+    else:
+        verdicts.append(verdict(
+            f"increment near/far ratio {increment_reach:.1f} (want > 1)",
+            increment_reach > 1.2))
 
     text = (
         f"network      {report['network']}\n"
