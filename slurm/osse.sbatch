@@ -48,6 +48,8 @@ OBS_ERROR="${OSSE_OBS_ERROR:-realistic}"
 DUMP_OBS_ERROR="${OSSE_DUMP_OBS_ERROR:-${OBS_ERROR%%,*}}"
 WITHHOLD="${OSSE_WITHHOLD:-0.2}"
 PSEUDO_SATELLITE="${OSSE_PSEUDO_SATELLITE:-1}"
+OBSERVATION_MODE="${OSSE_OBSERVATION_MODE:-}"
+SATELLITE_STRIDE="${OSSE_SATELLITE_STRIDE:-1}"
 FIGURE="${OSSE_FIGURE:-data/processed/osse_combined.png}"
 REPORT="${OSSE_REPORT:-data/processed/osse_combined.json}"
 DUMP="${OSSE_DUMP:-data/processed/osse_chirps_satellite_40stations.npz}"
@@ -58,6 +60,11 @@ EXTRA=(--dump "$DUMP" --dump-obs-error "$DUMP_OBS_ERROR")
 [[ -n "${OSSE_DUMP_NETWORK:-}" ]] && EXTRA+=(--dump-network "$OSSE_DUMP_NETWORK")
 if [[ "$PSEUDO_SATELLITE" == "1" ]]; then
     EXTRA+=(--pseudo-satellite)
+fi
+[[ -n "$OBSERVATION_MODE" ]] && EXTRA+=(--observation-mode "$OBSERVATION_MODE")
+EXTRA+=(--satellite-stride "$SATELLITE_STRIDE")
+if [[ "${OSSE_SATELLITE_CORRELATION_CONTROL:-0}" == "1" ]]; then
+    EXTRA+=(--satellite-correlation-control)
 fi
 echo "Dumping raw ensembles to: $DUMP"
 if [[ "${OSSE_TUNE:-0}" == "1" ]]; then
@@ -72,6 +79,7 @@ echo "Networks: $NETWORKS   Layout: $LAYOUT   Obs error: $OBS_ERROR"
 echo "Dump observation-error case: $DUMP_OBS_ERROR"
 echo "Days: $DAYS   Members: $MEMBERS   Month: $MONTH   Withhold: $WITHHOLD"
 echo "Pseudo-satellite: $PSEUDO_SATELLITE (factor 2 = exact 0.1-degree footprints)"
+echo "Observation mode: ${OBSERVATION_MODE:-legacy}   satellite stride: $SATELLITE_STRIDE"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --config "$CONFIG" \
@@ -120,4 +128,18 @@ if [[ -f "$DUMP" ]]; then
         --out-reconstruction "${OSSE_RECONSTRUCTION_FIGURE:-data/processed/osse_reconstruction_maps.png}" \
         --out-matrix "${OSSE_MATRIX_FIGURE:-data/processed/osse_metric_matrix.png}" \
         --out-report "${OSSE_SCALE_REPORT:-data/processed/osse_scale_summary.json}"
+fi
+
+# Dedicated downscaling test. This removes every field's own 0.1-degree block
+# mean and evaluates only the within-footprint 0.05-degree residual against
+# CHIRPS. A coarse-only field is included as the null model.
+if [[ -f "$DUMP" ]]; then
+    echo
+    echo "=============== OSSE 0.05-degree downscaling gate ==============="
+    srun --ntasks=1 "$PYTHON_BIN" -u scripts/22_evaluate_osse_downscaling.py \
+        --dump "$DUMP" \
+        --minimum-valid-fraction "${OSSE_SUBGRID_VALID_FRACTION:-1.0}" \
+        --out-figure "${OSSE_DOWNSCALING_FIGURE:-data/processed/osse_downscaling_diagnostics.png}" \
+        --out-report "${OSSE_DOWNSCALING_REPORT:-data/processed/osse_downscaling_diagnostics.json}" \
+        --out-spatial-data "${OSSE_DOWNSCALING_DATA:-data/processed/osse_downscaling_spatial.nc}"
 fi

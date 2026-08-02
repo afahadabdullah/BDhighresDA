@@ -4,7 +4,9 @@
 The BMD archive date labels the end of a 24-hour window at 03:00 UTC. Thus
 May 2018 BMD data require IMERG intervals beginning 2018-04-30 03:00 and ending
 with the interval beginning 2018-05-31 02:30. Explicit ``wget -O`` paths avoid
-the long query-string filenames produced by the GES DISC subset service.
+the long query-string filenames produced by the GES DISC subset service. The
+date arguments are general: long records should be split into resumable monthly
+jobs, as in ``slurm/download_imerg_halfhourly_2021_2024.sbatch``.
 """
 
 from __future__ import annotations

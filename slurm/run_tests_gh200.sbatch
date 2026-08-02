@@ -55,10 +55,12 @@ assert platform.machine() == 'aarch64'
 "
 
 echo
-echo "=============== pytest: v2 regression suite ==============="
+echo "=============== pytest: required regression suite ==============="
 "$PYTHON_BIN" -m pytest \
     tests/test_conditioning_fixes.py \
     tests/test_progress_and_summary.py \
+    tests/test_scale_metrics.py \
+    tests/test_osse_downscaling.py \
     -v --tb=short
 
 echo

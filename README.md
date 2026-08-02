@@ -177,6 +177,17 @@ reporting days with:
 slurm/submit_download_imerg_halfhourly_may2018.sh
 ```
 
+For the complete 2021--2024 record, submit the resumable monthly CPU array:
+
+```bash
+slurm/submit_download_imerg_halfhourly_2021_2024.sh
+```
+
+It downloads regional subsets into year directories below
+`data/imerg_halfhourly`, validates exact 03:00-to-03:00 UTC BMD windows, and
+writes one prepared NetCDF/QC pair per month. See `COMPUTE.md` for concurrency,
+year-range, and download-only overrides.
+
 The resumable job requests regional subsets only, reuses valid files already
 under `data/imerg_halfhourly`, and writes each response with an explicit short
 output name instead of the GES DISC query string. It downloads 1,488 granules:

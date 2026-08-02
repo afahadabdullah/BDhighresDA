@@ -442,6 +442,53 @@ data/processed/imerg_bd_aligned_20180501_31.nc
 data/processed/imerg_bd_aligned_20180501_31_qc.json
 ```
 
+### Download the 2021--2024 half-hourly IMERG record
+
+Use the monthly Slurm array rather than one four-year job:
+
+```bash
+slurm/submit_download_imerg_halfhourly_2021_2024.sh
+```
+
+The default submission creates 48 monthly CPU tasks with at most two active at
+once. Together they request 70,128 regional V07B granules for 1,461 BMD archive
+days. The exact half-hour starts run from 2020-12-31 03:00 UTC through
+2024-12-31 02:30 UTC because every archive day is the end of its 03:00-to-03:00
+UTC accumulation. Files are divided among `data/imerg_halfhourly/2021` through
+`data/imerg_halfhourly/2024`; the recursive IMERG loader treats these as one
+inventory.
+
+Every task is resumable: valid NetCDF/HDF responses are skipped and incomplete
+`.part` files are replaced. After downloading a month, the task requires all 48
+half-hours per BMD day and writes:
+
+```text
+data/processed/imerg_bd_aligned_YYYYMM01_YYYYMMDD.nc
+data/processed/imerg_bd_aligned_YYYYMM01_YYYYMMDD_qc.json
+```
+
+The default two array tasks with two workers each cap the request rate at four
+concurrent GES DISC subset calls. Lower that rate if Earthdata begins returning
+transient failures:
+
+```bash
+IMERG_ARRAY_CONCURRENCY=1 IMERG_DOWNLOAD_JOBS=2 \
+  slurm/submit_download_imerg_halfhourly_2021_2024.sh
+```
+
+The years are configurable, and monthly preparation can be disabled when only
+the source granules are wanted:
+
+```bash
+IMERG_START_YEAR=2022 IMERG_END_YEAR=2023 IMERG_PREPARE_MONTHLY=0 \
+  slurm/submit_download_imerg_halfhourly_2021_2024.sh
+```
+
+Rerun the same submission after an interrupted array; completed granules will
+be scanned and skipped. Do not apply another one-day shift to these
+observations. The preceding UTC date already appears wherever required by the
+BMD 03:00 UTC reporting window.
+
 This exact observation window already uses part of the preceding UTC calendar
 day. Do not shift IMERG back by another day: for BMD date `D`, use the 48
 half-hours from `D-1 03:00` through `D 02:30` UTC. A separate `D-1` sensitivity

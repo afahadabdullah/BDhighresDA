@@ -126,6 +126,25 @@ def parse_args() -> argparse.Namespace:
              "combined satellite + station experiment",
     )
     parser.add_argument(
+        "--observation-mode",
+        choices=["gauges", "satellite", "combined"],
+        default=None,
+        help="matched OSSE arm. Default preserves legacy behaviour: gauges, or "
+             "combined when --pseudo-satellite is present",
+    )
+    parser.add_argument(
+        "--satellite-stride",
+        type=int,
+        default=1,
+        help="retain every Nth pseudo-satellite footprint in each direction",
+    )
+    parser.add_argument(
+        "--satellite-correlation-control",
+        action="store_true",
+        help="inflate pseudo-satellite R by 2*pi*(correlation_length/stride)^2 "
+             "to avoid treating correlated footprints as independent",
+    )
+    parser.add_argument(
         "--withhold",
         type=float,
         default=0.4,
@@ -309,6 +328,14 @@ def improvement(background: dict, analysis: dict, key: str) -> float:
 
 def main() -> None:
     args = parse_args()
+    observation_mode = args.observation_mode
+    if observation_mode is None:
+        observation_mode = "combined" if args.pseudo_satellite else "gauges"
+    args.observation_mode = observation_mode
+    use_gauges = observation_mode in {"gauges", "combined"}
+    use_satellite = observation_mode in {"satellite", "combined"}
+    if args.satellite_stride < 1:
+        raise ValueError("--satellite-stride must be >= 1")
     if not 0.0 <= args.withhold < 1.0:
         raise ValueError("--withhold must satisfy 0 <= fraction < 1")
     config = yaml.safe_load(Path(args.config).read_text())
@@ -424,7 +451,7 @@ def main() -> None:
     gauge_cfg = config["observations"]["gauges"]
     satellite_cfg = config["observations"]["imerg"]
     satellite_factor = int(satellite_cfg["factor"])
-    if args.pseudo_satellite and (
+    if use_satellite and (
         grid.nlat % satellite_factor or grid.nlon % satellite_factor
     ):
         raise ValueError(
@@ -435,7 +462,17 @@ def main() -> None:
         grid.nlat // satellite_factor,
         grid.nlon // satellite_factor,
     )
-    satellite_count = int(np.prod(satellite_shape)) if args.pseudo_satellite else 0
+    satellite_count = int(np.prod(satellite_shape)) if use_satellite else 0
+    satellite_selection = np.zeros(satellite_shape, dtype=bool)
+    satellite_selection[::args.satellite_stride, ::args.satellite_stride] = True
+    selected_satellite_count = int(satellite_selection.sum()) if use_satellite else 0
+    satellite_r_inflation = 1.0
+    if use_satellite and args.satellite_correlation_control:
+        correlation_cells = float(satellite_cfg.get("error_corr_cells", 0.0))
+        satellite_r_inflation = max(
+            1.0,
+            2.0 * np.pi * (correlation_cells / args.satellite_stride) ** 2,
+        )
     error_levels = {}
     for token in args.obs_error.split(","):
         token = token.strip().lower()
@@ -507,6 +544,17 @@ def main() -> None:
         f"{len(combinations)} settings on {device}",
         flush=True,
     )
+    print(
+        f"[osse] observation mode={observation_mode}; gauges={use_gauges}; "
+        f"pseudo-satellite={use_satellite}"
+        + (
+            f"; selected footprints={selected_satellite_count}/{satellite_count}; "
+            f"R inflation={satellite_r_inflation:.2f}x"
+            if use_satellite
+            else ""
+        ),
+        flush=True,
+    )
 
     # -- the background depends only on the day and the prior temperature -----
     # It must use the SAME prior temperature as the analysis, or the comparison
@@ -565,6 +613,7 @@ def main() -> None:
         order = split_rng.permutation(n_stations)
         eval_idx = np.sort(order[:n_withhold])
         assim_idx = np.sort(order[n_withhold:])
+        active_assim_idx = assim_idx if use_gauges else np.array([], dtype=int)
 
         for error_name, (sigma, representativeness) in error_levels.items():
             for setting in combinations:
@@ -581,19 +630,22 @@ def main() -> None:
                 gauge_noise_sd = float(
                     np.sqrt(sigma_used**2 + representativeness**2)
                 )
-                operators = [
-                    PhysicalBilinearObsOperator(
+                operators = []
+                r_specs = []
+                corr_blocks: list[tuple[int, int, int, float]] = []
+                if use_gauges:
+                    operators.append(PhysicalBilinearObsOperator(
                         grid,
-                        stations.lat[assim_idx],
-                        stations.lon[assim_idx],
+                        stations.lat[active_assim_idx],
+                        stations.lon[active_assim_idx],
                         transform,
                         valid=valid,
+                    ))
+                    r_specs.append(
+                        (len(active_assim_idx), sigma_used, representativeness)
                     )
-                ]
-                r_specs = [(len(assim_idx), sigma_used, representativeness)]
-                corr_blocks: list[tuple[int, int, int, float]] = []
                 satellite_noise_sd = float("nan")
-                if args.pseudo_satellite:
+                if use_satellite:
                     operators.append(
                         PhysicalBlockAverageObsOperator(
                             satellite_factor, transform, valid=valid
@@ -614,13 +666,15 @@ def main() -> None:
                     )
                     corr_blocks.append(
                         (
-                            len(assim_idx),
+                            len(active_assim_idx),
                             satellite_shape[0],
                             satellite_shape[1],
                             float(satellite_cfg.get("error_corr_cells", 0.0)),
                         )
                     )
                 R = build_R_multi(r_specs, device=device)
+                if use_satellite and satellite_r_inflation != 1.0:
+                    R[len(active_assim_idx):] *= satellite_r_inflation
                 operator = (
                     CompositeObsOperator(operators)
                     if len(operators) > 1
@@ -642,6 +696,12 @@ def main() -> None:
                         "background", "analysis", "truth",
                         "obs_transformed", "truth_at_stations",
                         "pseudo_satellite_mm", "pseudo_satellite_truth_mm",
+                        # The 0.5-degree conditioning precipitation mapped onto
+                        # the fine grid.  Without it no script downstream can
+                        # measure what downscaling actually bought, because the
+                        # honest null for that question is the coarse input
+                        # itself, not a zero field.
+                        "coarse_base_mm",
                     )
                 }
                 for index in days:
@@ -650,6 +710,16 @@ def main() -> None:
                     item = dataset[position]
                     base = item["base"][None].to(device)
                     truth = truth_cache[index]
+                    # The coarse precipitation the prior starts from, in mm.
+                    # `residual.fill` -- not zero -- is the network-space value
+                    # meaning "no correction": decode() adds the standardisation
+                    # mean back, so feeding zeros would offset the whole field by
+                    # mu_r and quietly bias every downscaling-gain score.
+                    coarse_base_mm = transform.inverse(
+                        residual.decode(
+                            torch.full_like(base, residual.fill), base
+                        )[:, 0].float().cpu().numpy()
+                    )[0]
 
                     # Observations: truth sampled at stations, error added in
                     # TRANSFORMED space so it matches what R claims.
@@ -660,25 +730,35 @@ def main() -> None:
                     ) + observation_rng.normal(
                         0.0, gauge_noise_sd, n_stations
                     )
-                    truth_obs = [
-                        transform.forward(
-                            np.clip(truth_at_stations[assim_idx], 0.0, None)
-                        ).astype(np.float32)
-                    ]
-                    observed = [gauge_obs_transformed[assim_idx].astype(np.float32)]
+                    truth_obs = []
+                    observed = []
+                    if use_gauges:
+                        truth_obs.append(
+                            transform.forward(
+                                np.clip(
+                                    truth_at_stations[active_assim_idx], 0.0, None
+                                )
+                            ).astype(np.float32)
+                        )
+                        observed.append(
+                            gauge_obs_transformed[active_assim_idx].astype(np.float32)
+                        )
                     satellite_truth_mm = None
                     satellite_observed_mm = None
-                    if args.pseudo_satellite:
+                    if use_satellite:
                         satellite_truth_mm, _ = block_mean_mm(
                             truth, valid, satellite_factor
                         )
                         satellite_truth_transformed = transform.forward(
                             satellite_truth_mm
                         ).astype(np.float32).reshape(-1)
+                        satellite_truth_transformed[
+                            ~satellite_selection.reshape(-1)
+                        ] = np.nan
                         # One correlated error realisation creates the actual
                         # pseudo-IMERG product.  Member-wise perturbations below
                         # then preserve posterior ensemble variance.
-                        satellite_R = R[len(assim_idx):]
+                        satellite_R = R[len(active_assim_idx):]
                         satellite_observed = perturb_observations(
                             satellite_truth_transformed,
                             satellite_R,
@@ -764,36 +844,46 @@ def main() -> None:
                     # against nature truth. The transformed-space fit below is
                     # the separate diagnostic against the noisy observation the
                     # likelihood was actually handed.
-                    analysis_at_assim = sample_at_stations(
-                        analysis, grid, stations
-                    )[:, assim_idx]
-                    background_at_assim = sample_at_stations(
-                        background, grid, stations
-                    )[:, assim_idx]
-                    assim_analysis.append(
-                        score(analysis_at_assim, truth_at_stations[assim_idx])
-                    )
-                    assim_background.append(
-                        score(background_at_assim, truth_at_stations[assim_idx])
-                    )
-                    # Distance from the ensemble mean to the observation, in the
-                    # transformed units the likelihood works in, so it is directly
-                    # comparable with the assumed observation-error sd.
-                    fit_transformed.append(
-                        float(
-                            np.sqrt(
-                                np.mean(
-                                    (
-                                        transform.forward(
-                                            np.clip(analysis_at_assim.mean(axis=0), 0, None)
+                    if use_gauges:
+                        analysis_at_assim = sample_at_stations(
+                            analysis, grid, stations
+                        )[:, active_assim_idx]
+                        background_at_assim = sample_at_stations(
+                            background, grid, stations
+                        )[:, active_assim_idx]
+                        assim_analysis.append(
+                            score(
+                                analysis_at_assim,
+                                truth_at_stations[active_assim_idx],
+                            )
+                        )
+                        assim_background.append(
+                            score(
+                                background_at_assim,
+                                truth_at_stations[active_assim_idx],
+                            )
+                        )
+                        # Distance from the ensemble mean to the gauge observation
+                        # in the transformed units used by the likelihood.
+                        fit_transformed.append(
+                            float(
+                                np.sqrt(
+                                    np.mean(
+                                        (
+                                            transform.forward(
+                                                np.clip(
+                                                    analysis_at_assim.mean(axis=0),
+                                                    0,
+                                                    None,
+                                                )
+                                            )
+                                            - gauge_obs_transformed[active_assim_idx]
                                         )
-                                        - gauge_obs_transformed[assim_idx]
+                                        ** 2
                                     )
-                                    ** 2
                                 )
                             )
                         )
-                    )
 
                     # Secondary: the whole field.
                     field_background.append(score(background, truth))
@@ -803,13 +893,16 @@ def main() -> None:
                         store["background"].append(background.astype(np.float32))
                         store["analysis"].append(analysis.astype(np.float32))
                         store["truth"].append(truth.astype(np.float32))
+                        store["coarse_base_mm"].append(
+                            np.where(valid, coarse_base_mm, np.nan).astype(np.float32)
+                        )
                         store["obs_transformed"].append(
                             gauge_obs_transformed.astype(np.float32)
                         )
                         store["truth_at_stations"].append(
                             truth_at_stations.astype(np.float32)
                         )
-                        if args.pseudo_satellite:
+                        if use_satellite:
                             store["pseudo_satellite_mm"].append(
                                 satellite_observed_mm
                             )
@@ -820,12 +913,16 @@ def main() -> None:
                 entry = {
                     "network": name,
                     "n_stations": n_stations,
-                    "n_assimilated": int(len(assim_idx)),
+                    "n_assimilated": int(len(active_assim_idx)),
                     "n_withheld": int(len(eval_idx)),
                     "obs_error": error_name,
+                    "observation_mode": observation_mode,
                     "obs_noise_sd_transformed": gauge_noise_sd,
-                    "pseudo_satellite": bool(args.pseudo_satellite),
+                    "pseudo_satellite": bool(use_satellite),
                     "satellite_noise_sd_transformed": satellite_noise_sd,
+                    "satellite_stride": int(args.satellite_stride),
+                    "satellite_selected_footprints": selected_satellite_count,
+                    "satellite_r_inflation": satellite_r_inflation,
                     **{f"setting_{k}": v for k, v in setting.items()},
                     "withheld_background": aggregate(background_days),
                     "withheld_analysis": aggregate(analysis_days),
@@ -835,10 +932,12 @@ def main() -> None:
                     "field_analysis": aggregate(field_analysis),
                     # Consistency check: analysis-minus-observation distance in
                     # transformed units against the sd the likelihood assumed.
-                    "fit_rms_transformed": float(np.mean(fit_transformed)),
+                    "fit_rms_transformed": float(np.mean(fit_transformed))
+                    if fit_transformed
+                    else float("nan"),
                     "assumed_obs_sd_transformed": gauge_noise_sd,
                     "fit_ratio": float(np.mean(fit_transformed) / gauge_noise_sd)
-                    if gauge_noise_sd > 0
+                    if fit_transformed and gauge_noise_sd > 0
                     else float("nan"),
                 }
                 for metric in ("rmse_mm", "crps_mm", "mae_mm"):
@@ -853,17 +952,26 @@ def main() -> None:
                         background=np.stack(store["background"]),
                         analysis=np.stack(store["analysis"]),
                         truth=np.stack(store["truth"]),
+                        array_layout=np.str_("day,member,latitude,longitude"),
+                        coarse_base_mm=np.stack(store["coarse_base_mm"]),
+                        grid_lat=np.asarray(grid.lat, dtype=np.float32),
+                        grid_lon=np.asarray(grid.lon, dtype=np.float32),
+                        grid_res=np.float32(grid.res),
                         obs_transformed=np.stack(store["obs_transformed"]),
                         truth_at_stations=np.stack(store["truth_at_stations"]),
                         station_lat=stations.lat,
                         station_lon=stations.lon,
-                        assim_idx=assim_idx,
+                        assim_idx=active_assim_idx,
                         eval_idx=eval_idx,
                         valid=valid,
                         obs_noise_sd=np.float32(gauge_noise_sd),
                         satellite_obs_noise_sd=np.float32(satellite_noise_sd),
-                        pseudo_satellite_enabled=np.bool_(args.pseudo_satellite),
+                        pseudo_satellite_enabled=np.bool_(use_satellite),
                         satellite_factor=np.int32(satellite_factor),
+                        satellite_stride=np.int32(args.satellite_stride),
+                        satellite_selection=satellite_selection,
+                        satellite_r_inflation=np.float32(satellite_r_inflation),
+                        observation_mode=np.str_(observation_mode),
                         grid_name=np.str_(grid.name),
                         network=np.str_(name),
                         obs_error=np.str_(error_name),
@@ -878,7 +986,7 @@ def main() -> None:
                         data_zarr=np.str_(data_zarr),
                         data_stats=np.str_(data_stats),
                     )
-                    if args.pseudo_satellite:
+                    if use_satellite:
                         dumped["pseudo_satellite_mm"] = np.stack(
                             store["pseudo_satellite_mm"]
                         )
@@ -907,8 +1015,14 @@ def main() -> None:
         "withhold_fraction": args.withhold,
         "data_zarr": data_zarr,
         "data_stats": data_stats,
-        "pseudo_satellite": bool(args.pseudo_satellite),
-        "satellite_factor": satellite_factor if args.pseudo_satellite else None,
+        "observation_mode": observation_mode,
+        "pseudo_satellite": bool(use_satellite),
+        "satellite_factor": satellite_factor if use_satellite else None,
+        "satellite_stride": args.satellite_stride if use_satellite else None,
+        "satellite_selected_footprints": selected_satellite_count
+        if use_satellite
+        else None,
+        "satellite_r_inflation": satellite_r_inflation if use_satellite else None,
         "station_layout": args.station_layout,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (
@@ -970,7 +1084,10 @@ def plot_results(results: list[dict], args, output: Path) -> None:
             )
         if metric == "coverage_90":
             axis.axhline(0.90, color="black", ls="--", lw=1.0, label="nominal 0.90")
-        axis.set_xscale("log")
+        if any(r["n_assimilated"] == 0 for r in results):
+            axis.set_xscale("symlog", linthresh=1)
+        else:
+            axis.set_xscale("log")
         axis.set_xlabel("Stations assimilated")
         axis.set_ylabel(ylabel)
         axis.set_title(title, fontsize=10.5)
@@ -993,7 +1110,10 @@ def plot_results(results: list[dict], args, output: Path) -> None:
             label=f"full field ({level})", alpha=0.6,
         )
     axis.axhline(0.0, color="black", lw=0.9)
-    axis.set_xscale("log")
+    if any(r["n_assimilated"] == 0 for r in results):
+        axis.set_xscale("symlog", linthresh=1)
+    else:
+        axis.set_xscale("log")
     axis.set_xlabel("Stations assimilated")
     axis.set_ylabel("CRPS reduction (%)")
     axis.set_title("F.  What the assimilation buys", fontsize=10.5)
@@ -1002,8 +1122,12 @@ def plot_results(results: list[dict], args, output: Path) -> None:
 
     figure.suptitle(
         "BDhighresDA OSSE - CHIRPS nature truth; "
-        + ("0.1-degree pseudo-satellite + " if args.pseudo_satellite else "")
-        + "pseudo-gauges\n"
+        + {
+            "gauges": "pseudo-gauges",
+            "satellite": "0.1-degree pseudo-satellite",
+            "combined": "0.1-degree pseudo-satellite + pseudo-gauges",
+        }[args.observation_mode]
+        + "\n"
         f"{args.ckpt}   |   {args.days} days   |   {args.members} members   |   "
         f"{args.withhold:.0%} of each network withheld from assimilation\n"
         "Dashed = background (no observations), solid = analysis. "

@@ -13,7 +13,9 @@ A  RANK HISTOGRAM         Is the ensemble calibrated?  Truth should be equally
 
 B  SPREAD-SKILL           Does the ensemble know when it is uncertain?  Binned by
                           predicted spread, the RMSE of the mean should follow
-                          the 1:1 line.  Below it = over-confident.
+                          the 1:1 line.  Above it (RMSE > spread) means
+                          under-dispersed/over-confident; below it means
+                          over-dispersed/under-confident.
 
 C  CRPS BY INTENSITY      Where does the assimilation help?  Skill on light rain
                           is cheap; skill on the heavy tail is what matters for
@@ -279,7 +281,7 @@ def main() -> None:
               label="1:1 (calibrated)")
     axis.set_xlabel("Ensemble spread (mm day$^{-1}$)")
     axis.set_ylabel("RMSE of the ensemble mean (mm day$^{-1}$)")
-    axis.set_title("B.  Spread-skill\nbelow the line = over-confident",
+    axis.set_title("B.  Spread-skill\nabove the line = over-confident",
                    fontsize=10.5)
     axis.legend(fontsize=7.5, frameon=False)
     axis.grid(alpha=0.2)
@@ -433,8 +435,18 @@ def main() -> None:
         if inside.sum() > 20:
             centres.append(float(distance[inside].mean()))
             values.append(float(increment[inside].mean()))
-    axis.plot(centres, values, marker="o", ms=5, color=analysis_colour)
-    axis.set_xscale("log")
+    if centres:
+        axis.plot(centres, values, marker="o", ms=5, color=analysis_colour)
+        axis.set_xscale("log")
+    else:
+        axis.text(
+            0.5,
+            0.5,
+            "No gauges assimilated in this arm",
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+        )
     axis.set_xlabel("Distance to nearest assimilated station (cells)")
     axis.set_ylabel("|analysis - background| (mm day$^{-1}$)")
     axis.set_title(
@@ -463,22 +475,30 @@ def main() -> None:
     expected = np.sqrt(background_spread**2 + obs_noise_sd**2)
     normalised = (innovation / np.maximum(expected, 1e-6))[:, assim_idx].ravel()
     normalised = normalised[np.isfinite(normalised)]
-    axis.hist(normalised, bins=60, density=True, color=background_colour,
-              alpha=0.75, label="observed")
+    if normalised.size:
+        axis.hist(normalised, bins=60, density=True, color=background_colour,
+                  alpha=0.75, label="observed")
     x = np.linspace(-5, 5, 400)
     axis.plot(x, np.exp(-x**2 / 2) / np.sqrt(2 * np.pi), color="black", lw=1.5,
               label="N(0, 1) if R and B are right")
     axis.set_xlim(-5, 5)
     axis.set_xlabel(r"$(y - H(x_b)) / \sqrt{\sigma_b^2 + R}$")
     axis.set_ylabel("Density")
-    observed_sd = float(normalised.std())
-    axis.set_title(f"H.  Normalised innovation   sd = {observed_sd:.2f}\n"
-                   ">1 = assumed errors too small, <1 = too large",
-                   fontsize=10.5)
+    observed_sd = float(normalised.std()) if normalised.size else float("nan")
+    if normalised.size:
+        innovation_title = f"H.  Normalised gauge innovation   sd = {observed_sd:.2f}\n"
+    else:
+        innovation_title = "H.  Normalised gauge innovation   not applicable\n"
+    axis.set_title(
+        innovation_title + ">1 = assumed errors too small, <1 = too large",
+        fontsize=10.5,
+    )
     axis.legend(fontsize=7.5, frameon=False)
     axis.grid(alpha=0.2)
     report["normalised_innovation_sd"] = observed_sd
-    report["normalised_innovation_mean"] = float(normalised.mean())
+    report["normalised_innovation_mean"] = (
+        float(normalised.mean()) if normalised.size else float("nan")
+    )
 
     # -- I. summary -----------------------------------------------------------
     axis = axes[2, 2]
@@ -489,8 +509,11 @@ def main() -> None:
         return f"{'OK  ' if ok else 'FLAG'}  {text}"
 
     sd = report["normalised_innovation_sd"]
-    verdicts.append(verdict(
-        f"innovation sd {sd:.2f} (want ~1.0)", 0.7 <= sd <= 1.4))
+    if np.isfinite(sd):
+        verdicts.append(verdict(
+            f"innovation sd {sd:.2f} (want ~1.0)", 0.7 <= sd <= 1.4))
+    else:
+        verdicts.append("INFO  gauge innovation not applicable")
     ratio = report["spread_skill_ratio_analysis"]
     verdicts.append(verdict(
         f"spread/skill {ratio:.2f} (want ~1.0)", 0.7 <= ratio <= 1.4))
@@ -504,11 +527,15 @@ def main() -> None:
         0.5 <= background_spectral <= 2.0))
     verdicts.append(verdict(
         f"fine power, analysis/truth {spectral:.2f}", 0.5 <= spectral <= 2.0))
+    increment_values = report["increment_profile"]["increment_mm"]
     increment_reach = (
-        report["increment_profile"]["increment_mm"][0]
-        / max(report["increment_profile"]["increment_mm"][-1], 1e-6)
+        increment_values[0] / max(increment_values[-1], 1e-6)
+        if increment_values
+        else float("nan")
     )
-    if pseudo_satellite:
+    if not increment_values:
+        verdicts.append("INFO  gauge-distance reach not applicable")
+    elif pseudo_satellite:
         verdicts.append(
             f"INFO  increment near/far {increment_reach:.1f}; dense satellite present"
         )
