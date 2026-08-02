@@ -603,6 +603,53 @@ Only after this fold gate should an optional IMERG-R sensitivity be considered:
 slurm/submit_bmd_imerg_sensitivity_5day.sh
 ```
 
+### Full-May rotated spatial holdout
+
+Once the half-hourly download and its 31-window validation finish, extend the
+same frozen four-arm experiment to every day in May:
+
+```bash
+slurm/submit_bmd_imerg_rotated_folds_may2018.sh
+```
+
+The five GPU array tasks each evaluate one disjoint BMD station fold over
+2018-05-01--31. They retain `BACKGROUND_DAY_OFFSET=-1`, 16 members, IMERG
+stride 3, the native-error 6.3x correlation inflation, and exact 03:00-to-03:00
+UTC observation windows. The active arms remain background, gauges only,
+IMERG only and simultaneous; the retired sequential method is absent. Fold
+products end in `_20180501_31`, so the five-day results are not overwritten.
+A dependent CPU job produces:
+
+```text
+data/processed/bmd_imerg_offset_m1_rotated_summary_20180501_31.json
+data/processed/bmd_imerg_offset_m1_rotated_summary_20180501_31.png
+```
+
+It also generates two additional pooled diagnostics inspired by the OSSE
+verification suite:
+
+```text
+data/processed/bmd_imerg_offset_m1_fullmonth_verification.png
+data/processed/bmd_imerg_offset_m1_fullmonth_spatial_impact.png
+data/processed/bmd_imerg_offset_m1_fullmonth_diagnostics.json
+```
+
+The verification figure includes pooled withheld-BMD rank histograms,
+spread-skill, CRPS by observed intensity, reliability, event Brier scores,
+spectral structure, increment reach, and normalised gauge/IMERG innovations.
+The spatial figure maps increments and spread changes averaged across folds;
+it does not call those maps error reduction because real observations provide
+no independent gridded 0.05-degree truth. Its station map is the only spatial
+skill panel and uses each BMD station when it is withheld from its fold. All
+six spatial panels use a Cartopy Plate Carree map with 10 m Natural Earth
+coastlines, country borders and first-order administrative boundaries. Cartopy
+keeps those files in `data/static/cartopy` so subsequent summary jobs reuse the
+same boundary cache.
+
+This is the larger development gate. Because 2018 remains inside the prior
+checkpoint's training years, final skill still requires retraining with 2018
+excluded before treating May 2018 as independent validation.
+
 That optional array now tests only extra IMERG R multipliers 2, 4 and 8 with
 the offset-minus-one background; it no longer runs localization or sequential
 updates.

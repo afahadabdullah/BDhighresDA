@@ -239,6 +239,23 @@ withheld-station metrics and writes
 DA passes only if it has lower pooled CRPS than gauges-only and wins at least
 half the folds.
 
+After the 1,488 half-hourly files have downloaded and the five-day gate has
+passed operationally, run the identical five-fold test over all 31 May days:
+
+```bash
+slurm/submit_bmd_imerg_rotated_folds_may2018.sh
+```
+
+This keeps the offset -1 CPC/ERA5 background and exact BMD-aligned IMERG
+windows, but writes separate `*_20180501_31` fold products and
+`bmd_imerg_offset_m1_rotated_summary_20180501_31.{json,png}` outputs. The
+dependent summary job also writes pooled withheld-BMD verification and spatial
+impact suites as `bmd_imerg_offset_m1_fullmonth_verification.png` and
+`bmd_imerg_offset_m1_fullmonth_spatial_impact.png`. Spatial impact maps show
+increments and spread changes; they are not labelled as gridded skill. The
+spatial suite uses Cartopy for Bangladesh-region coastlines, national and
+administrative boundaries, and geographic labels.
+
 To test whether an apparent IMERG/CHIRPS displacement is a date lag or a fixed
 grid shift, use the CPU-only, footprint-matched diagnostic:
 

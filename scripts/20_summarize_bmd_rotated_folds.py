@@ -41,6 +41,37 @@ def weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
     return float(np.average(values[valid], weights=weights[valid])) if valid.any() else float("nan")
 
 
+def circular_block_bootstrap(
+    values: np.ndarray,
+    block_length: int = 3,
+    replicates: int = 10_000,
+    seed: int = 201805,
+) -> dict:
+    """Bootstrap a daily mean while retaining short rainfall-event sequences."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return {"block_length_days": block_length, "replicates": replicates, "ci_95_mm": [None, None]}
+    block_length = min(max(1, block_length), len(values))
+    blocks_needed = int(math.ceil(len(values) / block_length))
+    offsets = np.arange(block_length)
+    rng = np.random.default_rng(seed)
+    estimates = np.empty(replicates, dtype=float)
+    for index in range(replicates):
+        starts = rng.integers(0, len(values), size=blocks_needed)
+        selected = ((starts[:, None] + offsets[None]) % len(values)).ravel()[: len(values)]
+        estimates[index] = float(np.mean(values[selected]))
+    lower, upper = np.quantile(estimates, [0.025, 0.975])
+    return {
+        "block_length_days": block_length,
+        "replicates": replicates,
+        "seed": seed,
+        "mean_daily_difference_mm": float(np.mean(values)),
+        "ci_95_mm": [float(lower), float(upper)],
+        "ci_excludes_zero_for_simultaneous": bool(upper < 0),
+    }
+
+
 def json_safe(value):
     if isinstance(value, dict):
         return {key: json_safe(item) for key, item in value.items()}
@@ -76,6 +107,7 @@ def main() -> None:
                 "withheld_ids": [str(value) for value in scope["withheld_station_ids"]],
                 "withheld_names": scope["withheld_station_names"],
                 "methods": methods,
+                "daily_crps": payload["daily_crps_mm"],
             }
         )
     folds.sort(key=lambda item: item["fold"])
@@ -141,13 +173,25 @@ def main() -> None:
     simultaneous_crps = metric("Simultaneous", "crps_mm")
     fold_difference = simultaneous_crps - gauge_crps
     pooled_difference = aggregate["Simultaneous"]["crps_mm"] - aggregate["Gauges only"]["crps_mm"]
+    daily_difference = np.mean(
+        np.stack(
+            [
+                np.asarray(item["daily_crps"]["Simultaneous"], dtype=float)
+                - np.asarray(item["daily_crps"]["Gauges only"], dtype=float)
+                for item in folds
+            ]
+        ),
+        axis=0,
+    )
+    bootstrap = circular_block_bootstrap(daily_difference)
     folds_won = int(np.sum(fold_difference < 0))
     required_wins = math.ceil(expected / 2)
     passes = bool(pooled_difference < 0 and folds_won >= required_wins)
     recommendation = "Simultaneous" if passes else "Gauges only"
 
+    day_count = len(folds[0]["dates"])
     summary = {
-        "experiment": "offset-minus-one five-day rotated BMD spatial holdout",
+        "experiment": f"offset-minus-one {day_count}-day rotated BMD spatial holdout",
         "primary_reference": "BMD gauges withheld once each across disjoint folds",
         "observation_dates": folds[0]["dates"],
         "background_day_offset": -1,
@@ -175,11 +219,15 @@ def main() -> None:
             "pooled_difference_mm": float(pooled_difference),
             "simultaneous_fold_wins": folds_won,
             "required_fold_wins": required_wins,
+            "day_block_bootstrap": bootstrap,
             "passes": passes,
             "rule": "pooled CRPS must be lower and simultaneous must win at least half the folds",
         },
         "provisional_recommendation": recommendation,
-        "caveat": "Five 2018 days are still inside checkpoint training; extend the winning configuration to a longer period and an excluded year.",
+        "caveat": (
+            f"These {day_count} days from 2018 are inside checkpoint training; "
+            "final skill requires an excluded model year."
+        ),
     }
 
     x = np.arange(expected)
@@ -194,6 +242,15 @@ def main() -> None:
     axes[0, 1].axhline(0, color="black", lw=1)
     axes[0, 1].set_title("B. Fusion gate by fold")
     axes[0, 1].set_ylabel("Simultaneous − gauges CRPS")
+    lower, upper = bootstrap["ci_95_mm"]
+    axes[0, 1].text(
+        0.02,
+        0.97,
+        f"day-block 95% CI: [{lower:+.2f}, {upper:+.2f}] mm",
+        transform=axes[0, 1].transAxes,
+        va="top",
+        fontsize=8,
+    )
 
     aggregate_crps = [aggregate[method]["crps_mm"] for method in METHODS]
     aggregate_sd = [aggregate[method]["fold_crps_sd_mm"] for method in METHODS]
