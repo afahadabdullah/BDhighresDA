@@ -419,9 +419,9 @@ one directory; no renaming is required:
 ```text
 data/bmd/bmd.csv
 data/bmd/Stations.csv
-data/imerg/3B-HHR.MS.MRG.3IMERG.20180430-S030000-E032959.0180.V07B.HDF5.SUB.nc4
+data/imerg_halfhourly/3B-HHR.MS.MRG.3IMERG.20180430-S030000-E032959.0180.V07B.HDF5.SUB.nc4
 ...
-data/imerg/3B-HHR.MS.MRG.3IMERG.20180531-S023000-E025959.0150.V07B.HDF5.SUB.nc4
+data/imerg_halfhourly/3B-HHR.MS.MRG.3IMERG.20180531-S023000-E025959.0150.V07B.HDF5.SUB.nc4
 ```
 
 For the required five-day controlled test, submit from the repository root:

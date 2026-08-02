@@ -170,7 +170,7 @@ station-space diagnostics plus spatial maps. May 2018 is inside the CPC
 checkpoint's training period, so this is a workflow demonstration rather than
 an independent temporal skill estimate.
 
-After downloading the half-hourly V07B files under `data/imerg`, including
+After downloading the half-hourly V07B files under `data/imerg_halfhourly`, including
 2018-04-30 for the first BMD reporting window, run the five-day five-arm
 controlled experiment:
 

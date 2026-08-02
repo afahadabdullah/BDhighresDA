@@ -38,7 +38,7 @@ mkdir -p "$MPLCONFIGDIR" data/processed logs
 
 RAINFALL="${BMD_RAINFALL:-data/bmd/bmd.csv}"
 STATIONS="${BMD_STATIONS:-data/bmd/Stations.csv}"
-IMERG_DIR="${IMERG_DIR:-data/imerg}"
+IMERG_DIR="${IMERG_DIR:-data/imerg_halfhourly}"
 IMERG_SOURCE_FREQUENCY="${IMERG_SOURCE_FREQUENCY:-half-hourly}"
 BMD_ACCUMULATION_END_HOUR_UTC="${BMD_ACCUMULATION_END_HOUR_UTC:-3}"
 START="${BMD_START:-2018-05-01}"

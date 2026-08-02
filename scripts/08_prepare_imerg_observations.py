@@ -23,7 +23,7 @@ from bdhires.imerg import load_imerg_bmd_windows, load_imerg_daily  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data/imerg")
+    parser.add_argument("--input", default="data/imerg_halfhourly")
     parser.add_argument(
         "--source-frequency",
         choices=("half-hourly", "daily"),

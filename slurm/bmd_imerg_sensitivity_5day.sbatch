@@ -21,7 +21,7 @@ LABEL="aligned_r${R_VALUE}_l75-100"
 
 export BMD_START="2018-05-01"
 export BMD_END="2018-05-05"
-export IMERG_DIR="${IMERG_DIR:-data/imerg}"
+export IMERG_DIR="${IMERG_DIR:-data/imerg_halfhourly}"
 export IMERG_SOURCE_FREQUENCY="half-hourly"
 export BMD_ACCUMULATION_END_HOUR_UTC="3"
 export IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-48}"
