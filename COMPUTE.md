@@ -424,6 +424,30 @@ data/imerg_halfhourly/3B-HHR.MS.MRG.3IMERG.20180430-S030000-E032959.0180.V07B.HD
 data/imerg_halfhourly/3B-HHR.MS.MRG.3IMERG.20180531-S023000-E025959.0150.V07B.HDF5.SUB.nc4
 ```
 
+Download all exact May 2018 windows on a CPU node with:
+
+```bash
+slurm/submit_download_imerg_halfhourly_may2018.sh
+```
+
+This requests 1,488 regional subset granules spanning interval starts
+2018-04-30 03:00 through 2018-05-31 02:30 UTC. The downloader uses explicit
+`wget -O` destinations, avoiding the GES DISC "name is too long" query-string
+filename, and skips existing files that pass a NetCDF/HDF signature check.
+Rerunning the same command therefore resumes an interrupted download. It also
+prepares and strictly validates all 31 reporting windows, writing:
+
+```text
+data/processed/imerg_bd_aligned_20180501_31.nc
+data/processed/imerg_bd_aligned_20180501_31_qc.json
+```
+
+This exact observation window already uses part of the preceding UTC calendar
+day. Do not shift IMERG back by another day: for BMD date `D`, use the 48
+half-hours from `D-1 03:00` through `D 02:30` UTC. A separate `D-1` sensitivity
+is appropriate only for the checkpoint's calendar-day CPC and ERA5 prior
+fields.
+
 For the required five-day controlled test, submit from the repository root:
 
 ```bash

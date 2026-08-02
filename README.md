@@ -170,15 +170,29 @@ station-space diagnostics plus spatial maps. May 2018 is inside the CPC
 checkpoint's training period, so this is a workflow demonstration rather than
 an independent temporal skill estimate.
 
-After downloading the half-hourly V07B files under `data/imerg_halfhourly`, including
-2018-04-30 for the first BMD reporting window, run the five-day four-arm
-controlled experiment:
+Download and validate the exact half-hourly V07B inputs for all May 2018 BMD
+reporting days with:
+
+```bash
+slurm/submit_download_imerg_halfhourly_may2018.sh
+```
+
+The resumable job requests regional subsets only, reuses valid files already
+under `data/imerg_halfhourly`, and writes each response with an explicit short
+output name instead of the GES DISC query string. It downloads 1,488 granules:
+2018-04-30 03:00 through 2018-05-31 02:30 UTC. It then builds and validates
+`data/processed/imerg_bd_aligned_20180501_31.nc`.
+
+After that download, run the five-day four-arm controlled experiment:
 
 ```bash
 slurm/submit_bmd_imerg_controlled_5day.sh
 ```
 
-The BMD date is a 24-hour accumulation ending at 03:00 UTC, whereas the CPC
+Do not apply an additional one-day shift to these IMERG observations. For BMD
+date `D`, the correct half-hourly IMERG window is already `D-1 03:00` through
+`D 02:30` UTC. The BMD date is a 24-hour accumulation ending at 03:00 UTC,
+whereas the CPC
 condition and ERA5 state means in the checkpoint are calendar-day fields. Run
 the matched previous-day background sensitivity with:
 
