@@ -341,6 +341,10 @@ def main() -> None:
     gauge = np.asarray(data["gauge_mm"], dtype=np.float64)
     observed = gauge[:, eval_idx]
     has_imerg = bool(report.get("scope", {}).get("imerg_assimilated", False))
+    background_day_offset = int(
+        report.get("scope", {}).get("background_day_offset", 0)
+    )
+    background_dates = report.get("scope", {}).get("background_dates", [])
     imerg_error = report.get("observation_error", {}).get("imerg") or {}
     sequential_config = report.get("sequential_update", {})
     primary_support = sequential_config.get(
@@ -348,6 +352,7 @@ def main() -> None:
     )
     control_text = (
         "IMERG window: previous-day 03:00 to selected-day 03:00 UTC; "
+        f"checkpoint background D{background_day_offset:+d}; "
         f"stride {imerg_error.get('footprint_stride', '?')}; "
         f"total IMERG R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
         f"sequential localization {primary_support:.0f} km"
@@ -431,6 +436,8 @@ def main() -> None:
             "dump": args.dump,
             "source_report": args.report,
             "dates": [str(value) for value in time],
+            "background_day_offset": background_day_offset,
+            "background_dates": background_dates,
             "station_days": int(np.isfinite(observed).sum()),
             "assimilated_stations": int(len(assim_idx)),
             "withheld_stations": int(len(eval_idx)),
@@ -475,6 +482,11 @@ def main() -> None:
             "May 2018 lies inside the checkpoint training period.",
             "IMERG Final has monthly GPCC gauge adjustment; BMD/GPCC overlap must be audited.",
             "IMERG uses exact BMD 03:00-03:00 UTC accumulation windows.",
+            (
+                "The complete checkpoint item is offset together: CPC, ERA5 state "
+                "means, residual base and seasonal encoding. Observation-date CHIRPS "
+                "is unchanged and remains contextual only."
+            ),
             "CPC and CHIRPS are calendar-labelled products shown only as contextual intercomparisons.",
         ],
     }

@@ -514,6 +514,37 @@ The fusion gate is strict: simultaneous or sequential DA must have lower
 withheld-BMD CRPS than gauges-only. Five days and one station split remain a
 process gate; they cannot support a final product-skill claim.
 
+### CPC/ERA5 background timing sensitivity
+
+The BMD observation labelled day `D` covers previous-day 03:00 through day
+`D` 03:00 UTC. The checkpoint's daily CPC condition and five ERA5 state means
+are calendar-day fields. Run this matched sensitivity before interpreting the
+aligned five-day assimilation as a timing-correct result:
+
+```bash
+slurm/submit_bmd_imerg_offset_m1_5day.sh
+```
+
+The observation side is unchanged: BMD and half-hourly IMERG still cover
+2018-05-01 through 2018-05-05 using exact 03:00-to-03:00 windows. Only the
+complete checkpoint prior moves back one day, from 2018-05-01--05 to
+2018-04-30--2018-05-04. CPC, CPC validity, all ERA5 channels, the CPC residual
+base and seasonal encoding move together. CHIRPS is not an input; its
+observation-date field stays fixed as contextual intercomparison only. The
+offset-0 and offset-1 runs also use the same station holdout and
+observation-date-based random seeds.
+
+The separate outputs begin with:
+
+```text
+data/processed/bmd_imerg_aligned_offset_m1_20180501_05
+```
+
+Compare its withheld-BMD CRPS, RMSE, correlation, spread/skill, coverage and
+day/station matrices against `bmd_imerg_aligned_20180501_05`. Select the timing
+by the fused method's performance across rotated station folds; do not select
+it from CHIRPS agreement or one five-day aggregate alone.
+
 After the baseline controlled run, submit the requested satellite-weight and
 localization sensitivity:
 

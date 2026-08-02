@@ -178,6 +178,19 @@ controlled experiment:
 slurm/submit_bmd_imerg_controlled_5day.sh
 ```
 
+The BMD date is a 24-hour accumulation ending at 03:00 UTC, whereas the CPC
+condition and ERA5 state means in the checkpoint are calendar-day fields. Run
+the matched previous-day background sensitivity with:
+
+```bash
+slurm/submit_bmd_imerg_offset_m1_5day.sh
+```
+
+This keeps BMD/IMERG observation windows, observation-date CHIRPS context, the
+withheld stations and random seeds fixed, while shifting the CPC/ERA5 prior,
+CPC residual base and seasonal encoding from `D` to `D-1`. Its outputs use the prefix
+`data/processed/bmd_imerg_aligned_offset_m1_20180501_05`.
+
 It compares background, gauges-only, correlation-controlled IMERG-only,
 stabilized simultaneous DA, and IMERG followed by a localized serial gauge
 update. It strictly requires the 240 half-hourly granules from 2018-04-30

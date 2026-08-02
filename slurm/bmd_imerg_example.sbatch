@@ -43,6 +43,7 @@ IMERG_SOURCE_FREQUENCY="${IMERG_SOURCE_FREQUENCY:-half-hourly}"
 BMD_ACCUMULATION_END_HOUR_UTC="${BMD_ACCUMULATION_END_HOUR_UTC:-3}"
 START="${BMD_START:-2018-05-01}"
 END="${BMD_END:-2018-05-31}"
+BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:-0}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
 MEMBERS="${BMD_MEMBERS:-16}"
@@ -78,6 +79,7 @@ echo "IMERG source directory: $IMERG_DIR"
 echo "IMERG source frequency: $IMERG_SOURCE_FREQUENCY"
 echo "BMD accumulation end: ${BMD_ACCUMULATION_END_HOUR_UTC}:00 UTC"
 echo "Period: $START to $END"
+echo "Checkpoint background day offset: ${BACKGROUND_DAY_OFFSET}"
 echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
 echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
@@ -112,6 +114,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --imerg "$IMERG_PREPARED" \
     --start "$START" \
     --end "$END" \
+    --background-day-offset "$BACKGROUND_DAY_OFFSET" \
     --members "$MEMBERS" \
     --withhold "$WITHHOLD" \
     --imerg-stride "$IMERG_STRIDE" \

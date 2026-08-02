@@ -65,6 +65,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", default="2018-05-01")
     parser.add_argument("--end", default="2018-05-31")
+    parser.add_argument(
+        "--background-day-offset",
+        type=int,
+        default=0,
+        help=(
+            "whole checkpoint-item offset relative to each BMD/IMERG date; "
+            "-1 uses previous-day CPC, ERA5 states, residual base and season; "
+            "observation-date CHIRPS remains contextual only"
+        ),
+    )
     parser.add_argument("--members", type=int, default=16)
     parser.add_argument("--withhold", type=float, default=0.2)
     parser.add_argument("--min-coverage", type=float, default=0.8)
@@ -307,12 +317,31 @@ def main() -> None:
         climatology=load_climatology(data_stats, stats),
     )
     times = dataset.time
-    selected = np.where(
+    observation_selected = np.where(
         (times >= np.datetime64(args.start)) & (times <= np.datetime64(args.end))
     )[0]
-    if not len(selected):
+    if not len(observation_selected):
         raise ValueError(f"no checkpoint-bound data between {args.start} and {args.end}")
-    selected_times = times[selected]
+    selected_times = times[observation_selected]
+    background_times = selected_times + np.timedelta64(args.background_day_offset, "D")
+    time_to_store_index = {
+        np.datetime64(value, "D"): index for index, value in enumerate(times)
+    }
+    missing_background = [
+        str(np.datetime64(value, "D"))
+        for value in background_times
+        if np.datetime64(value, "D") not in time_to_store_index
+    ]
+    if missing_background:
+        raise ValueError(
+            "checkpoint lacks background dates required by "
+            f"--background-day-offset={args.background_day_offset}: "
+            + ", ".join(missing_background)
+        )
+    selected = np.array(
+        [time_to_store_index[np.datetime64(value, "D")] for value in background_times],
+        dtype=np.int64,
+    )
 
     # Coverage is intentionally evaluated over the requested month, not over
     # the model's full 1981-2025 time axis.
@@ -342,6 +371,12 @@ def main() -> None:
         f"[bmd] {selected_times[0].astype('datetime64[D]')} to "
         f"{selected_times[-1].astype('datetime64[D]')}: {len(stations)} stations, "
         f"{len(assim_idx)} assimilated, {len(eval_idx)} withheld",
+        flush=True,
+    )
+    print(
+        f"[bmd] checkpoint background offset {args.background_day_offset:+d} day(s): "
+        f"{background_times[0].astype('datetime64[D]')} to "
+        f"{background_times[-1].astype('datetime64[D]')}",
         flush=True,
     )
     print("[bmd] withheld:", ", ".join(station_names[eval_idx]), flush=True)
@@ -464,7 +499,10 @@ def main() -> None:
         item = dataset[dataset_position]
         cond = item["cond"][None].to(device)
         base = item["base"][None].to(device)
-        day_seed = args.seed + int(data_index)
+        # Key every stochastic arm to the observation date, not the shifted
+        # checkpoint date. Offset 0 and -1 therefore use matched prior noise,
+        # gauge perturbations and IMERG perturbations.
+        day_seed = args.seed + int(observation_selected[day_position])
         day_sampler = replace(sampler, seed=day_seed)
         day_background_sampler = replace(background_sampler, seed=day_seed)
 
@@ -633,7 +671,12 @@ def main() -> None:
                 )
                 sequential_diagnostics[key].append(sequential_day)
 
-        chirps[day_position] = np.asarray(dataset.z["target"][int(data_index)][slices])
+        # CHIRPS is not a checkpoint input. Keep this non-independent context
+        # on the observation date so timing arms differ only in their prior.
+        observation_store_index = int(observation_selected[day_position])
+        chirps[day_position] = np.asarray(
+            dataset.z["target"][observation_store_index][slices]
+        )
         if cpc_full_index is not None:
             condition[day_position] = np.asarray(
                 dataset.z["cond"][int(data_index)][cpc_full_index][slices]
@@ -642,7 +685,8 @@ def main() -> None:
             condition[day_position].fill(np.nan)
         print(
             f"[bmd] {day_position + 1:02d}/{len(selected)} "
-            f"{selected_times[day_position].astype('datetime64[D]')}",
+            f"obs={selected_times[day_position].astype('datetime64[D]')} "
+            f"background={background_times[day_position].astype('datetime64[D]')}",
             flush=True,
         )
 
@@ -820,6 +864,13 @@ def main() -> None:
         "scope": {
             "start": args.start,
             "end": args.end,
+            "observation_dates": [
+                str(value.astype("datetime64[D]")) for value in selected_times
+            ],
+            "background_day_offset": int(args.background_day_offset),
+            "background_dates": [
+                str(value.astype("datetime64[D]")) for value in background_times
+            ],
             "checkpoint": args.ckpt,
             "checkpoint_data": data_zarr,
             "checkpoint_stats": data_stats,
@@ -848,8 +899,11 @@ def main() -> None:
             ),
             "timing_note": (
                 "IMERG is aligned exactly to each BMD 24-hour window from previous-day "
-                "03:00 UTC through selected-day 03:00 UTC. CPC and CHIRPS remain "
-                "calendar-labelled daily products and are contextual comparisons only."
+                "03:00 UTC through selected-day 03:00 UTC. The complete checkpoint "
+                f"item uses an offset of {args.background_day_offset:+d} day(s), so CPC, "
+                "ERA5 state means, the residual base and seasonal encoding remain "
+                "internally paired. CHIRPS is not a model input and remains on the "
+                "observation date as non-independent context only."
             ),
         },
         "network": {
@@ -1028,6 +1082,7 @@ def main() -> None:
         assim_idx=assim_idx,
         eval_idx=eval_idx,
         time=selected_times.astype("datetime64[ns]").astype("i8"),
+        background_time=background_times.astype("datetime64[ns]").astype("i8"),
         grid_lat=grid.lat,
         grid_lon=grid.lon,
         valid=valid,
