@@ -6,11 +6,11 @@ The default May 2018 period is inside the CPC checkpoint's training years, but
 the withheld BMD gauges never enter this likelihood and therefore reveal
 whether real gauge ingestion, guidance, and station-space verification work.
 
-When ``--imerg`` is supplied, five controlled arms are run with matched seeds:
-background, gauges-only, IMERG-only, simultaneous gauges+IMERG, and a serial
-IMERG-then-gauges analysis. Satellite footprints are thinned and their
-variance is inflated by an approximate correlation area so thousands of
-correlated pixels are not treated as independent evidence.
+When ``--imerg`` is supplied, four controlled arms are run with matched seeds:
+background, gauges-only, IMERG-only, and simultaneous gauges+IMERG. Satellite
+footprints are thinned and their variance is inflated by an approximate
+correlation area so thousands of correlated pixels are not treated as
+independent evidence.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bdhires.bmd import spread_holdout  # noqa: E402
+from bdhires.bmd import spread_folds, spread_holdout  # noqa: E402
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
     CompositeObsOperator,
@@ -41,7 +41,6 @@ from bdhires.da import (  # noqa: E402
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
-from bdhires.ensrf import localized_serial_ensrf  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
 from bdhires.grids import Grid, WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
@@ -77,6 +76,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--members", type=int, default=16)
     parser.add_argument("--withhold", type=float, default=0.2)
+    parser.add_argument(
+        "--holdout-folds",
+        type=int,
+        default=1,
+        help="number of geographically spread folds; 1 retains the legacy holdout",
+    )
+    parser.add_argument(
+        "--holdout-fold",
+        type=int,
+        default=0,
+        help="zero-based fold to withhold when --holdout-folds is greater than 1",
+    )
     parser.add_argument("--min-coverage", type=float, default=0.8)
     parser.add_argument(
         "--imerg-stride",
@@ -89,17 +100,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="extra multiplier after spatial-correlation variance inflation",
-    )
-    parser.add_argument(
-        "--gauge-localization-km",
-        type=float,
-        default=150.0,
-        help="compact-support radius for the serial EnSRF gauge update",
-    )
-    parser.add_argument(
-        "--gauge-localizations-km",
-        default=None,
-        help="comma-separated localization sensitivity; last value is primary",
     )
     parser.add_argument("--seed", type=int, default=201805)
     parser.add_argument("--out", default="data/processed/bmd_may2018_example.npz")
@@ -268,23 +268,16 @@ def percent_reduction(background: dict, analysis: dict, metric: str) -> float:
 
 def main() -> None:
     args = parse_args()
-    localization_values = (
-        [float(value) for value in args.gauge_localizations_km.split(",") if value]
-        if args.gauge_localizations_km
-        else [float(args.gauge_localization_km)]
-    )
-    if not localization_values:
-        raise ValueError("at least one gauge localization is required")
-    primary_localization = localization_values[-1]
-    localization_key = lambda value: f"{value:g}"  # noqa: E731
     if not 0 < args.withhold < 1:
         raise ValueError("--withhold must lie strictly between zero and one")
+    if args.holdout_folds < 1:
+        raise ValueError("--holdout-folds must be at least one")
+    if not 0 <= args.holdout_fold < args.holdout_folds:
+        raise ValueError("--holdout-fold must be in [0, --holdout-folds)")
     if args.imerg_stride < 1:
         raise ValueError("--imerg-stride must be at least one")
     if args.imerg_r_multiplier <= 0:
         raise ValueError("--imerg-r-multiplier must be positive")
-    if any(value <= 0 for value in localization_values):
-        raise ValueError("all gauge localizations must be positive")
     config = yaml.safe_load(Path(args.config).read_text())
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     training_config = checkpoint["cfg"]
@@ -354,7 +347,16 @@ def main() -> None:
     if len(stations) < 5:
         raise ValueError(f"only {len(stations)} BMD stations remain after coverage filtering")
     n_withheld = max(1, min(len(stations) - 1, int(round(args.withhold * len(stations)))))
-    eval_idx = spread_holdout(stations.lat, stations.lon, n_withheld)
+    if args.holdout_folds > 1:
+        folds = spread_folds(stations.lat, stations.lon, args.holdout_folds)
+        eval_idx = folds[args.holdout_fold]
+        selection_description = (
+            f"geographically spread fold {args.holdout_fold + 1}/{args.holdout_folds}; "
+            "folds are disjoint and exhaustive"
+        )
+    else:
+        eval_idx = spread_holdout(stations.lat, stations.lon, n_withheld)
+        selection_description = "deterministic farthest-point spatial holdout"
     assim_idx = np.setdiff1d(np.arange(len(stations)), eval_idx)
 
     import pandas as pd
@@ -377,6 +379,11 @@ def main() -> None:
         f"[bmd] checkpoint background offset {args.background_day_offset:+d} day(s): "
         f"{background_times[0].astype('datetime64[D]')} to "
         f"{background_times[-1].astype('datetime64[D]')}",
+        flush=True,
+    )
+    print(
+        f"[bmd] holdout: {selection_description}; "
+        f"{len(eval_idx)} withheld and {len(assim_idx)} assimilated",
         flush=True,
     )
     print("[bmd] withheld:", ", ".join(station_names[eval_idx]), flush=True)
@@ -475,17 +482,6 @@ def main() -> None:
     analysis_gauge = np.empty(shape, dtype=np.float32)
     analysis_imerg = np.empty(shape, dtype=np.float32) if imerg is not None else None
     analysis_combined = np.empty(shape, dtype=np.float32) if imerg is not None else None
-    sequential_variants = (
-        {
-            localization_key(value): np.empty(shape, dtype=np.float32)
-            for value in localization_values
-        }
-        if imerg is not None
-        else {}
-    )
-    sequential_diagnostics: dict[str, list[dict]] = {
-        localization_key(value): [] for value in localization_values
-    }
     chirps = np.empty((len(selected), grid.nlat, grid.nlon), dtype=np.float32)
     condition = np.empty_like(chirps)
     cpc_full_index = (
@@ -594,7 +590,7 @@ def main() -> None:
             satellite_y = torch.from_numpy(satellite_perturbed[:, None]).to(device)
 
             # Arm 3: satellite-only generative posterior. This must remain
-            # physically bounded before it is allowed to seed a serial update.
+            # physically bounded before it is considered a viable product.
             generated_imerg = run_assim(
                 model,
                 cond,
@@ -644,33 +640,6 @@ def main() -> None:
                 valid[None], combined_mm, np.nan
             )
 
-            # Arm 5: a true sequence. The IMERG posterior ensemble becomes the
-            # background of a compactly localized serial square-root gauge
-            # update; the generative sampler is not restarted from noise.
-            gauge_variance = float(
-                float(gauge_config["sigma_obs"]) ** 2
-                + float(gauge_config["representativeness"]) ** 2
-            )
-            for localization in localization_values:
-                key = localization_key(localization)
-                sequential_mm, sequential_day = localized_serial_ensrf(
-                    analysis_imerg[day_position],
-                    gauge_mm[day_position, assim_idx],
-                    stations.lat[assim_idx],
-                    stations.lon[assim_idx],
-                    grid,
-                    transform,
-                    valid,
-                    observation_variance=gauge_variance,
-                    localization_km=localization,
-                    seed=day_seed + 3_000_000,
-                )
-                sequential_variants[key][day_position] = sequential_mm
-                sequential_day["date"] = str(
-                    selected_times[day_position].astype("datetime64[D]")
-                )
-                sequential_diagnostics[key].append(sequential_day)
-
         # CHIRPS is not a checkpoint input. Keep this non-independent context
         # on the observation date so timing arms differ only in their prior.
         observation_store_index = int(observation_selected[day_position])
@@ -690,12 +659,7 @@ def main() -> None:
             flush=True,
         )
 
-    analysis_sequential = (
-        sequential_variants[localization_key(primary_localization)]
-        if sequential_variants
-        else None
-    )
-    analysis = analysis_sequential if analysis_sequential is not None else analysis_gauge
+    analysis = analysis_combined if analysis_combined is not None else analysis_gauge
     background_at_stations = sample_at_stations(background, grid, stations.lat, stations.lon)
     gauge_at_stations = sample_at_stations(
         analysis_gauge, grid, stations.lat, stations.lon
@@ -710,16 +674,7 @@ def main() -> None:
         if analysis_combined is not None
         else gauge_at_stations
     )
-    sequential_at_stations = (
-        sample_at_stations(analysis_sequential, grid, stations.lat, stations.lon)
-        if analysis_sequential is not None
-        else gauge_at_stations
-    )
-    sequential_variant_at_stations = {
-        key: sample_at_stations(value, grid, stations.lat, stations.lon)
-        for key, value in sequential_variants.items()
-    }
-    analysis_at_stations = sequential_at_stations
+    analysis_at_stations = combined_at_stations
     chirps_at_stations = sample_at_stations(chirps, grid, stations.lat, stations.lon)
     condition_at_stations = sample_at_stations(condition, grid, stations.lat, stations.lon)
     imerg_at_stations = None
@@ -741,20 +696,12 @@ def main() -> None:
         imerg_analysis_at_stations[:, :, eval_idx], 1, 0
     )
     combined_eval = np.moveaxis(combined_at_stations[:, :, eval_idx], 1, 0)
-    sequential_eval = np.moveaxis(sequential_at_stations[:, :, eval_idx], 1, 0)
     observed_eval = gauge_mm[:, eval_idx]
     background_score = ensemble_score(background_eval, observed_eval)
     gauge_score = ensemble_score(gauge_eval, observed_eval)
     imerg_analysis_score = ensemble_score(imerg_analysis_eval, observed_eval)
     combined_score = ensemble_score(combined_eval, observed_eval)
-    sequential_score = ensemble_score(sequential_eval, observed_eval)
-    sequential_variant_scores = {
-        key: ensemble_score(
-            np.moveaxis(value[:, :, eval_idx], 1, 0), observed_eval
-        )
-        for key, value in sequential_variant_at_stations.items()
-    }
-    analysis_score = sequential_score
+    analysis_score = combined_score
     chirps_score = deterministic_score(chirps_at_stations[:, eval_idx], observed_eval)
     condition_score = deterministic_score(condition_at_stations[:, eval_idx], observed_eval)
     imerg_score = (
@@ -783,23 +730,10 @@ def main() -> None:
         ).mean(axis=1),
         np.nan,
     )
-    sequential_mean_grid = np.where(
-        valid[None], np.nan_to_num(analysis, nan=0.0).mean(axis=1), np.nan
-    )
     grid_background = deterministic_score(background_mean_grid, chirps)
     grid_gauge = deterministic_score(gauge_mean_grid, chirps)
     grid_imerg = deterministic_score(imerg_analysis_mean_grid, chirps)
     grid_combined = deterministic_score(combined_mean_grid, chirps)
-    grid_sequential = deterministic_score(sequential_mean_grid, chirps)
-    grid_sequential_variants = {
-        key: deterministic_score(
-            np.where(
-                valid[None], np.nan_to_num(value, nan=0.0).mean(axis=1), np.nan
-            ),
-            chirps,
-        )
-        for key, value in sequential_variants.items()
-    }
     chirps_ensemble_scores = {
         "background": ensemble_score(np.moveaxis(background, 1, 0), chirps),
         "gauges_only": ensemble_score(np.moveaxis(analysis_gauge, 1, 0), chirps),
@@ -819,7 +753,6 @@ def main() -> None:
             ),
             chirps,
         ),
-        "imerg_then_gauges": ensemble_score(np.moveaxis(analysis, 1, 0), chirps),
     }
 
     daily = []
@@ -828,7 +761,6 @@ def main() -> None:
         g = ensemble_score(gauge_eval[:, day], observed_eval[day])
         satellite = ensemble_score(imerg_analysis_eval[:, day], observed_eval[day])
         c = ensemble_score(combined_eval[:, day], observed_eval[day])
-        sequence = ensemble_score(sequential_eval[:, day], observed_eval[day])
         daily.append(
             {
                 "date": str(selected_times[day].astype("datetime64[D]")),
@@ -836,15 +768,11 @@ def main() -> None:
                 "gauges_only": g,
                 "imerg_only": satellite,
                 "simultaneous": c,
-                "imerg_then_gauges": sequence,
                 "background_to_gauges_crps_reduction_percent": percent_reduction(
                     b, g, "crps_mm"
                 ),
                 "background_to_simultaneous_crps_reduction_percent": percent_reduction(
                     b, c, "crps_mm"
-                ),
-                "imerg_to_sequential_crps_reduction_percent": percent_reduction(
-                    satellite, sequence, "crps_mm"
                 ),
             }
         )
@@ -857,7 +785,7 @@ def main() -> None:
     )
     report = {
         "experiment": (
-            "May 2018 controlled five-arm real-BMD plus real-IMERG DA example"
+            "May 2018 controlled four-arm real-BMD plus real-IMERG DA example"
             if imerg is not None
             else "May 2018 real-BMD gauge-only DA process example"
         ),
@@ -911,10 +839,12 @@ def main() -> None:
             "assimilated": int(len(assim_idx)),
             "withheld": int(len(eval_idx)),
             "withhold_fraction": float(args.withhold),
+            "holdout_fold": int(args.holdout_fold),
+            "holdout_folds": int(args.holdout_folds),
             "assimilated_ids": stations.ids[assim_idx].tolist(),
             "withheld_ids": stations.ids[eval_idx].tolist(),
             "withheld_names": station_names[eval_idx].tolist(),
-            "selection": "deterministic farthest-point spatial holdout",
+            "selection": selection_description,
         },
         "observation_error": {
             "gauges": {
@@ -951,23 +881,19 @@ def main() -> None:
                 if imerg is not None
                 else None
             ),
-            "note": "Provisional values; tune with rotated real-gauge withholding later.",
+            "note": "Provisional values; select methods with all rotated real-gauge folds.",
         },
         "withheld_gauges": {
             "background": background_score,
             "gauges_only": gauge_score,
             "imerg_only": imerg_analysis_score,
             "simultaneous": combined_score,
-            "imerg_then_gauges": sequential_score,
             "analysis": analysis_score,
             "background_to_gauges_crps_reduction_percent": percent_reduction(
                 background_score, gauge_score, "crps_mm"
             ),
             "background_to_simultaneous_crps_reduction_percent": percent_reduction(
                 background_score, combined_score, "crps_mm"
-            ),
-            "imerg_to_sequential_crps_reduction_percent": percent_reduction(
-                imerg_analysis_score, sequential_score, "crps_mm"
             ),
             "chirps": chirps_score,
             "cpc_condition": condition_score,
@@ -978,7 +904,6 @@ def main() -> None:
             "gauges_only": grid_gauge,
             "imerg_only": grid_imerg,
             "simultaneous": grid_combined,
-            "imerg_then_gauges": grid_sequential,
             "interpretation": (
                 "CHIRPS is the checkpoint target and May 2018 is in training; these are "
                 "consistency diagnostics, not independent truth scores."
@@ -993,30 +918,6 @@ def main() -> None:
                 "May 2018 lies inside checkpoint training and CHIRPS is gauge-based; "
                 "these are consistency scores, not independent validation."
             ),
-            "sequential_localization_sensitivity": {
-                key: ensemble_score(np.moveaxis(value, 1, 0), chirps)
-                for key, value in sequential_variants.items()
-            },
-        },
-        "sequential_update": {
-            "method": "localized serial deterministic ensemble square-root filter",
-            "state_space": "checkpoint precipitation-transform space",
-            "observation_operator": "physical bilinear point gauge then transform",
-            "localization": "Gaspari-Cohn compact support",
-            "primary_support_km": float(primary_localization),
-            "tested_support_km": localization_values,
-            "daily_innovations": sequential_diagnostics[
-                localization_key(primary_localization)
-            ],
-            "localization_sensitivity": {
-                key: {
-                    "support_km": float(key),
-                    "withheld_gauges": sequential_variant_scores[key],
-                    "chirps_grid_consistency": grid_sequential_variants[key],
-                    "daily_innovations": sequential_diagnostics[key],
-                }
-                for key in sequential_variants
-            },
         },
         "physical_ranges": {
             "background": physical_summary(background),
@@ -1027,7 +928,6 @@ def main() -> None:
             "simultaneous": physical_summary(
                 analysis_combined if analysis_combined is not None else analysis_gauge
             ),
-            "imerg_then_gauges": physical_summary(analysis),
             "interpretation": (
                 "Compare p99, p99.9 and max across arms. Very large satellite-arm "
                 "values indicate guidance instability even if a station metric improves."
@@ -1045,9 +945,6 @@ def main() -> None:
         analysis_imerg=(analysis_gauge if analysis_imerg is None else analysis_imerg),
         analysis_combined=(
             analysis_gauge if analysis_combined is None else analysis_combined
-        ),
-        analysis_sequential=(
-            analysis_gauge if analysis_sequential is None else analysis_sequential
         ),
         chirps=chirps,
         condition=condition,
@@ -1067,7 +964,6 @@ def main() -> None:
         gauge_analysis_at_stations=gauge_at_stations,
         imerg_analysis_at_stations=imerg_analysis_at_stations,
         combined_analysis_at_stations=combined_at_stations,
-        sequential_analysis_at_stations=sequential_at_stations,
         chirps_at_stations=chirps_at_stations,
         condition_at_stations=condition_at_stations,
         imerg_at_stations=(
@@ -1086,10 +982,6 @@ def main() -> None:
         grid_lat=grid.lat,
         grid_lon=grid.lon,
         valid=valid,
-        **{
-            f"analysis_sequential_l{key}": value
-            for key, value in sequential_variants.items()
-        },
     )
     Path(args.report).write_text(json.dumps(report, indent=2, allow_nan=True) + "\n")
     print(f"wrote {args.out}")
@@ -1098,8 +990,7 @@ def main() -> None:
         f"withheld CRPS background {background_score['crps_mm']:.2f}; "
         f"gauges {gauge_score['crps_mm']:.2f}; "
         f"IMERG {imerg_analysis_score['crps_mm']:.2f}; "
-        f"simultaneous {combined_score['crps_mm']:.2f}; "
-        f"IMERG->gauges {sequential_score['crps_mm']:.2f}"
+        f"simultaneous {combined_score['crps_mm']:.2f}"
     )
 
 

@@ -445,10 +445,10 @@ regional preparation keeps exact 0.1-degree footprints nested over the
 model's 0.05-degree grid and, by default, requires all 48 values at each
 footprint.
 
-The GPU stage evaluates five matched arms: background, gauges only, IMERG only,
-simultaneous gauges+IMERG, and IMERG followed by a localized serial deterministic
-ensemble square-root gauge update. The same six stations remain withheld in all
-arms. By default only every third IMERG footprint in each direction enters the
+The GPU stage evaluates four matched arms: background, gauges only, IMERG only,
+and simultaneous gauges+IMERG. The sequential IMERG-to-gauges update was
+retired after it failed the withheld-BMD probabilistic and deterministic gates.
+The same six stations remain withheld in all active arms. By default only every third IMERG footprint in each direction enters the
 likelihood, and its variance is inflated by the approximate residual correlation
 area. With a three-cell error length this is about 6.3x after thinning. This is
 an effective-sample approximation; it replaces the demonstrably invalid
@@ -479,9 +479,8 @@ data/processed/bmd_imerg_aligned_20180501_05_spatial.png
 data/processed/bmd_imerg_aligned_20180501_05_intercomparison.png
 ```
 
-The metric matrix, withheld-station scatter/rank histograms, and ten-column
-spatial suite compare all five arms. The JSON also records sequential gauge
-innovation RMSE before and after each update. Read withheld-BMD CRPS/RMSE and
+The metric matrix, withheld-station scatter/rank histograms, and nine-column
+spatial suite compare the four active arms. Read withheld-BMD CRPS/RMSE and
 the IMERG-only physical range first; a visually sharper map is not evidence of
 improvement.
 
@@ -510,8 +509,8 @@ data/processed/bmd_imerg_5day_method_selection.json
 data/processed/bmd_imerg_5day_method_selection.png
 ```
 
-The fusion gate is strict: simultaneous or sequential DA must have lower
-withheld-BMD CRPS than gauges-only. Five days and one station split remain a
+The fusion gate is strict: simultaneous DA must have lower withheld-BMD CRPS
+than gauges-only. Five days and one station split remain a
 process gate; they cannot support a final product-skill claim.
 
 ### CPC/ERA5 background timing sensitivity
@@ -545,18 +544,44 @@ day/station matrices against `bmd_imerg_aligned_20180501_05`. Select the timing
 by the fused method's performance across rotated station folds; do not select
 it from CHIRPS agreement or one five-day aggregate alone.
 
-After the baseline controlled run, submit the requested satellite-weight and
-localization sensitivity:
+### Rotated spatial holdout gate
+
+After accepting the previous-day CPC/ERA5 alignment, rotate the BMD holdout
+before tuning the satellite weight:
+
+```bash
+slurm/submit_bmd_imerg_rotated_folds_5day.sh
+```
+
+This submits a five-element GPU array, limited to two concurrent GPUs. The 30
+stations are partitioned into five deterministic, geographically spread,
+disjoint folds; every station is withheld exactly once. All folds use the
+same May 1--5 BMD/IMERG observation windows, `BACKGROUND_DAY_OFFSET=-1`, model
+checkpoint, IMERG stride/R, sampler configuration and observation-date seeds.
+Only the six withheld stations rotate.
+
+A dependent CPU job starts automatically after all five folds succeed and
+writes:
+
+```text
+data/processed/bmd_imerg_offset_m1_rotated_summary.json
+data/processed/bmd_imerg_offset_m1_rotated_summary.png
+```
+
+The simultaneous method passes only when its pooled withheld-BMD CRPS is below
+gauges-only and it wins at least half the folds. Otherwise gauges-only remains
+the selected DA product. The retired sequential method is excluded even when
+replotting older dumps.
+
+Only after this fold gate should an optional IMERG-R sensitivity be considered:
 
 ```bash
 slurm/submit_bmd_imerg_sensitivity_5day.sh
 ```
 
-This is a three-element GPU array for extra IMERG R multipliers 2, 4 and 8,
-limited to two concurrent GPUs. Each element evaluates 75 and 100 km sequential
-gauge localizations from the same generated IMERG ensemble, so localization
-does not duplicate GPU sampling. Files are labelled `r2_l75-100`,
-`r4_l75-100`, and `r8_l75-100`.
+That optional array now tests only extra IMERG R multipliers 2, 4 and 8 with
+the offset-minus-one background; it no longer runs localization or sequential
+updates.
 
 Legacy run reports still contain `chirps_spatial_evaluation` for reproducibility,
 but it is no longer used for method selection. Newly generated plots do not

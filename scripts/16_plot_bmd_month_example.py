@@ -31,7 +31,6 @@ METHOD_COLOURS = {
     "Gauges only": "#0077B6",
     "IMERG only": "#F4A261",
     "Simultaneous": "#D1495B",
-    "IMERG → gauges": "#2A9D8F",
 }
 
 
@@ -346,16 +345,12 @@ def main() -> None:
     )
     background_dates = report.get("scope", {}).get("background_dates", [])
     imerg_error = report.get("observation_error", {}).get("imerg") or {}
-    sequential_config = report.get("sequential_update", {})
-    primary_support = sequential_config.get(
-        "primary_support_km", sequential_config.get("support_km", np.nan)
-    )
+    network = report.get("network", {})
     control_text = (
         "IMERG window: previous-day 03:00 to selected-day 03:00 UTC; "
         f"checkpoint background D{background_day_offset:+d}; "
         f"stride {imerg_error.get('footprint_stride', '?')}; "
-        f"total IMERG R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
-        f"sequential localization {primary_support:.0f} km"
+        f"total IMERG R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×"
         if has_imerg and imerg_error
         else "gauge-only configuration"
     )
@@ -373,7 +368,6 @@ def main() -> None:
             {
                 "IMERG only": station_ensemble("imerg_analysis_at_stations"),
                 "Simultaneous": station_ensemble("combined_analysis_at_stations"),
-                "IMERG → gauges": station_ensemble("sequential_analysis_at_stations"),
             }
         )
     method_scores = {
@@ -428,7 +422,7 @@ def main() -> None:
         for name, ensemble in methods.items()
     }
     winner = min(method_scores, key=lambda name: method_scores[name]["crps_mm"])
-    fused = [name for name in ("Simultaneous", "IMERG → gauges") if name in methods]
+    fused = [name for name in ("Simultaneous",) if name in methods]
     best_fused = min(fused, key=lambda name: method_scores[name]["crps_mm"]) if fused else None
     gauge_crps = method_scores["Gauges only"]["crps_mm"]
     evaluation = {
@@ -438,13 +432,16 @@ def main() -> None:
             "dates": [str(value) for value in time],
             "background_day_offset": background_day_offset,
             "background_dates": background_dates,
+            "holdout_fold": network.get("holdout_fold", 0),
+            "holdout_folds": network.get("holdout_folds", 1),
+            "withheld_station_ids": network.get("withheld_ids", []),
+            "withheld_station_names": network.get("withheld_names", []),
             "station_days": int(np.isfinite(observed).sum()),
             "assimilated_stations": int(len(assim_idx)),
             "withheld_stations": int(len(eval_idx)),
             "primary_reference": "BMD stations withheld from every assimilation arm",
             "imerg_total_r_inflation": imerg_error.get("correlation_variance_inflation"),
             "imerg_extra_r_multiplier": imerg_error.get("extra_r_multiplier"),
-            "sequential_localization_km": primary_support,
         },
         "probabilistic_methods": method_scores,
         "deterministic_context": deterministic,
@@ -487,6 +484,7 @@ def main() -> None:
                 "means, residual base and seasonal encoding. Observation-date CHIRPS "
                 "is unchanged and remains contextual only."
             ),
+            "The retired sequential IMERG-to-gauges arm is excluded from selection.",
             "CPC and CHIRPS are calendar-labelled products shown only as contextual intercomparisons.",
         ],
     }
@@ -762,7 +760,7 @@ def main() -> None:
     analysis_gauge = np.asarray(data["analysis_gauge"] if "analysis_gauge" in data.files else data["analysis"])
     analysis_imerg = np.asarray(data["analysis_imerg"] if "analysis_imerg" in data.files else data["analysis"])
     analysis_combined = np.asarray(data["analysis_combined"] if "analysis_combined" in data.files else data["analysis"])
-    analysis = np.asarray(data["analysis_sequential"] if "analysis_sequential" in data.files else data["analysis"])
+    analysis = analysis_combined if has_imerg else analysis_gauge
     imerg = np.asarray(data["imerg"]) if "imerg" in data.files else None
     valid_grid = np.asarray(data["valid"]).astype(bool)
 
@@ -793,7 +791,7 @@ def main() -> None:
 
     grid_lat, grid_lon = data["grid_lat"], data["grid_lon"]
     extent = [grid_lon[0], grid_lon[-1], grid_lat[0], grid_lat[-1]]
-    n_columns = 10 if has_imerg else 7
+    n_columns = 9 if has_imerg else 7
     figure, axes = plt.subplots(
         len(selected_days), n_columns,
         figsize=(3.2 * n_columns, 3.4 * len(selected_days)), constrained_layout=True,
@@ -804,8 +802,7 @@ def main() -> None:
         [
             "CPC input", "IMERG observation", "CHIRPS context\n(not truth)",
             "Background mean", "Gauges-only mean", "IMERG-only mean",
-            "Simultaneous mean", "IMERG → gauges mean",
-            "Sequential − background", "Sequential spread",
+            "Simultaneous mean", "Simultaneous − background", "Simultaneous spread",
         ]
         if has_imerg
         else [
@@ -819,7 +816,7 @@ def main() -> None:
             precipitation_fields.extend(
                 [
                     imerg[day], chirps[day], background_mean_field[day], gauge_mean_field[day],
-                    imerg_mean_field[day], combined_mean_field[day], analysis_mean_field[day],
+                    imerg_mean_field[day], combined_mean_field[day],
                 ]
             )
         else:
@@ -845,7 +842,7 @@ def main() -> None:
                 analysis_spread[day], origin="lower", extent=extent, cmap="magma", vmin=0, vmax=spread_limit
             )
         )
-        method_columns = range(3, 8) if has_imerg else range(2, 5)
+        method_columns = range(3, 7) if has_imerg else range(2, 5)
         for column in method_columns:
             add_rain_markers(axes[row, column], lon, lat, gauge[day], assim_idx, eval_idx, rain_max)
         axes[row, 0].set_ylabel(f"{time[day]}\nBMD mean {np.nanmean(gauge[day]):.1f} mm", fontsize=9)
@@ -880,7 +877,6 @@ def main() -> None:
         ("Gauges only", gauge_mean_field),
         ("IMERG only", imerg_mean_field),
         ("Simultaneous", combined_mean_field),
-        ("IMERG → gauges", analysis_mean_field),
     ]
     if not has_imerg:
         product_daily = [item for item in product_daily if "IMERG" not in item[0]]

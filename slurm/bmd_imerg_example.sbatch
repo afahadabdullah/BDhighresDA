@@ -10,9 +10,9 @@
 #SBATCH --output=logs/%x-%j.out
 
 # Bounded May 2018 real-observation experiment: exact 03:00-03:00 UTC BMD
-# reporting windows, background, gauges-only,
-# correlation-controlled IMERG-only, stabilized simultaneous DA, and a serial
-# IMERG-to-localized-gauges update. Six spread BMD stations remain withheld.
+# reporting windows, background, gauges-only, correlation-controlled
+# IMERG-only, and stabilized simultaneous DA. BMD stations remain withheld
+# from every active assimilation arm.
 
 set -euo pipefail
 
@@ -48,11 +48,11 @@ CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
 MEMBERS="${BMD_MEMBERS:-16}"
 WITHHOLD="${BMD_WITHHOLD:-0.2}"
+HOLDOUT_FOLDS="${BMD_HOLDOUT_FOLDS:-1}"
+HOLDOUT_FOLD="${BMD_HOLDOUT_FOLD:-0}"
 IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-48}"
 IMERG_STRIDE="${IMERG_STRIDE:-3}"
 IMERG_R_MULTIPLIER="${IMERG_R_MULTIPLIER:-1.0}"
-GAUGE_LOCALIZATION_KM="${GAUGE_LOCALIZATION_KM:-150}"
-GAUGE_LOCALIZATIONS_KM="${GAUGE_LOCALIZATIONS_KM:-}"
 
 DAILY="${BMD_DAILY:-data/processed/bmd_daily_may2018.csv}"
 STATION_SUMMARY="${BMD_STATION_SUMMARY:-data/processed/bmd_stations_may2018.csv}"
@@ -82,9 +82,8 @@ echo "Period: $START to $END"
 echo "Checkpoint background day offset: ${BACKGROUND_DAY_OFFSET}"
 echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
+echo "Holdout fold: $HOLDOUT_FOLD of $HOLDOUT_FOLDS"
 echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
-echo "Sequential gauge localization: $GAUGE_LOCALIZATION_KM km"
-[[ -z "$GAUGE_LOCALIZATIONS_KM" ]] || echo "Localization sensitivity: $GAUGE_LOCALIZATIONS_KM km"
 echo "NOTE: 2018 is in checkpoint training; this is a process test, not final skill."
 echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 
@@ -117,10 +116,10 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --background-day-offset "$BACKGROUND_DAY_OFFSET" \
     --members "$MEMBERS" \
     --withhold "$WITHHOLD" \
+    --holdout-folds "$HOLDOUT_FOLDS" \
+    --holdout-fold "$HOLDOUT_FOLD" \
     --imerg-stride "$IMERG_STRIDE" \
     --imerg-r-multiplier "$IMERG_R_MULTIPLIER" \
-    --gauge-localization-km "$GAUGE_LOCALIZATION_KM" \
-    --gauge-localizations-km "$GAUGE_LOCALIZATIONS_KM" \
     --out "$DUMP" \
     --report "$REPORT"
 

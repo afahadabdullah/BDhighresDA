@@ -10,25 +10,24 @@
 #SBATCH --array=0-2%2
 #SBATCH --output=logs/%x-%A_%a.out
 
-# Three controlled satellite weights. Each GPU run generates its satellite
-# posterior once, then evaluates 75 and 100 km gauge localizations on CPU.
+# Optional post-fold sensitivity for three controlled satellite weights.
+# The failed sequential IMERG-to-gauges method is not run.
 
 set -euo pipefail
 
 R_VALUES=(2 4 8)
 R_VALUE="${R_VALUES[$SLURM_ARRAY_TASK_ID]}"
-LABEL="aligned_r${R_VALUE}_l75-100"
+LABEL="offset_m1_r${R_VALUE}"
 
 export BMD_START="2018-05-01"
 export BMD_END="2018-05-05"
+export BACKGROUND_DAY_OFFSET="-1"
 export IMERG_DIR="${IMERG_DIR:-data/imerg_halfhourly}"
 export IMERG_SOURCE_FREQUENCY="half-hourly"
 export BMD_ACCUMULATION_END_HOUR_UTC="3"
 export IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-48}"
 export IMERG_STRIDE="${IMERG_STRIDE:-3}"
 export IMERG_R_MULTIPLIER="$R_VALUE"
-export GAUGE_LOCALIZATION_KM="100"
-export GAUGE_LOCALIZATIONS_KM="75,100"
 
 export BMD_DAILY="data/processed/bmd_daily_sensitivity_${LABEL}.csv"
 export BMD_STATION_SUMMARY="data/processed/bmd_stations_sensitivity_${LABEL}.csv"
@@ -45,5 +44,5 @@ export BMD_INTERCOMPARISON="data/processed/bmd_imerg_sensitivity_${LABEL}_interc
 export BMD_EVALUATION="data/processed/bmd_imerg_sensitivity_${LABEL}_evaluation.json"
 
 cd "$SLURM_SUBMIT_DIR"
-echo "Aligned sensitivity case: IMERG extra R=${R_VALUE}x; localizations=75,100 km"
+echo "Offset -1 sensitivity case: IMERG extra R=${R_VALUE}x"
 exec bash slurm/bmd_imerg_example.sbatch

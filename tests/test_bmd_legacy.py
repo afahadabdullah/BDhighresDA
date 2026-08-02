@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bdhires.bmd import read_legacy_bmd, spread_holdout
+from bdhires.bmd import read_legacy_bmd, spread_folds, spread_holdout
 
 
 def test_legacy_bmd_conversion_handles_report_header_aliases_and_missing(tmp_path: Path):
@@ -42,3 +42,17 @@ def test_spread_holdout_is_deterministic_and_separated():
     assert selected.tolist() == spread_holdout(lat, lon, 4).tolist()
     assert len(np.unique(selected)) == 4
     assert 4 not in selected
+
+
+def test_spread_folds_are_deterministic_balanced_and_exhaustive():
+    lat = np.repeat(np.arange(5, dtype=float), 6)
+    lon = np.tile(np.arange(6, dtype=float), 5)
+
+    folds = spread_folds(lat, lon, n_splits=5)
+
+    assert [fold.tolist() for fold in folds] == [
+        fold.tolist() for fold in spread_folds(lat, lon, n_splits=5)
+    ]
+    assert [len(fold) for fold in folds] == [6] * 5
+    assert np.array_equal(np.sort(np.concatenate(folds)), np.arange(30))
+    assert sum(len(np.unique(fold)) for fold in folds) == 30

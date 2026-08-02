@@ -171,7 +171,7 @@ checkpoint's training period, so this is a workflow demonstration rather than
 an independent temporal skill estimate.
 
 After downloading the half-hourly V07B files under `data/imerg_halfhourly`, including
-2018-04-30 for the first BMD reporting window, run the five-day five-arm
+2018-04-30 for the first BMD reporting window, run the five-day four-arm
 controlled experiment:
 
 ```bash
@@ -192,8 +192,8 @@ CPC residual base and seasonal encoding from `D` to `D-1`. Its outputs use the p
 `data/processed/bmd_imerg_aligned_offset_m1_20180501_05`.
 
 It compares background, gauges-only, correlation-controlled IMERG-only,
-stabilized simultaneous DA, and IMERG followed by a localized serial gauge
-update. It strictly requires the 240 half-hourly granules from 2018-04-30
+and stabilized simultaneous DA. The failed sequential IMERG-to-gauges method
+has been retired. The experiment strictly requires the 240 half-hourly granules from 2018-04-30
 03:00 through 2018-05-05 02:30 UTC, sums `precipitation` rates with a 0.5-hour
 factor, accumulates `randomError` in quadrature, and labels each result with
 the BMD window-ending date. The DA loader rejects legacy calendar-day IMERG
@@ -212,15 +212,18 @@ same withheld BMD station-days. Method ranking uses withheld-BMD CRPS and
 event/calibration diagnostics only. The gridded CHIRPS figure is replaced by a
 clearly labelled non-independent product intercomparison.
 
-Run the follow-up IMERG-weight/localization sensitivity with:
+The next selection gate is five disjoint, geographically spread station folds
+using the accepted previous-day CPC/ERA5 background:
 
 ```bash
-slurm/submit_bmd_imerg_sensitivity_5day.sh
+slurm/submit_bmd_imerg_rotated_folds_5day.sh
 ```
 
-It tests extra satellite R multipliers 2/4/8 and serial gauge localization at
-75/100 km. Use the CPU replot command above after the array completes to apply
-one consistent withheld-BMD fusion gate across every case.
+Every BMD station is withheld exactly once. A dependent CPU job pools the
+withheld-station metrics and writes
+`data/processed/bmd_imerg_offset_m1_rotated_summary.{json,png}`. Simultaneous
+DA passes only if it has lower pooled CRPS than gauges-only and wins at least
+half the folds.
 
 To test whether an apparent IMERG/CHIRPS displacement is a date lag or a fixed
 grid shift, use the CPU-only, footprint-matched diagnostic:

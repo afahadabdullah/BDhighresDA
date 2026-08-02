@@ -19,7 +19,6 @@ COLOURS = {
     "Gauges only": "#0077B6",
     "IMERG only": "#F4A261",
     "Simultaneous": "#D1495B",
-    "IMERG → gauges": "#2A9D8F",
 }
 
 
@@ -130,7 +129,7 @@ def main() -> None:
     axes[1, 1].set_title("E. Probability skill for ≥10 mm")
 
     gauge = values("Gauges only", "crps_mm")
-    fused_names = [name for name in ("Simultaneous", "IMERG → gauges") if name in methods]
+    fused_names = [name for name in ("Simultaneous",) if name in methods]
     fused_values = np.stack([values(name, "crps_mm") for name in fused_names])
     best_position = np.argmin(fused_values, axis=0)
     best_fused = np.min(fused_values, axis=0)

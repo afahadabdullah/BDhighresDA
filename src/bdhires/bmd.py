@@ -248,6 +248,57 @@ def spread_holdout(lat: np.ndarray, lon: np.ndarray, count: int) -> np.ndarray:
     return np.sort(np.asarray(selected, dtype=int))
 
 
+def spread_folds(
+    lat: np.ndarray, lon: np.ndarray, n_splits: int = 5
+) -> list[np.ndarray]:
+    """Partition stations into deterministic, geographically spread folds.
+
+    Stations are visited in a farthest-point ordering. Each next station is
+    assigned to one of the currently smallest folds where it maximizes its
+    distance from stations already assigned to that fold. Fold sizes therefore
+    differ by at most one and every station is withheld exactly once.
+    """
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    if lat.shape != lon.shape or lat.ndim != 1:
+        raise ValueError("lat and lon must be same-length one-dimensional arrays")
+    if not 2 <= n_splits <= len(lat):
+        raise ValueError("n_splits must be between 2 and n_stations")
+
+    x = lon * np.cos(np.radians(float(lat.mean())))
+    points = np.column_stack([lat, x])
+    centroid = points.mean(axis=0)
+    order = [int(np.argmax(np.sum((points - centroid) ** 2, axis=1)))]
+    while len(order) < len(points):
+        distance = np.min(
+            np.sum(
+                (points[:, None, :] - points[np.asarray(order)][None, :, :]) ** 2,
+                axis=2,
+            ),
+            axis=1,
+        )
+        distance[np.asarray(order)] = -np.inf
+        order.append(int(np.argmax(distance)))
+
+    folds: list[list[int]] = [[] for _ in range(n_splits)]
+    for station in order:
+        smallest = min(len(fold) for fold in folds)
+        candidates = [
+            index for index, fold in enumerate(folds) if len(fold) == smallest
+        ]
+        scores = []
+        for index in candidates:
+            if not folds[index]:
+                scores.append(float("inf"))
+            else:
+                delta = points[np.asarray(folds[index])] - points[station]
+                scores.append(float(np.min(np.sum(delta**2, axis=1))))
+        chosen = candidates[int(np.argmax(scores))]
+        folds[chosen].append(station)
+
+    return [np.sort(np.asarray(fold, dtype=int)) for fold in folds]
+
+
 def month_lengths(year: int) -> dict[int, int]:
     """Small public helper used by audit scripts and tests."""
     return {month: calendar.monthrange(year, month)[1] for month in range(1, 13)}
