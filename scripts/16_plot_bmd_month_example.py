@@ -108,10 +108,13 @@ def crps_values(ensemble: np.ndarray, observed: np.ndarray) -> np.ndarray:
         return output
     members = ensemble[:, valid]
     truth = observed[valid]
+    member_count = members.shape[0]
     first = np.mean(np.abs(members - truth[None]), axis=0)
-    second = 0.5 * np.mean(
+    # Match bdhires.eval.crps_ensemble exactly: the fair/unbiased finite-
+    # ensemble estimator divides the pair term by R(R-1), not R^2.
+    second = np.sum(
         np.abs(members[:, None, :] - members[None, :, :]), axis=(0, 1)
-    )
+    ) / (2.0 * member_count * (member_count - 1))
     output[valid] = first - second
     return output
 
@@ -340,7 +343,9 @@ def main() -> None:
     has_imerg = bool(report.get("scope", {}).get("imerg_assimilated", False))
     imerg_error = report.get("observation_error", {}).get("imerg") or {}
     sequential_config = report.get("sequential_update", {})
-    primary_support = sequential_config.get("primary_support_km", np.nan)
+    primary_support = sequential_config.get(
+        "primary_support_km", sequential_config.get("support_km", np.nan)
+    )
     control_text = (
         f"stride {imerg_error.get('footprint_stride', '?')}; "
         f"total IMERG R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
