@@ -347,6 +347,7 @@ def main() -> None:
         "primary_support_km", sequential_config.get("support_km", np.nan)
     )
     control_text = (
+        "IMERG window: previous-day 03:00 to selected-day 03:00 UTC; "
         f"stride {imerg_error.get('footprint_stride', '?')}; "
         f"total IMERG R inflation {imerg_error.get('correlation_variance_inflation', np.nan):.1f}×; "
         f"sequential localization {primary_support:.0f} km"
@@ -473,7 +474,8 @@ def main() -> None:
             "Five days and one six-station holdout are a process gate, not final skill.",
             "May 2018 lies inside the checkpoint training period.",
             "IMERG Final has monthly GPCC gauge adjustment; BMD/GPCC overlap must be audited.",
-            "CHIRPS is shown only as a gauge-informed training-product intercomparison.",
+            "IMERG uses exact BMD 03:00-03:00 UTC accumulation windows.",
+            "CPC and CHIRPS are calendar-labelled products shown only as contextual intercomparisons.",
         ],
     }
     Path(args.out_evaluation).parent.mkdir(parents=True, exist_ok=True)

@@ -170,8 +170,9 @@ station-space diagnostics plus spatial maps. May 2018 is inside the CPC
 checkpoint's training period, so this is a workflow demonstration rather than
 an independent temporal skill estimate.
 
-If the daily V07B files are under `data/imerg`, first run the five-day,
-five-arm controlled experiment:
+After downloading the half-hourly V07B files under `data/imerg`, including
+2018-04-30 for the first BMD reporting window, run the five-day five-arm
+controlled experiment:
 
 ```bash
 slurm/submit_bmd_imerg_controlled_5day.sh
@@ -179,11 +180,12 @@ slurm/submit_bmd_imerg_controlled_5day.sh
 
 It compares background, gauges-only, correlation-controlled IMERG-only,
 stabilized simultaneous DA, and IMERG followed by a localized serial gauge
-update. It strictly validates the daily inventory and variables, uses native
-`randomError` plus retrieval-count QC, and creates metric-matrix, calibration,
-and ten-column spatial-map suites. The bounded run is intentionally
-unbias-corrected; passing it validates ingestion and DA behavior, not final
-product skill.
+update. It strictly requires the 240 half-hourly granules from 2018-04-30
+03:00 through 2018-05-05 02:30 UTC, sums `precipitation` rates with a 0.5-hour
+factor, accumulates `randomError` in quadrature, and labels each result with
+the BMD window-ending date. The DA loader rejects legacy calendar-day IMERG
+files. The bounded run is intentionally unbias-corrected; passing it validates
+ingestion and DA behavior, not final product skill.
 
 Regenerate the scientifically revised evaluation for every completed five-day
 case on a CPU node:

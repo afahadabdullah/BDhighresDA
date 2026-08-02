@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) -> dict:
-    """Load a compact regional file and enforce exact date/grid alignment."""
+    """Load BMD-window IMERG and enforce exact temporal/date/grid alignment."""
     with xr.open_dataset(path) as dataset:
         required = {"precipitation", "randomError", "precipitation_cnt"}
         if not required.issubset(dataset):
@@ -117,6 +117,24 @@ def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) 
             raise ValueError(
                 f"IMERG dates do not exactly match checkpoint dates: "
                 f"{imerg_time[[0, -1]]} versus {expected_time[[0, -1]]}"
+            )
+        end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
+        try:
+            end_hour = int(end_hour)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{path} does not declare a BMD accumulation end hour; regenerate it "
+                "from half-hourly IMERG with scripts/08_prepare_imerg_observations.py"
+            ) from exc
+        if end_hour != 3:
+            raise ValueError(
+                f"{path} ends its accumulation at {end_hour:02d}:00 UTC, but BMD daily "
+                "rainfall ends at 03:00 UTC; calendar-day IMERG cannot be assimilated"
+            )
+        if str(dataset.attrs.get("source_frequency", "")) != "half-hourly":
+            raise ValueError(
+                f"{path} was not prepared from half-hourly IMERG and cannot represent "
+                "the exact BMD 03:00-03:00 UTC window"
             )
         expected_lat = grid.lat.reshape(grid.nlat // factor, factor).mean(axis=1)
         expected_lon = grid.lon.reshape(grid.nlon // factor, factor).mean(axis=1)
@@ -340,7 +358,8 @@ def main() -> None:
         imerg = load_prepared_imerg(args.imerg, selected_times, grid, imerg_factor)
         print(
             f"[imerg] {args.imerg}: {np.isfinite(imerg['precipitation']).mean():.1%} "
-            "regional footprints pass file QC; native randomError will set daily R",
+            "regional footprints pass file QC; exact BMD 03:00-03:00 UTC windows; "
+            "aggregated randomError will set daily R",
             flush=True,
         )
         print(
@@ -814,9 +833,11 @@ def main() -> None:
             "imerg_assimilated": imerg is not None,
             "imerg_file": args.imerg,
             "imerg_note": (
-                "Native GPM IMERG Final V07B precipitation and randomError are used. "
-                "Both are mm/day. No fitted bias correction is applied, so this is a "
-                "bounded process test and not the final real-data configuration."
+                "GPM IMERG Final V07B half-hourly precipitation is accumulated over "
+                "the exact BMD reporting day ending at 03:00 UTC. Precipitation and "
+                "aggregated randomError enter in mm/day. No fitted bias correction is "
+                "applied, so this is a bounded process test and not the final real-data "
+                "configuration."
                 if imerg is not None
                 else "Gauge-only run; no IMERG observation was supplied."
             ),
@@ -826,8 +847,9 @@ def main() -> None:
                 "scores use BMD stations withheld from this assimilation only."
             ),
             "timing_note": (
-                "Confirm the BMD 24-hour accumulation boundary against CPC/CHIRPS dates "
-                "before interpreting event-level differences scientifically."
+                "IMERG is aligned exactly to each BMD 24-hour window from previous-day "
+                "03:00 UTC through selected-day 03:00 UTC. CPC and CHIRPS remain "
+                "calendar-labelled daily products and are contextual comparisons only."
             ),
         },
         "network": {
@@ -849,7 +871,11 @@ def main() -> None:
             },
             "imerg": (
                 {
-                    "native": "per-footprint V07B randomError in mm/day",
+                    "native": imerg["attrs"].get(
+                        "random_error_aggregation", "aggregated V07B randomError in mm/day"
+                    ),
+                    "source_frequency": imerg["attrs"].get("source_frequency"),
+                    "accumulation_window": imerg["attrs"].get("accumulation_window"),
                     "conversion": "symmetric physical interval transformed to model space",
                     "sigma_floor_transformed": float(imerg_config["sigma_obs"]),
                     "representativeness_transformed": float(

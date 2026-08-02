@@ -30,12 +30,24 @@ mkdir -p "$MPLCONFIGDIR" data/processed logs
     exit 1
 }
 
-PREFIXES=(
-    "bmd_imerg_controlled_20180501_05"
-    "bmd_imerg_sensitivity_r2_l75-100"
-    "bmd_imerg_sensitivity_r4_l75-100"
-    "bmd_imerg_sensitivity_r8_l75-100"
-)
+if [[ -f data/processed/bmd_imerg_aligned_20180501_05.npz ]]; then
+    PREFIXES=(
+        "bmd_imerg_aligned_20180501_05"
+        "bmd_imerg_sensitivity_aligned_r2_l75-100"
+        "bmd_imerg_sensitivity_aligned_r4_l75-100"
+        "bmd_imerg_sensitivity_aligned_r8_l75-100"
+    )
+    SELECTION_PREFIX="bmd_imerg_aligned_5day_method_selection"
+else
+    echo "WARNING: aligned dump not found; replotting legacy calendar-day cases only"
+    PREFIXES=(
+        "bmd_imerg_controlled_20180501_05"
+        "bmd_imerg_sensitivity_r2_l75-100"
+        "bmd_imerg_sensitivity_r4_l75-100"
+        "bmd_imerg_sensitivity_r8_l75-100"
+    )
+    SELECTION_PREFIX="bmd_imerg_5day_method_selection"
+fi
 EVALUATIONS=()
 for prefix in "${PREFIXES[@]}"; do
     dump="data/processed/${prefix}.npz"
@@ -64,9 +76,9 @@ fi
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/19_compare_bmd_5day_sensitivity.py \
     --evaluations "${EVALUATIONS[@]}" \
-    --out-json data/processed/bmd_imerg_5day_method_selection.json \
-    --out-plot data/processed/bmd_imerg_5day_method_selection.png
+    --out-json "data/processed/${SELECTION_PREFIX}.json" \
+    --out-plot "data/processed/${SELECTION_PREFIX}.png"
 
 echo "Five-day withheld-BMD re-evaluation complete."
-echo "Selection metrics: data/processed/bmd_imerg_5day_method_selection.json"
-echo "Selection plot: data/processed/bmd_imerg_5day_method_selection.png"
+echo "Selection metrics: data/processed/${SELECTION_PREFIX}.json"
+echo "Selection plot: data/processed/${SELECTION_PREFIX}.png"

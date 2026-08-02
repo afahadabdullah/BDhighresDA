@@ -9,7 +9,8 @@
 #SBATCH --time=18:00:00
 #SBATCH --output=logs/%x-%j.out
 
-# Bounded May 2018 real-observation experiment: background, gauges-only,
+# Bounded May 2018 real-observation experiment: exact 03:00-03:00 UTC BMD
+# reporting windows, background, gauges-only,
 # correlation-controlled IMERG-only, stabilized simultaneous DA, and a serial
 # IMERG-to-localized-gauges update. Six spread BMD stations remain withheld.
 
@@ -38,13 +39,15 @@ mkdir -p "$MPLCONFIGDIR" data/processed logs
 RAINFALL="${BMD_RAINFALL:-data/bmd/bmd.csv}"
 STATIONS="${BMD_STATIONS:-data/bmd/Stations.csv}"
 IMERG_DIR="${IMERG_DIR:-data/imerg}"
+IMERG_SOURCE_FREQUENCY="${IMERG_SOURCE_FREQUENCY:-half-hourly}"
+BMD_ACCUMULATION_END_HOUR_UTC="${BMD_ACCUMULATION_END_HOUR_UTC:-3}"
 START="${BMD_START:-2018-05-01}"
 END="${BMD_END:-2018-05-31}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
 MEMBERS="${BMD_MEMBERS:-16}"
 WITHHOLD="${BMD_WITHHOLD:-0.2}"
-IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-40}"
+IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-48}"
 IMERG_STRIDE="${IMERG_STRIDE:-3}"
 IMERG_R_MULTIPLIER="${IMERG_R_MULTIPLIER:-1.0}"
 GAUGE_LOCALIZATION_KM="${GAUGE_LOCALIZATION_KM:-150}"
@@ -71,7 +74,9 @@ done
 
 echo "BMD rainfall: $RAINFALL"
 echo "BMD stations: $STATIONS"
-echo "IMERG daily directory: $IMERG_DIR"
+echo "IMERG source directory: $IMERG_DIR"
+echo "IMERG source frequency: $IMERG_SOURCE_FREQUENCY"
+echo "BMD accumulation end: ${BMD_ACCUMULATION_END_HOUR_UTC}:00 UTC"
 echo "Period: $START to $END"
 echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
@@ -92,9 +97,11 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
     --input "$IMERG_DIR" \
+    --source-frequency "$IMERG_SOURCE_FREQUENCY" \
     --start "$START" \
     --end "$END" \
     --min-count "$IMERG_MIN_COUNT" \
+    --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
     --out "$IMERG_PREPARED" \
     --report "$IMERG_QC"
 

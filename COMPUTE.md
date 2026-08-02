@@ -412,15 +412,16 @@ selection, observed near epoch 40 in the reported run).
 
 ## Run the May 2018 BMD + real-IMERG experiment
 
-The combined experiment uses the existing remote inputs without moving or
-renaming them:
+The corrected combined experiment uses the BMD archive day as a 24-hour
+window ending at 03:00 UTC. Keep the Earthdata half-hourly subset files under
+one directory; no renaming is required:
 
 ```text
 data/bmd/bmd.csv
 data/bmd/Stations.csv
-data/imerg/3B-DAY.MS.MRG.3IMERG.20180501-S000000-E235959.V07B.nc4
+data/imerg/3B-HHR.MS.MRG.3IMERG.20180430-S030000-E032959.0180.V07B.HDF5.SUB.nc4
 ...
-data/imerg/3B-DAY.MS.MRG.3IMERG.20180531-S000000-E235959.V07B.nc4
+data/imerg/3B-HHR.MS.MRG.3IMERG.20180531-S023000-E025959.0150.V07B.HDF5.SUB.nc4
 ```
 
 For the required five-day controlled test, submit from the repository root:
@@ -435,12 +436,14 @@ entry point remains `slurm/submit_bmd_imerg_example.sh` but should not be used
 until the five-day gate passes.
 
 Before requesting a GPU analysis, the job performs two strict preflights. It
-converts the two legacy BMD files to the canonical daily table, and it requires
-exactly one IMERG V07B granule for every date from May 1 through May 31. Each
-granule must contain `precipitation`, `randomError`, and
-`precipitation_cnt`. The regional preparation keeps exact 0.1-degree
-footprints nested over the model's 0.05-degree grid and, by default, rejects a
-footprint when fewer than 40 of 48 half-hourly estimates contributed.
+converts the two legacy BMD files to the canonical daily table, then requires
+48 consecutive IMERG V07B half-hourly granules for every BMD date. For BMD
+date `D`, the first interval starts at `D-1 03:00 UTC` and the final interval
+starts at `D 02:30 UTC`. Missing or duplicate intervals are fatal. The
+half-hourly `precipitation` and `randomError` variables must be in mm/hr. The
+regional preparation keeps exact 0.1-degree footprints nested over the
+model's 0.05-degree grid and, by default, requires all 48 values at each
+footprint.
 
 The GPU stage evaluates five matched arms: background, gauges only, IMERG only,
 simultaneous gauges+IMERG, and IMERG followed by a localized serial deterministic
@@ -451,27 +454,29 @@ area. With a three-cell error length this is about 6.3x after thinning. This is
 an effective-sample approximation; it replaces the demonstrably invalid
 assumption that thousands of correlated pixels are independent.
 
-IMERG enters through a physical 2x2 block-mean operator. V07B daily
-`precipitation` and `randomError` are both in mm/day; do not multiply either by
-24. BMD values and model output are also mm/day, but spatial and temporal
-support differ: IMERG is a 0.1-degree footprint, BMD is a point gauge, and the
-BMD reporting-day boundary must still be checked against IMERG's 00–24 UTC day.
-The native error is transformed, combined with an uncertainty floor and
-representativeness, correlation-inflated, and spatially perturbed.
+IMERG enters through a physical 2x2 block-mean operator. Half-hourly
+`precipitation` is a rate in mm/hr, so each BMD-aligned daily depth is
+`sum(rate * 0.5 hr)`. Half-hourly `randomError` is converted to depth and
+accumulated in quadrature as an independence baseline; remaining temporal and
+spatial dependence must be assessed with the existing DA error-inflation
+sensitivity.
+The prepared variables, BMD values and model output are all in mm/day. IMERG
+is a 0.1-degree footprint while BMD is a point gauge, so spatial
+representativeness error remains necessary.
 
 Controlled outputs are:
 
 ```text
-data/processed/imerg_bd_controlled_20180501_05.nc
-data/processed/imerg_bd_controlled_20180501_05_qc.json
-data/processed/bmd_imerg_controlled_20180501_05.npz
-data/processed/bmd_imerg_controlled_20180501_05.json
-data/processed/bmd_imerg_controlled_20180501_05_evaluation.json
-data/processed/bmd_imerg_controlled_20180501_05_diagnostics.png
-data/processed/bmd_imerg_controlled_20180501_05_events.png
-data/processed/bmd_imerg_controlled_20180501_05_station_comparison.png
-data/processed/bmd_imerg_controlled_20180501_05_spatial.png
-data/processed/bmd_imerg_controlled_20180501_05_intercomparison.png
+data/processed/imerg_bd_aligned_20180501_05.nc
+data/processed/imerg_bd_aligned_20180501_05_qc.json
+data/processed/bmd_imerg_aligned_20180501_05.npz
+data/processed/bmd_imerg_aligned_20180501_05.json
+data/processed/bmd_imerg_aligned_20180501_05_evaluation.json
+data/processed/bmd_imerg_aligned_20180501_05_diagnostics.png
+data/processed/bmd_imerg_aligned_20180501_05_events.png
+data/processed/bmd_imerg_aligned_20180501_05_station_comparison.png
+data/processed/bmd_imerg_aligned_20180501_05_spatial.png
+data/processed/bmd_imerg_aligned_20180501_05_intercomparison.png
 ```
 
 The metric matrix, withheld-station scatter/rank histograms, and ten-column
