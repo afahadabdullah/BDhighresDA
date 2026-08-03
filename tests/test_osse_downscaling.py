@@ -245,6 +245,47 @@ def test_calibration_columns_rank_by_distance_to_target():
     assert SUITE._best_row(values, "min") == 0
 
 
+def test_observation_value_uses_withheld_gauges_and_best_single_source(tmp_path):
+    def scores(analysis_crps: float) -> dict:
+        return {
+            "background": {"crps_mm": 10.0, "rmse_mm": 14.0, "mae_mm": 8.0,
+                           "bias_mm": 2.0, "correlation": 0.30,
+                           "spread_skill_ratio": 0.70, "coverage_90": 0.80},
+            "analysis": {"crps_mm": analysis_crps,
+                         "rmse_mm": 10.0 + analysis_crps / 10,
+                         "mae_mm": 6.0, "bias_mm": 1.0,
+                         "correlation": 0.60,
+                         "spread_skill_ratio": 0.90, "coverage_90": 0.88},
+        }
+
+    labels_and_crps = [
+        ("gauges_exact_bmd", 6.0),
+        ("satellite_exact_bmd", 5.0),
+        ("simultaneous_exact_bmd", 4.0),
+    ]
+    arms = []
+    for label, crps in labels_and_crps:
+        arms.append({
+            "label": label, "pretty": SUITE.PRETTY[label],
+            "scale": {scope: scores(crps) for scope, _ in SUITE.SCALE_SCOPES},
+        })
+
+    selected = SUITE.select_observation_arms(arms)
+    matrix = SUITE.build_observation_value_matrix(selected)
+    assert matrix.shape == (3, len(SUITE.OBSERVATION_VALUE_COLUMNS))
+    assert matrix[2, 0] == pytest.approx(60.0)  # simultaneous withheld CRPSS
+    assert SUITE.combined_synergy(selected, "withheld_gauges") == pytest.approx(20.0)
+
+    SUITE.write_observation_value_data(
+        tmp_path / "observation_value.csv",
+        tmp_path / "observation_value.json",
+        selected,
+    )
+    payload = json.loads((tmp_path / "observation_value.json").read_text())
+    assert payload["primary_target"].startswith("withheld pseudo-gauges")
+    assert payload["simultaneous_synergy_percent"]["withheld_gauges"] == pytest.approx(20.0)
+
+
 def test_suite_builds_all_paper_artifacts(tmp_path):
     root = tmp_path / "osse_paper"
     for label, skill in (("gauges_realistic_40", 0.4),

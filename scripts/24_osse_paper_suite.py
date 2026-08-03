@@ -3,10 +3,10 @@
 
 This is the single entry point between "the experiments have run" and "the
 manuscript can be written".  It reads one directory per arm -- each containing
-``osse_report.json`` from ``10_osse.py`` and ``downscaling.json`` /
-``downscaling_curves.npz`` from ``22_evaluate_osse_downscaling.py`` -- and emits
-tables, figures, tidy data and a written summary that are consistent with one
-another by construction.
+``osse_report.json`` from ``10_osse.py``, ``scale_summary.json`` from
+``14_osse_summary.py``, and ``downscaling.json`` / ``downscaling_curves.npz``
+from ``22_evaluate_osse_downscaling.py`` -- and emits tables, figures, tidy data
+and a written summary that are consistent with one another by construction.
 
 Emitted artifacts
 -----------------
@@ -15,7 +15,10 @@ Emitted artifacts
   osse_paper_curves.npz       spectra / FSS / ladders, all arms, for replotting
   table_ablation.tex          the ablation matrix, booktabs
   table_downscaling.tex       the downscaling-claim table
+  table_observation_value.tex gauges / satellite / simultaneous attribution
   fig_ablation_matrix.png     arm x metric heatmap
+  fig_observation_value.png   source value at gauges and across spatial scales
+  fig_observation_value_matrix.png annotated source-attribution matrix
   fig_claims.png              claim A and B skill across arms
   fig_spectra.png             spectra, ratio and effective resolution
   fig_scale_ladder.png        error by aggregation scale, and FSS skillful scale
@@ -23,9 +26,10 @@ Emitted artifacts
 
 Design rule
 -----------
-Nothing is computed here that was not already computed by script 22.  This
-script only selects, arranges and renders, so a number in the manuscript can
-always be traced to exactly one upstream JSON.
+The expensive ensemble and spatial scores are not recomputed here.  This script
+derives only transparent relative improvements from scripts 10, 14 and 22, then
+selects, arranges and renders them.  Every manuscript number remains traceable
+to an upstream JSON and the derived source-attribution CSV.
 """
 from __future__ import annotations
 
@@ -88,6 +92,37 @@ DOWNSCALING_COLUMNS = [
     ("claim_b_sub_footprint_gain.analysis.correlation", "B: an corr", "max"),
     ("claim_b_sub_footprint_gain.analysis.mean_member_energy_ratio",
      "B: member energy", 1.0),
+]
+
+# These three arms make the observation-source attribution experiment.  The
+# exact-BMD set is the paper OSSE; the realistic set is retained for older runs.
+OBSERVATION_ARM_SETS = [
+    ("gauges_exact_bmd", "satellite_exact_bmd", "simultaneous_exact_bmd"),
+    ("gauges_realistic_40", "satellite_realistic_40",
+     "simultaneous_realistic_40"),
+]
+
+# Withheld gauges are deliberately first: they are the common, gauge-held-out
+# method-selection target.  Dense pseudo-satellite footprints mean they are not
+# fully observation-independent.  The CHIRPS fields diagnose where the gain
+# came from; they do not replace the withheld-gauge ranking.
+SCALE_SCOPES = [
+    ("withheld_gauges", "Withheld BMD\ngauges"),
+    ("field_0p05", "Full field\n0.05°"),
+    ("footprint_0p1", "Footprints\n0.1°"),
+    ("subgrid_0p05", "Subgrid\n0.05°"),
+]
+
+OBSERVATION_VALUE_COLUMNS = [
+    ("withheld_crps_gain", "Withheld CRPSS %", "max"),
+    ("withheld_rmse_gain", "Withheld RMSE gain %", "max"),
+    ("field_crps_gain", "Field CRPSS %", "max"),
+    ("footprint_crps_gain", "0.1° CRPSS %", "max"),
+    ("subgrid_crps_gain", "Subgrid CRPSS %", "max"),
+    ("subgrid_rmse_gain", "Subgrid RMSE gain %", "max"),
+    ("subgrid_corr_gain", "Subgrid Δr", "max"),
+    ("withheld_coverage", "Withheld cover90", 0.90),
+    ("withheld_spread_skill", "Withheld spread/skill", 1.0),
 ]
 
 
@@ -161,9 +196,21 @@ def load_arm(label: str, directory: Path) -> dict:
         with np.load(curve_path) as data:
             curves = {k: data[k] for k in data.files}
 
+    scale: dict = {}
+    for name in ("scale_summary.json", "osse_scale_summary.json"):
+        scale_path = directory / name
+        if scale_path.exists():
+            scale = json.loads(scale_path.read_text())
+            break
+
+    diagnostics: dict = {}
+    diagnostics_path = directory / "da_diagnostics.json"
+    if diagnostics_path.exists():
+        diagnostics = json.loads(diagnostics_path.read_text())
+
     return {"label": label, "pretty": PRETTY.get(label, label.replace("_", " ")),
             "directory": str(directory), "osse": osse, "downscaling": downscaling,
-            "curves": curves}
+            "scale": scale, "diagnostics": diagnostics, "curves": curves}
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +243,108 @@ def build_matrix(arms: list[dict], columns, source: str) -> np.ndarray:
             except (TypeError, ValueError):
                 matrix[row, col] = np.nan
     return matrix
+
+
+def select_observation_arms(arms: list[dict]) -> list[dict]:
+    """Return a complete gauges/satellite/simultaneous triplet, if available."""
+    by_label = {arm["label"]: arm for arm in arms if arm.get("scale")}
+    for labels in OBSERVATION_ARM_SETS:
+        if all(label in by_label for label in labels):
+            return [by_label[label] for label in labels]
+    return []
+
+
+def _percent_reduction(scores: dict, metric: str) -> float:
+    """Percentage error reduction from an arm's own matched background."""
+    background = float(dig(scores, f"background.{metric}"))
+    analysis = float(dig(scores, f"analysis.{metric}"))
+    if not np.isfinite(background) or not np.isfinite(analysis) or background == 0:
+        return np.nan
+    if metric == "bias_mm":
+        background, analysis = abs(background), abs(analysis)
+    return 100.0 * (background - analysis) / background
+
+
+def observation_value_record(arm: dict) -> dict:
+    """Flatten the source-attribution metrics for one observation arm."""
+    scale = arm["scale"]
+    record = {
+        "withheld_crps_gain": _percent_reduction(scale["withheld_gauges"], "crps_mm"),
+        "withheld_rmse_gain": _percent_reduction(scale["withheld_gauges"], "rmse_mm"),
+        "field_crps_gain": _percent_reduction(scale["field_0p05"], "crps_mm"),
+        "footprint_crps_gain": _percent_reduction(scale["footprint_0p1"], "crps_mm"),
+        "subgrid_crps_gain": _percent_reduction(scale["subgrid_0p05"], "crps_mm"),
+        "subgrid_rmse_gain": _percent_reduction(scale["subgrid_0p05"], "rmse_mm"),
+        "subgrid_corr_gain": (
+            float(dig(scale, "subgrid_0p05.analysis.correlation"))
+            - float(dig(scale, "subgrid_0p05.background.correlation"))
+        ),
+        "withheld_coverage": float(
+            dig(scale, "withheld_gauges.analysis.coverage_90")
+        ),
+        "withheld_spread_skill": float(
+            dig(scale, "withheld_gauges.analysis.spread_skill_ratio")
+        ),
+    }
+    return record
+
+
+def build_observation_value_matrix(arms: list[dict]) -> np.ndarray:
+    matrix = np.full((len(arms), len(OBSERVATION_VALUE_COLUMNS)), np.nan)
+    for row, arm in enumerate(arms):
+        record = observation_value_record(arm)
+        for col, (key, _, _) in enumerate(OBSERVATION_VALUE_COLUMNS):
+            matrix[row, col] = record[key]
+    return matrix
+
+
+def combined_synergy(arms: list[dict], scope: str, metric: str = "crps_mm") -> float:
+    """Gain of simultaneous DA over the better single source; positive is synergy."""
+    if len(arms) != 3:
+        return np.nan
+    singles = [float(dig(arm["scale"], f"{scope}.analysis.{metric}"))
+               for arm in arms[:2]]
+    simultaneous = float(dig(arms[2]["scale"], f"{scope}.analysis.{metric}"))
+    best_single = min(singles)
+    if not np.isfinite(best_single) or not np.isfinite(simultaneous) or best_single == 0:
+        return np.nan
+    return 100.0 * (best_single - simultaneous) / best_single
+
+
+def write_observation_value_data(path_csv: Path, path_json: Path,
+                                 arms: list[dict]) -> None:
+    """Save raw before/after values so every attribution panel is reproducible."""
+    rows = []
+    for arm in arms:
+        for scope, scope_label in SCALE_SCOPES:
+            scores = arm["scale"][scope]
+            row = {"arm": arm["label"], "arm_label": arm["pretty"],
+                   "scope": scope, "scope_label": scope_label.replace("\n", " ")}
+            for metric in ("crps_mm", "rmse_mm", "mae_mm", "bias_mm",
+                           "correlation", "spread_skill_ratio", "coverage_90"):
+                row[f"background_{metric}"] = dig(scores, f"background.{metric}")
+                row[f"analysis_{metric}"] = dig(scores, f"analysis.{metric}")
+            row["crps_gain_percent"] = _percent_reduction(scores, "crps_mm")
+            row["rmse_gain_percent"] = _percent_reduction(scores, "rmse_mm")
+            row["correlation_gain"] = (
+                float(dig(scores, "analysis.correlation"))
+                - float(dig(scores, "background.correlation"))
+            )
+            rows.append(row)
+    fieldnames = list(rows[0]) if rows else []
+    with path_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    payload = {
+        "primary_target": "withheld pseudo-gauges at real BMD locations",
+        "arms": [arm["label"] for arm in arms],
+        "rows": rows,
+        "simultaneous_synergy_percent": {
+            scope: combined_synergy(arms, scope) for scope, _ in SCALE_SCOPES
+        },
+    }
+    path_json.write_text(json.dumps(payload, indent=2, default=float) + "\n")
 
 
 def write_latex(path: Path, arms: list[dict], columns, matrix: np.ndarray,
@@ -312,6 +461,98 @@ def figure_matrix(path: Path, arms, columns, matrix, title) -> None:
                     ha="center", va="center", fontsize=7.5)
     ax.set_title(title, fontsize=10)
     fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def figure_observation_value(path: Path, arms: list[dict]) -> None:
+    """Show what each observation source buys, with withheld gauges primary."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colours = ["#1676A3", "#F29E4C", "#CF4658"]
+    scopes = [scope for scope, _ in SCALE_SCOPES]
+    scope_labels = [label for _, label in SCALE_SCOPES]
+    x = np.arange(len(scopes))
+    width = 0.24
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
+
+    for metric, title, axis in (
+        ("crps_mm", "A. CRPS improvement over matched background", axes[0, 0]),
+        ("rmse_mm", "B. RMSE improvement over matched background", axes[0, 1]),
+    ):
+        for index, (arm, colour) in enumerate(zip(arms, colours)):
+            values = [_percent_reduction(arm["scale"][scope], metric)
+                      for scope in scopes]
+            axis.bar(x + (index - 1) * width, values, width,
+                     label=arm["pretty"], color=colour)
+        axis.axhline(0, color="k", lw=0.8)
+        axis.set_xticks(x, scope_labels)
+        axis.set_ylabel("improvement (%)")
+        axis.set_title(title)
+        axis.grid(alpha=0.25, axis="y")
+    axes[0, 0].legend(fontsize=8)
+
+    for index, (arm, colour) in enumerate(zip(arms, colours)):
+        values = [float(dig(arm["scale"], f"{scope}.analysis.correlation"))
+                  - float(dig(arm["scale"], f"{scope}.background.correlation"))
+                  for scope in scopes]
+        axes[0, 2].bar(x + (index - 1) * width, values, width,
+                       label=arm["pretty"], color=colour)
+    axes[0, 2].axhline(0, color="k", lw=0.8)
+    axes[0, 2].set_xticks(x, scope_labels)
+    axes[0, 2].set_ylabel("analysis minus background correlation")
+    axes[0, 2].set_title("C. Spatial/point correlation gain")
+    axes[0, 2].grid(alpha=0.25, axis="y")
+
+    # The primary selection panel: all methods are scored at the same withheld
+    # pseudo-BMD station-days.  The background bars are retained to show each
+    # arm's matched before/after comparison instead of hiding the null.
+    arm_x = np.arange(len(arms))
+    bg_crps = [dig(arm["scale"], "withheld_gauges.background.crps_mm") for arm in arms]
+    an_crps = [dig(arm["scale"], "withheld_gauges.analysis.crps_mm") for arm in arms]
+    axes[1, 0].bar(arm_x - 0.18, bg_crps, 0.36, color="#8A93A5", label="background")
+    axes[1, 0].bar(arm_x + 0.18, an_crps, 0.36, color=colours, label="analysis")
+    axes[1, 0].set_xticks(arm_x, [arm["pretty"] for arm in arms], rotation=15,
+                         ha="right")
+    axes[1, 0].set_ylabel("CRPS (mm day$^{-1}$; lower is better)")
+    axes[1, 0].set_title("D. Primary ranking at withheld BMD locations")
+    axes[1, 0].legend(fontsize=8)
+    axes[1, 0].grid(alpha=0.25, axis="y")
+
+    coverage = [dig(arm["scale"], "withheld_gauges.analysis.coverage_90")
+                for arm in arms]
+    spread_skill = [dig(arm["scale"],
+                        "withheld_gauges.analysis.spread_skill_ratio")
+                    for arm in arms]
+    axes[1, 1].bar(arm_x - 0.18, coverage, 0.36, color="#4E9F8F", label="coverage90")
+    axes[1, 1].bar(arm_x + 0.18, spread_skill, 0.36, color="#7656A5",
+                   label="spread/skill")
+    axes[1, 1].axhline(0.90, color="#4E9F8F", ls="--", lw=1)
+    axes[1, 1].axhline(1.00, color="#7656A5", ls=":", lw=1)
+    axes[1, 1].set_xticks(arm_x, [arm["pretty"] for arm in arms], rotation=15,
+                         ha="right")
+    axes[1, 1].set_ylim(0, max(1.15, 1.08 * np.nanmax(spread_skill)))
+    axes[1, 1].set_title("E. Withheld-gauge ensemble calibration")
+    axes[1, 1].legend(fontsize=8)
+    axes[1, 1].grid(alpha=0.25, axis="y")
+
+    synergy = [combined_synergy(arms, scope) for scope in scopes]
+    synergy_colours = ["#2A9D8F" if value >= 0 else "#B5654D" for value in synergy]
+    axes[1, 2].bar(x, synergy, color=synergy_colours)
+    axes[1, 2].axhline(0, color="k", lw=0.8)
+    axes[1, 2].set_xticks(x, scope_labels)
+    axes[1, 2].set_ylabel("CRPS gain over best single source (%)")
+    axes[1, 2].set_title("F. Does simultaneous DA add information?")
+    axes[1, 2].grid(alpha=0.25, axis="y")
+
+    fig.suptitle(
+        "Observation-source value in the CHIRPS OSSE\n"
+        "Method selection uses withheld pseudo-gauges at real BMD locations; "
+        "gridded panels diagnose scale and spatial mechanism",
+        fontsize=14,
+    )
+    fig.savefig(path, dpi=170)
     plt.close(fig)
 
 
@@ -542,6 +783,39 @@ def write_results_markdown(path: Path, arms: list[dict], primary: str,
             f"claim B (analysis) {fmt(dig(arm['downscaling'], 'claim_b_sub_footprint_gain.analysis.mse_skill'))}"
         )
 
+    source_arms = select_observation_arms(arms)
+    if source_arms:
+        lines += [
+            "",
+            "## Observation-source attribution",
+            "",
+            "The primary ranking below uses exactly the same withheld pseudo-BMD "
+            "locations for gauges-only, exact 0.1-degree footprints-only, and "
+            "simultaneous DA. Gridded CHIRPS scores explain the scale of the gain "
+            "but do not override this withheld-gauge ranking.",
+            "",
+            "| Arm | Withheld CRPS | CRPSS vs background | Cover90 | Spread/skill |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for arm in source_arms:
+            scores = arm["scale"]["withheld_gauges"]
+            lines.append(
+                f"| {arm['pretty']} | {fmt(dig(scores, 'analysis.crps_mm'), 2)} | "
+                f"{fmt(_percent_reduction(scores, 'crps_mm'), 1)}% | "
+                f"{fmt(dig(scores, 'analysis.coverage_90'), 3)} | "
+                f"{fmt(dig(scores, 'analysis.spread_skill_ratio'), 2)} |"
+            )
+        withheld_synergy = combined_synergy(source_arms, "withheld_gauges")
+        lines += [
+            "",
+            f"Simultaneous DA changes withheld-gauge CRPS by "
+            f"**{fmt(withheld_synergy, 1)}%** relative to the better single-source "
+            "analysis. Positive values demonstrate complementary information; "
+            "negative values mean fusion is harmful even if it beats background. "
+            "See `fig_observation_value.png` and "
+            "`fig_observation_value_matrix.png`.",
+        ]
+
     by_year = dig(head["downscaling"], "by_year", {})
     if by_year:
         lines += ["", "## Stability across years", "",
@@ -587,6 +861,9 @@ def write_results_markdown(path: Path, arms: list[dict], primary: str,
         "| `osse_paper_curves.npz` | spectra, FSS, ladders, all arms |",
         "| `table_ablation.tex` | ablation matrix, booktabs |",
         "| `table_downscaling.tex` | downscaling-claim table |",
+        "| `table_observation_value.tex` | gauges vs 0.1-degree satellite vs "
+        "simultaneous attribution |",
+        "| `observation_value.csv/.json` | scale-separated source-value data |",
         "| `fig_*.png` | manuscript figure drafts |",
         "| `<arm>/spatial_fields.nc` | georeferenced maps per arm |",
         "",
@@ -607,6 +884,11 @@ def main() -> None:
 
     ablation = build_matrix(arms, ABLATION_COLUMNS, "osse")
     downscaling = build_matrix(arms, DOWNSCALING_COLUMNS, "downscaling")
+    observation_arms = select_observation_arms(arms)
+    observation_value = (
+        build_observation_value_matrix(observation_arms)
+        if observation_arms else np.empty((0, len(OBSERVATION_VALUE_COLUMNS)))
+    )
 
     write_latex(out_dir / "table_ablation.tex", arms, ABLATION_COLUMNS, ablation,
                 "OSSE ablation matrix at withheld pseudo-stations. CHIRPS is the "
@@ -621,18 +903,41 @@ def main() -> None:
                 "truth. Member energy ratio near one indicates realistic "
                 "sub-footprint variance.",
                 "tab:osse-downscaling")
+    if observation_arms:
+        write_latex(
+            out_dir / "table_observation_value.tex", observation_arms,
+            OBSERVATION_VALUE_COLUMNS, observation_value,
+            "Observation-source attribution in the matched CHIRPS OSSE. The "
+            "primary columns are scored at pseudo-gauges withheld at real BMD "
+            "locations; gridded CHIRPS columns diagnose the spatial scale at "
+            "which each source adds value. Calibration targets are 0.90 coverage "
+            "and unit spread--skill. Best per column in bold.",
+            "tab:osse-observation-value",
+        )
+        write_observation_value_data(
+            out_dir / "observation_value.csv",
+            out_dir / "observation_value.json",
+            observation_arms,
+        )
     write_tidy_csv(out_dir / "osse_paper_metrics.csv", arms)
     write_combined_curves(out_dir / "osse_paper_curves.npz", arms)
 
     summary = {
         "arms": [
             {"label": a["label"], "pretty": a["pretty"], "directory": a["directory"],
-             "osse": a["osse"], "downscaling": a["downscaling"]}
+             "osse": a["osse"], "downscaling": a["downscaling"],
+             "scale": a["scale"]}
             for a in arms
         ],
         "primary": args.primary,
         "ablation_columns": [c[1] for c in ABLATION_COLUMNS],
         "downscaling_columns": [c[1] for c in DOWNSCALING_COLUMNS],
+        "observation_value": {
+            "primary_target": "withheld pseudo-gauges at real BMD locations",
+            "arms": [a["label"] for a in observation_arms],
+            "columns": [c[1] for c in OBSERVATION_VALUE_COLUMNS],
+            "matrix": observation_value.tolist(),
+        },
     }
     (out_dir / "osse_paper_summary.json").write_text(
         json.dumps(summary, indent=2, default=float) + "\n")
@@ -646,6 +951,15 @@ def main() -> None:
         figure_claims(out_dir / "fig_claims.png", arms)
         figure_spectra(out_dir / "fig_spectra.png", arms, args.primary)
         figure_scale_ladder(out_dir / "fig_scale_ladder.png", arms, args.primary)
+        if observation_arms:
+            figure_matrix(
+                out_dir / "fig_observation_value_matrix.png", observation_arms,
+                OBSERVATION_VALUE_COLUMNS, observation_value,
+                "What gauges, 0.1° footprints, and simultaneous DA buy",
+            )
+            figure_observation_value(
+                out_dir / "fig_observation_value.png", observation_arms
+            )
 
     write_results_markdown(out_dir / "RESULTS.md", arms, args.primary,
                            ablation, downscaling)

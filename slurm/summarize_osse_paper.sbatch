@@ -18,14 +18,15 @@ cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
 
 ROOT="${OSSE_PAPER_ROOT:-data/processed/osse_paper}"
+PRIMARY="${OSSE_PAPER_PRIMARY:-simultaneous_realistic_40}"
 
 # One driver assembles every arm into the paper evidence set: ablation and
-# downscaling tables (LaTeX), the figure drafts, a tidy CSV, the combined curve
-# NPZ, and RESULTS.md.  Nothing is recomputed here -- each number traces back to
-# exactly one downscaling.json, so the tables and the text cannot drift apart.
+# downscaling/source-value tables (LaTeX), figure drafts, tidy CSVs, combined
+# curve NPZ, and RESULTS.md.  Ensemble scores are not recomputed here; source
+# attribution is derived from each arm's existing scale_summary.json.
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/24_osse_paper_suite.py \
     --root "$ROOT" \
-    --primary simultaneous_realistic_40 \
+    --primary "$PRIMARY" \
     --out-dir "$ROOT/paper"
 
 echo
