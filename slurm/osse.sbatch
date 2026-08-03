@@ -10,8 +10,10 @@
 #SBATCH --output=logs/%x-%j.out
 
 # Combined observing-system simulation experiment. CHIRPS supplies the nature
-# truth, exact nested 0.1-degree pseudo-satellite footprints, and a synthetic
-# 40-station network. The CPC-conditioned best checkpoint supplies the prior.
+# truth, exact nested 0.1-degree pseudo-satellite footprints, and pseudo-gauge
+# values. Network geometry is configurable; the primary JJA wrapper uses the
+# actual BMD station catalogue. The CPC-conditioned best checkpoint supplies
+# the prior.
 #
 # Guided sampling takes the gradient THROUGH the network, so an analysis costs
 # roughly 2-3x a background.  Budget accordingly before widening the sweep.
