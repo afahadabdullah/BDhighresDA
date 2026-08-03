@@ -65,13 +65,16 @@ def ensemble_score(ensemble: np.ndarray, truth: np.ndarray) -> dict[str, float]:
         if mean.std() > 0 and obs.std() > 0
         else float("nan")
     )
+    rmse = float(np.sqrt(np.mean(difference**2)))
+    mean_spread = float(np.mean(spread))
     return {
-        "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+        "rmse_mm": rmse,
         "mae_mm": float(np.mean(np.abs(difference))),
         "bias_mm": float(np.mean(difference)),
         "crps_mm": float(crps),
         "correlation": correlation,
-        "spread_mm": float(np.mean(spread)),
+        "spread_mm": mean_spread,
+        "spread_skill_ratio": mean_spread / rmse if rmse > 0 else float("nan"),
         "coverage_90": float(np.mean((obs >= low) & (obs <= high))),
         "variance_ratio": float(np.var(mean) / np.var(obs))
         if np.var(obs) > 0

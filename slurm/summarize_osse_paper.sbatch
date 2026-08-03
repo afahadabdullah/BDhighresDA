@@ -23,7 +23,10 @@ PRIMARY="${OSSE_PAPER_PRIMARY:-simultaneous_realistic_40}"
 # Older or interrupted finalization jobs may leave only one paper-ready arm.
 # Resume the CPU-only merge/evaluation from existing monthly GPU chunks.  The
 # presence checks make this cheap when an arm is already complete.
-if [[ -d "$ROOT/chunks/gauges_exact_bmd" || -d "$ROOT/gauges_exact_bmd" ]]; then
+if [[ "$PRIMARY" == simultaneous_exact_* ]]; then
+    EXACT_TAG="${PRIMARY#simultaneous_exact_}"
+    SOURCE_ARMS=("gauges_exact_${EXACT_TAG}" "satellite_exact_${EXACT_TAG}" "$PRIMARY")
+elif [[ -d "$ROOT/chunks/gauges_exact_bmd" || -d "$ROOT/gauges_exact_bmd" ]]; then
     SOURCE_ARMS=(gauges_exact_bmd satellite_exact_bmd simultaneous_exact_bmd)
 else
     SOURCE_ARMS=(gauges_realistic_40 satellite_realistic_40 simultaneous_realistic_40)

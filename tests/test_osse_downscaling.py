@@ -295,6 +295,27 @@ def test_observation_value_uses_withheld_gauges_and_best_single_source(tmp_path)
     assert payload["simultaneous_synergy_percent"]["withheld_gauges"] == pytest.approx(20.0)
 
 
+def test_50_gauge_density_triplet_is_selected_and_labelled():
+    arms = [
+        {"label": label, "scale": {"withheld_gauges": {}}}
+        for label in (
+            "gauges_exact_50", "satellite_exact_50", "simultaneous_exact_50"
+        )
+    ]
+    selected = SUITE.select_observation_arms(arms)
+    assert [arm["label"] for arm in selected] == [
+        "gauges_exact_50", "satellite_exact_50", "simultaneous_exact_50"
+    ]
+    assert SUITE.observation_target_description(selected) == (
+        "withheld pseudo-gauges at 10 of 50 spread locations"
+    )
+
+
+def test_spread_skill_is_derived_for_older_scale_summaries():
+    scores = {"analysis": {"spread_mm": 4.0, "rmse_mm": 5.0}}
+    assert SUITE._spread_skill(scores) == pytest.approx(0.8)
+
+
 def test_suite_builds_all_paper_artifacts(tmp_path):
     root = tmp_path / "osse_paper"
     for label, skill in (("gauges_realistic_40", 0.4),

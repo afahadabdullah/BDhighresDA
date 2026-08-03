@@ -36,16 +36,20 @@ MEMBERS="${OSSE_FULL_MEMBERS:-16}"
 WITHHOLD="${OSSE_FULL_WITHHOLD:-0.2}"
 SEED="${OSSE_FULL_SEED:-7}"
 ROOT="${OSSE_FULL_ROOT:-data/processed/osse_full_jja_2021_2024}"
+NETWORK="${OSSE_FULL_NETWORK:-bmd}"
+NETWORK_TAG="${OSSE_FULL_NETWORK_TAG:-bmd}"
 BMD_STATIONS="${OSSE_BMD_STATIONS:-data/bmd/Stations.csv}"
 if [[ ! -f "$BMD_STATIONS" && -f data/stations/Stations.csv ]]; then
     BMD_STATIONS="data/stations/Stations.csv"
 fi
 
 [[ -f "$CKPT" ]] || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
-[[ -f "$BMD_STATIONS" ]] || {
-    echo "ERROR: BMD station catalogue not found: $BMD_STATIONS"
-    exit 1
-}
+if [[ "${NETWORK,,}" == "bmd" ]]; then
+    [[ -f "$BMD_STATIONS" ]] || {
+        echo "ERROR: BMD station catalogue not found: $BMD_STATIONS"
+        exit 1
+    }
+fi
 
 ARM_INDEX=$((SLURM_ARRAY_TASK_ID / 12))
 GROUP_INDEX=$((SLURM_ARRAY_TASK_ID % 12))
@@ -53,9 +57,9 @@ YEAR=$((2021 + GROUP_INDEX / 3))
 MONTH=$((6 + GROUP_INDEX % 3))
 
 case "$ARM_INDEX" in
-    0) LABEL="gauges_exact_bmd"; MODE="gauges" ;;
-    1) LABEL="satellite_exact_bmd"; MODE="satellite" ;;
-    2) LABEL="simultaneous_exact_bmd"; MODE="combined" ;;
+    0) LABEL="gauges_exact_${NETWORK_TAG}"; MODE="gauges" ;;
+    1) LABEL="satellite_exact_${NETWORK_TAG}"; MODE="satellite" ;;
+    2) LABEL="simultaneous_exact_${NETWORK_TAG}"; MODE="combined" ;;
     *) echo "ERROR: unknown arm index $ARM_INDEX"; exit 2 ;;
 esac
 
@@ -64,7 +68,7 @@ OUT="$ROOT/chunks/$LABEL/$CHUNK"
 mkdir -p "$OUT"
 
 echo "Full OSSE chunk: $LABEL / $YEAR-$(printf '%02d' "$MONTH")"
-echo "mode=$MODE; exact observations; members=$MEMBERS; seed=$SEED"
+echo "mode=$MODE; network=$NETWORK; exact observations; members=$MEMBERS; seed=$SEED"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --config "$CONFIG" \
@@ -74,7 +78,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --month "$MONTH" \
     --days 31 \
     --members "$MEMBERS" \
-    --networks bmd \
+    --networks "$NETWORK" \
     --bmd-stations "$BMD_STATIONS" \
     --station-layout spread \
     --holdout-layout spread \
@@ -84,7 +88,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --observation-mode "$MODE" \
     --satellite-stride 1 \
     --dump "$OUT/ensemble.npz" \
-    --dump-network bmd \
+    --dump-network "$NETWORK" \
     --dump-obs-error exact \
     --out-figure "$OUT/osse_overview.png" \
     --out-report "$OUT/osse_report.json"

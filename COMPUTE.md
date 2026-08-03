@@ -867,3 +867,23 @@ bash slurm/submit_osse_full_jja.sh
 This run writes below `data/processed/osse_full_jja_2021_2024/`. The finalizer
 refuses duplicate dates, inconsistent station splits or metadata, missing JJA
 days, and any failed upstream chunk.
+
+### Fifty-gauge density ablation
+
+To isolate gauge density from the real BMD geometry, run the same maximum
+three-arm experiment with 50 deterministic farthest-point (spread) pseudo-
+gauges. Forty locations are assimilated and ten are withheld in every arm;
+the dates, checkpoint, 16-member ensemble, seed, exact 0.1-degree footprints,
+and CHIRPS truth are otherwise unchanged:
+
+```bash
+bash slurm/submit_osse_full_jja_50.sh
+```
+
+Outputs are written below
+`data/processed/osse_full_jja_50_2021_2024/`. The dependent finalizer creates
+`paper/fig_observation_value.png`, `paper/fig_observation_value_matrix.png`,
+the corresponding CSV/JSON/LaTeX table, and the remaining paper diagnostics.
+This is a controlled network-density ablation, not an experiment using 50 real
+BMD stations and not a claim that a point gauge resolves scales finer than the
+0.05-degree CHIRPS nature run.

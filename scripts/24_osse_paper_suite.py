@@ -46,6 +46,9 @@ PREFERRED_ORDER = [
     "gauges_exact_bmd",
     "satellite_exact_bmd",
     "simultaneous_exact_bmd",
+    "gauges_exact_50",
+    "satellite_exact_50",
+    "simultaneous_exact_50",
     "simultaneous_perfect_40",
     "gauges_realistic_40",
     "satellite_realistic_40",
@@ -59,6 +62,9 @@ PRETTY = {
     "gauges_exact_bmd": "BMD pseudo-gauges only",
     "satellite_exact_bmd": "Exact 0.1° footprints only",
     "simultaneous_exact_bmd": "Simultaneous (primary)",
+    "gauges_exact_50": "50 spread pseudo-gauges only",
+    "satellite_exact_50": "Exact 0.1° footprints only",
+    "simultaneous_exact_50": "Simultaneous, 50 gauges (primary)",
     "simultaneous_perfect_40": "Perfect obs (upper bound)",
     "gauges_realistic_40": "Gauges only",
     "satellite_realistic_40": "Pseudo-IMERG only",
@@ -95,9 +101,11 @@ DOWNSCALING_COLUMNS = [
 ]
 
 # These three arms make the observation-source attribution experiment.  The
-# exact-BMD set is the paper OSSE; the realistic set is retained for older runs.
+# The exact BMD-geometry and 50-site sets are matched paper OSSEs; the realistic
+# set is retained for older runs.
 OBSERVATION_ARM_SETS = [
     ("gauges_exact_bmd", "satellite_exact_bmd", "simultaneous_exact_bmd"),
+    ("gauges_exact_50", "satellite_exact_50", "simultaneous_exact_50"),
     ("gauges_realistic_40", "satellite_realistic_40",
      "simultaneous_realistic_40"),
 ]
@@ -265,6 +273,26 @@ def _percent_reduction(scores: dict, metric: str) -> float:
     return 100.0 * (background - analysis) / background
 
 
+def _spread_skill(scores: dict, member: str = "analysis") -> float:
+    """Read spread/skill, deriving it from stored spread and RMSE if needed."""
+    explicit = float(dig(scores, f"{member}.spread_skill_ratio"))
+    if np.isfinite(explicit):
+        return explicit
+    spread = float(dig(scores, f"{member}.spread_mm"))
+    rmse = float(dig(scores, f"{member}.rmse_mm"))
+    if not np.isfinite(spread) or not np.isfinite(rmse) or rmse == 0:
+        return np.nan
+    return spread / rmse
+
+
+def observation_target_description(arms: list[dict]) -> str:
+    """Describe the held-out target without mislabelling synthetic locations."""
+    labels = {arm.get("label", "") for arm in arms}
+    if any(label.endswith("_50") for label in labels):
+        return "withheld pseudo-gauges at 10 of 50 spread locations"
+    return "withheld pseudo-gauges at real BMD locations"
+
+
 def observation_value_record(arm: dict) -> dict:
     """Flatten the source-attribution metrics for one observation arm."""
     scale = arm["scale"]
@@ -283,7 +311,7 @@ def observation_value_record(arm: dict) -> dict:
             dig(scale, "withheld_gauges.analysis.coverage_90")
         ),
         "withheld_spread_skill": float(
-            dig(scale, "withheld_gauges.analysis.spread_skill_ratio")
+            _spread_skill(scale["withheld_gauges"], "analysis")
         ),
     }
     return record
@@ -318,12 +346,19 @@ def write_observation_value_data(path_csv: Path, path_json: Path,
     for arm in arms:
         for scope, scope_label in SCALE_SCOPES:
             scores = arm["scale"][scope]
+            if scope == "withheld_gauges" and arm["label"].endswith("_50"):
+                scope_label = "Withheld 50-site pseudo-gauges"
             row = {"arm": arm["label"], "arm_label": arm["pretty"],
                    "scope": scope, "scope_label": scope_label.replace("\n", " ")}
             for metric in ("crps_mm", "rmse_mm", "mae_mm", "bias_mm",
                            "correlation", "spread_skill_ratio", "coverage_90"):
                 row[f"background_{metric}"] = dig(scores, f"background.{metric}")
                 row[f"analysis_{metric}"] = dig(scores, f"analysis.{metric}")
+            # Older scale summaries stored spread and RMSE but not their ratio.
+            row["background_spread_skill_ratio"] = _spread_skill(
+                scores, "background"
+            )
+            row["analysis_spread_skill_ratio"] = _spread_skill(scores, "analysis")
             row["crps_gain_percent"] = _percent_reduction(scores, "crps_mm")
             row["rmse_gain_percent"] = _percent_reduction(scores, "rmse_mm")
             row["correlation_gain"] = (
@@ -337,7 +372,7 @@ def write_observation_value_data(path_csv: Path, path_json: Path,
         writer.writeheader()
         writer.writerows(rows)
     payload = {
-        "primary_target": "withheld pseudo-gauges at real BMD locations",
+        "primary_target": observation_target_description(arms),
         "arms": [arm["label"] for arm in arms],
         "rows": rows,
         "simultaneous_synergy_percent": {
@@ -473,6 +508,8 @@ def figure_observation_value(path: Path, arms: list[dict]) -> None:
     colours = ["#1676A3", "#F29E4C", "#CF4658"]
     scopes = [scope for scope, _ in SCALE_SCOPES]
     scope_labels = [label for _, label in SCALE_SCOPES]
+    if any(arm["label"].endswith("_50") for arm in arms):
+        scope_labels[0] = "Withheld 50-site\npseudo-gauges"
     x = np.arange(len(scopes))
     width = 0.24
     fig, axes = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
@@ -516,14 +553,13 @@ def figure_observation_value(path: Path, arms: list[dict]) -> None:
     axes[1, 0].set_xticks(arm_x, [arm["pretty"] for arm in arms], rotation=15,
                          ha="right")
     axes[1, 0].set_ylabel("CRPS (mm day$^{-1}$; lower is better)")
-    axes[1, 0].set_title("D. Primary ranking at withheld BMD locations")
+    axes[1, 0].set_title("D. Primary ranking at withheld pseudo-gauges")
     axes[1, 0].legend(fontsize=8)
     axes[1, 0].grid(alpha=0.25, axis="y")
 
     coverage = [dig(arm["scale"], "withheld_gauges.analysis.coverage_90")
                 for arm in arms]
-    spread_skill = [dig(arm["scale"],
-                        "withheld_gauges.analysis.spread_skill_ratio")
+    spread_skill = [_spread_skill(arm["scale"]["withheld_gauges"], "analysis")
                     for arm in arms]
     axes[1, 1].bar(arm_x - 0.18, coverage, 0.36, color="#4E9F8F", label="coverage90")
     axes[1, 1].bar(arm_x + 0.18, spread_skill, 0.36, color="#7656A5",
@@ -548,7 +584,7 @@ def figure_observation_value(path: Path, arms: list[dict]) -> None:
 
     fig.suptitle(
         "Observation-source value in the CHIRPS OSSE\n"
-        "Method selection uses withheld pseudo-gauges at real BMD locations; "
+        f"Method selection uses {observation_target_description(arms)}; "
         "gridded panels diagnose scale and spatial mechanism",
         fontsize=14,
     )
@@ -789,8 +825,9 @@ def write_results_markdown(path: Path, arms: list[dict], primary: str,
             "",
             "## Observation-source attribution",
             "",
-            "The primary ranking below uses exactly the same withheld pseudo-BMD "
-            "locations for gauges-only, exact 0.1-degree footprints-only, and "
+            f"The primary ranking below uses exactly the same "
+            f"{observation_target_description(source_arms)} for gauges-only, "
+            "exact 0.1-degree footprints-only, and "
             "simultaneous DA. Gridded CHIRPS scores explain the scale of the gain "
             "but do not override this withheld-gauge ranking.",
             "",
@@ -803,7 +840,7 @@ def write_results_markdown(path: Path, arms: list[dict], primary: str,
                 f"| {arm['pretty']} | {fmt(dig(scores, 'analysis.crps_mm'), 2)} | "
                 f"{fmt(_percent_reduction(scores, 'crps_mm'), 1)}% | "
                 f"{fmt(dig(scores, 'analysis.coverage_90'), 3)} | "
-                f"{fmt(dig(scores, 'analysis.spread_skill_ratio'), 2)} |"
+                f"{fmt(_spread_skill(scores, 'analysis'), 2)} |"
             )
         withheld_synergy = combined_synergy(source_arms, "withheld_gauges")
         lines += [
@@ -908,8 +945,8 @@ def main() -> None:
             out_dir / "table_observation_value.tex", observation_arms,
             OBSERVATION_VALUE_COLUMNS, observation_value,
             "Observation-source attribution in the matched CHIRPS OSSE. The "
-            "primary columns are scored at pseudo-gauges withheld at real BMD "
-            "locations; gridded CHIRPS columns diagnose the spatial scale at "
+            f"primary columns are scored at {observation_target_description(observation_arms)}; "
+            "gridded CHIRPS columns diagnose the spatial scale at "
             "which each source adds value. Calibration targets are 0.90 coverage "
             "and unit spread--skill. Best per column in bold.",
             "tab:osse-observation-value",
@@ -933,7 +970,7 @@ def main() -> None:
         "ablation_columns": [c[1] for c in ABLATION_COLUMNS],
         "downscaling_columns": [c[1] for c in DOWNSCALING_COLUMNS],
         "observation_value": {
-            "primary_target": "withheld pseudo-gauges at real BMD locations",
+            "primary_target": observation_target_description(observation_arms),
             "arms": [a["label"] for a in observation_arms],
             "columns": [c[1] for c in OBSERVATION_VALUE_COLUMNS],
             "matrix": observation_value.tolist(),
