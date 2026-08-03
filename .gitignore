@@ -24,3 +24,6 @@ dist/
 .env
 .DS_Store
 *.pdf
+
+# Manuscript sources, review notes, and compiled submission artifacts stay local.
+/manuscript/
