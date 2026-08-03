@@ -109,6 +109,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", default=None)
     parser.add_argument("--month", type=int, default=7)
     parser.add_argument(
+        "--months",
+        default=None,
+        help="comma-separated months. When supplied, days are selected evenly "
+             "across every available year-month group (for example, "
+             "--months 6,7,8 --days 12 over 2021--2024 selects one day from "
+             "each month in each year). Overrides --month.",
+    )
+    parser.add_argument(
         "--networks",
         default="10,25,50,100,200,bmd",
         help="comma-separated station counts, plus 'bmd' for the real geometry",
@@ -195,6 +203,92 @@ def parse_args() -> argparse.Namespace:
              "gamma x sigma x temperature, so cost multiplies fast.",
     )
     return parser.parse_args()
+
+
+def select_nature_days(
+    times: np.ndarray,
+    start: np.datetime64,
+    end: np.datetime64,
+    requested_days: int,
+    month: int = 0,
+    months_csv: str | None = None,
+) -> np.ndarray:
+    """Select deterministic nature-run days, optionally balanced by year-month.
+
+    The old single-month behaviour is retained when ``months_csv`` is absent.
+    A multi-month experiment is explicitly stratified so a short run cannot
+    accidentally become an all-season linspace sample dominated by endpoints.
+    """
+    if requested_days < 1:
+        raise ValueError("--days must be >= 1")
+    eligible = np.where((times >= start) & (times <= end))[0]
+    eligible_years = np.unique(times[eligible].astype("datetime64[Y]"))
+
+    requested_months: list[int] | None = None
+    if months_csv is not None:
+        requested_months = sorted(
+            {int(value.strip()) for value in months_csv.split(",") if value.strip()}
+        )
+        if not requested_months or any(
+            value < 1 or value > 12 for value in requested_months
+        ):
+            raise ValueError("--months must contain comma-separated values in 1..12")
+        calendar_month = times[eligible].astype("datetime64[M]").astype(int) % 12 + 1
+        eligible = eligible[np.isin(calendar_month, requested_months)]
+    elif month:
+        if month < 1 or month > 12:
+            raise ValueError("--month must be 0 or a value in 1..12")
+        calendar_month = times[eligible].astype("datetime64[M]").astype(int) % 12 + 1
+        eligible = eligible[calendar_month == month]
+
+    if not len(eligible):
+        raise ValueError("no days match the requested window and months")
+
+    count = min(requested_days, len(eligible))
+    if requested_months is None:
+        return eligible[np.linspace(0, len(eligible) - 1, count).astype(int)]
+
+    # One group for each available year-month, kept in chronological order.
+    group_labels = times[eligible].astype("datetime64[M]")
+    unique_groups = np.unique(group_labels)
+    expected_group_count = len(eligible_years) * len(requested_months)
+    if len(unique_groups) != expected_group_count:
+        raise ValueError(
+            "incomplete balanced month coverage: expected "
+            f"{expected_group_count} year-month groups but found "
+            f"{len(unique_groups)}"
+        )
+    groups = [eligible[group_labels == label] for label in unique_groups]
+
+    if count < len(groups):
+        chosen = np.linspace(0, len(groups) - 1, count).round().astype(int)
+        groups = [groups[index] for index in np.unique(chosen)]
+        count = len(groups)
+
+    # Allocate as evenly as possible, then choose evenly spaced interior dates
+    # within each group. For 12 JJA samples over four years every quota is one.
+    quotas = np.zeros(len(groups), dtype=int)
+    remaining = count
+    while remaining:
+        progressed = False
+        for group_index, group in enumerate(groups):
+            if remaining == 0:
+                break
+            if quotas[group_index] < len(group):
+                quotas[group_index] += 1
+                remaining -= 1
+                progressed = True
+        if not progressed:
+            break
+
+    selected: list[int] = []
+    for group, quota in zip(groups, quotas):
+        if quota:
+            positions = np.floor(
+                (np.arange(quota, dtype=float) + 0.5) * len(group) / quota
+            ).astype(int)
+            selected.extend(int(group[position]) for position in positions)
+    return np.asarray(sorted(selected), dtype=int)
 
 
 def synthetic_network(
@@ -380,7 +474,6 @@ def main() -> None:
         climatology=load_climatology(data_stats, stats),
     )
     valid = dataset.fixed_valid > 0
-    slices = dataset.fixed_spatial_slices()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet(
@@ -400,15 +493,23 @@ def main() -> None:
     test_years = training_config["data"]["years"]["test"]
     start = np.datetime64(args.start or f"{test_years[0]}-01-01")
     end = np.datetime64(args.end or f"{test_years[1]}-12-31")
-    eligible = np.where((times >= start) & (times <= end))[0]
-    if args.month:
-        months = times[eligible].astype("datetime64[M]").astype(int) % 12 + 1
-        eligible = eligible[months == args.month]
-    if not len(eligible):
-        raise ValueError("no days match the requested window")
-    days = eligible[
-        np.linspace(0, len(eligible) - 1, min(args.days, len(eligible))).astype(int)
+    days = select_nature_days(
+        times,
+        start,
+        end,
+        args.days,
+        month=args.month,
+        months_csv=args.months,
+    )
+    nature_dates = [
+        str(times[int(index)].astype("datetime64[D]")) for index in days
     ]
+    print(
+        "[osse] temporal alignment: same checkpoint day for CPC/ERA5 "
+        "conditioning and CHIRPS nature truth; no date offset",
+        flush=True,
+    )
+    print(f"[osse] selected CHIRPS nature days: {', '.join(nature_dates)}", flush=True)
 
     # -- station networks -----------------------------------------------------
     rng = np.random.default_rng(args.seed)
@@ -538,6 +639,11 @@ def main() -> None:
     else:
         combinations = [{}]
 
+    # Tuning can intentionally reduce the selected day set.
+    nature_dates = [
+        str(times[int(index)].astype("datetime64[D]")) for index in days
+    ]
+
     print(
         f"[osse] {len(days)} days x {args.members} members x "
         f"{len(networks)} networks x {len(error_levels)} error levels x "
@@ -561,14 +667,42 @@ def main() -> None:
     # measures inflation as well as assimilation.  In tuning mode the temperature
     # varies, so the cache is keyed on it.
     background_cache: dict[tuple[int, float], np.ndarray] = {}
+    item_cache: dict[int, dict[str, torch.Tensor]] = {}
     truth_cache: dict[int, np.ndarray] = {}
+    position_for_index = {
+        int(store_index): position
+        for position, store_index in enumerate(dataset.index)
+    }
+
+    # Materialise conditioning and truth together. This makes a temporal shift
+    # structurally impossible: every pseudo-observation below is derived from
+    # target_mm in the exact same dataset item handed to the checkpoint.
+    for index_value in days:
+        index = int(index_value)
+        if index not in position_for_index:
+            raise RuntimeError(
+                f"selected store index {index} is absent from dataset.index"
+            )
+        item = dataset[position_for_index[index]]
+        item_date = np.datetime64(int(item["time"].item()), "s").astype(
+            "datetime64[D]"
+        )
+        expected_date = times[index].astype("datetime64[D]")
+        if item_date != expected_date:
+            raise RuntimeError(
+                "OSSE temporal-alignment failure: dataset item is "
+                f"{item_date}, but selected CHIRPS day is {expected_date}"
+            )
+        day_valid = item["mask"][0].cpu().numpy() > 0
+        truth = item["target_mm"][0].cpu().numpy().astype(np.float32)
+        item_cache[index] = item
+        truth_cache[index] = np.where(day_valid, truth, np.nan)
 
     def background_for(index: int, temperature: float) -> np.ndarray:
         key = (int(index), round(float(temperature), 6))
         if key in background_cache:
             return background_cache[key]
-        position = int(np.where(dataset.index == index)[0][0])
-        item = dataset[position]
+        item = item_cache[int(index)]
         base = item["base"][None].to(device)
         with torch.inference_mode():
             generated = run_assim(
@@ -590,10 +724,6 @@ def main() -> None:
         )
         background_cache[key] = np.where(valid[None], field, np.nan)
         return background_cache[key]
-
-    for index in days:
-        target = np.asarray(dataset.z["target"][int(index)][slices], dtype=np.float32)
-        truth_cache[int(index)] = np.where(valid, target, np.nan)
 
     dump_target = args.dump_network
     if args.dump and dump_target is None:
@@ -706,8 +836,7 @@ def main() -> None:
                 }
                 for index in days:
                     index = int(index)
-                    position = int(np.where(dataset.index == index)[0][0])
-                    item = dataset[position]
+                    item = item_cache[index]
                     base = item["base"][None].to(device)
                     truth = truth_cache[index]
                     # The coarse precipitation the prior starts from, in mm.
@@ -972,6 +1101,21 @@ def main() -> None:
                         satellite_selection=satellite_selection,
                         satellite_r_inflation=np.float32(satellite_r_inflation),
                         observation_mode=np.str_(observation_mode),
+                        temporal_alignment=np.str_(
+                            "same checkpoint day; no offset"
+                        ),
+                        nature_source=np.str_("CHIRPS 0.05-degree target"),
+                        pseudo_gauge_source=np.str_(
+                            "same-day CHIRPS sampled at synthetic stations"
+                        ),
+                        pseudo_satellite_source=np.str_(
+                            "same-day CHIRPS exact physical 2x2 block means"
+                        ),
+                        day_selection=np.str_(
+                            "balanced by available year-month"
+                            if args.months is not None
+                            else "evenly spaced over eligible dates"
+                        ),
                         grid_name=np.str_(grid.name),
                         network=np.str_(name),
                         obs_error=np.str_(error_name),
@@ -1010,8 +1154,26 @@ def main() -> None:
     report = {
         "checkpoint": str(args.ckpt),
         "checkpoint_epoch": checkpoint.get("epoch"),
-        "days": [str(times[int(i)].astype("datetime64[D]")) for i in days],
+        "days": nature_dates,
         "members": args.members,
+        "requested_months": (
+            [int(value) for value in args.months.split(",")]
+            if args.months is not None
+            else ([args.month] if args.month else [])
+        ),
+        "day_selection": (
+            "balanced by available year-month"
+            if args.months is not None
+            else "evenly spaced over eligible dates"
+        ),
+        "temporal_alignment": "same checkpoint day; no offset",
+        "nature_source": "CHIRPS 0.05-degree checkpoint target",
+        "pseudo_gauge_source": "same-day CHIRPS sampled at synthetic stations",
+        "pseudo_satellite_source": (
+            "same-day CHIRPS exact physical 2x2 block means"
+            if use_satellite
+            else None
+        ),
         "withhold_fraction": args.withhold,
         "data_zarr": data_zarr,
         "data_stats": data_stats,

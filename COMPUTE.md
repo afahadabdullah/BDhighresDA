@@ -790,3 +790,33 @@ scancel JOB_ID
 `slurm/train_2xV100.sbatch` is retained for PRISM x86-64 V100 nodes. It uses
 two GPUs and a separate x86/CUDA Conda environment. Never activate or reuse
 the `bdda-gh200` ARM environment with that script.
+
+# Balanced JJA CHIRPS OSSE (2021--2024)
+
+The paper OSSE uses CHIRPS as the complete 0.05-degree nature run. On each
+selected day, pseudo-gauges are sampled from that same CHIRPS field and the
+pseudo-satellite is its exact physical 2x2 mean (0.1 degrees). CPC and ERA5
+conditioning, CHIRPS truth, and both pseudo-observation types all use the same
+checkpoint day; the BMD/IMERG 03:00 UTC offset logic is not used in this OSSE.
+
+The reproducible JJA experiment selects one interior date from June, July and
+August in each of 2021--2024 (12 dates), generates 16 members, uses 40 spread
+stations with 20% withheld, and restores the original dense satellite design
+(stride 1, no correlation-control R inflation):
+
+```bash
+bash slurm/submit_osse_jja.sh
+```
+
+Run the perfect-observation mechanistic upper bound separately so it cannot
+overwrite or be confused with the realistic experiment:
+
+```bash
+OSSE_OBS_ERROR=perfect bash slurm/submit_osse_jja.sh
+```
+
+Outputs are isolated under
+`data/processed/osse_jja_2021_2024_realistic/` and
+`data/processed/osse_jja_2021_2024_perfect/`. The log must print all 12 selected
+CHIRPS dates and the message `same checkpoint day ... no date offset` before
+sampling begins.

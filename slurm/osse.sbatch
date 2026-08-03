@@ -42,6 +42,9 @@ CONFIG="${OSSE_CONFIG:-configs/da.yaml}"
 DAYS="${OSSE_DAYS:-30}"
 MEMBERS="${OSSE_MEMBERS:-16}"
 MONTH="${OSSE_MONTH:-7}"
+MONTHS="${OSSE_MONTHS:-}"
+START="${OSSE_START:-}"
+END="${OSSE_END:-}"
 NETWORKS="${OSSE_NETWORKS:-40}"
 LAYOUT="${OSSE_LAYOUT:-spread}"
 OBS_ERROR="${OSSE_OBS_ERROR:-realistic}"
@@ -50,13 +53,52 @@ WITHHOLD="${OSSE_WITHHOLD:-0.2}"
 PSEUDO_SATELLITE="${OSSE_PSEUDO_SATELLITE:-1}"
 OBSERVATION_MODE="${OSSE_OBSERVATION_MODE:-}"
 SATELLITE_STRIDE="${OSSE_SATELLITE_STRIDE:-1}"
-FIGURE="${OSSE_FIGURE:-data/processed/osse_combined.png}"
-REPORT="${OSSE_REPORT:-data/processed/osse_combined.json}"
-DUMP="${OSSE_DUMP:-data/processed/osse_chirps_satellite_40stations.npz}"
+OUT_DIR="${OSSE_OUT_DIR:-}"
+if [[ -n "$OUT_DIR" ]]; then
+    mkdir -p "$OUT_DIR"
+    FIGURE="${OSSE_FIGURE:-$OUT_DIR/osse_overview.png}"
+    REPORT="${OSSE_REPORT:-$OUT_DIR/osse_metrics.json}"
+    DUMP="${OSSE_DUMP:-$OUT_DIR/ensemble.npz}"
+    DIAG_FIGURE="${OSSE_DIAG_FIGURE:-$OUT_DIR/da_diagnostics.png}"
+    DIAG_REPORT="${OSSE_DIAG_REPORT:-$OUT_DIR/da_diagnostics.json}"
+    IMPACT_CASES_FIGURE="${OSSE_IMPACT_CASES_FIGURE:-$OUT_DIR/da_impact_cases.png}"
+    IMPACT_FIGURE="${OSSE_IMPACT_FIGURE:-$OUT_DIR/da_impact_aggregate.png}"
+    IMPACT_REPORT="${OSSE_IMPACT_REPORT:-$OUT_DIR/da_impact.json}"
+    RECONSTRUCTION_FIGURE="${OSSE_RECONSTRUCTION_FIGURE:-$OUT_DIR/osse_reconstruction.png}"
+    MATRIX_FIGURE="${OSSE_MATRIX_FIGURE:-$OUT_DIR/osse_metric_matrix.png}"
+    SCALE_REPORT="${OSSE_SCALE_REPORT:-$OUT_DIR/osse_scale_summary.json}"
+    DOWNSCALING_FIGURE="${OSSE_DOWNSCALING_FIGURE:-$OUT_DIR/osse_downscaling.png}"
+    DOWNSCALING_REPORT="${OSSE_DOWNSCALING_REPORT:-$OUT_DIR/osse_downscaling.json}"
+    DOWNSCALING_DATA="${OSSE_DOWNSCALING_DATA:-$OUT_DIR/osse_downscaling_spatial.nc}"
+    DOWNSCALING_CURVES="${OSSE_DOWNSCALING_CURVES:-$OUT_DIR/osse_downscaling_curves.npz}"
+else
+    FIGURE="${OSSE_FIGURE:-data/processed/osse_combined.png}"
+    REPORT="${OSSE_REPORT:-data/processed/osse_combined.json}"
+    DUMP="${OSSE_DUMP:-data/processed/osse_chirps_satellite_40stations.npz}"
+    DIAG_FIGURE="${OSSE_DIAG_FIGURE:-data/processed/da_diagnostics.png}"
+    DIAG_REPORT="${OSSE_DIAG_REPORT:-data/processed/da_diagnostics.json}"
+    IMPACT_CASES_FIGURE="${OSSE_IMPACT_CASES_FIGURE:-data/processed/da_impact_cases.png}"
+    IMPACT_FIGURE="${OSSE_IMPACT_FIGURE:-data/processed/da_impact_aggregate.png}"
+    IMPACT_REPORT="${OSSE_IMPACT_REPORT:-data/processed/da_impact.json}"
+    RECONSTRUCTION_FIGURE="${OSSE_RECONSTRUCTION_FIGURE:-data/processed/osse_reconstruction_maps.png}"
+    MATRIX_FIGURE="${OSSE_MATRIX_FIGURE:-data/processed/osse_metric_matrix.png}"
+    SCALE_REPORT="${OSSE_SCALE_REPORT:-data/processed/osse_scale_summary.json}"
+    DOWNSCALING_FIGURE="${OSSE_DOWNSCALING_FIGURE:-data/processed/osse_downscaling_diagnostics.png}"
+    DOWNSCALING_REPORT="${OSSE_DOWNSCALING_REPORT:-data/processed/osse_downscaling_diagnostics.json}"
+    DOWNSCALING_DATA="${OSSE_DOWNSCALING_DATA:-data/processed/osse_downscaling_spatial.nc}"
+    DOWNSCALING_CURVES="${OSSE_DOWNSCALING_CURVES:-data/processed/osse_downscaling_curves.npz}"
+fi
 
 [[ -f "$CKPT" ]] || { echo "ERROR: checkpoint not found: $CKPT"; exit 1; }
 
 EXTRA=(--dump "$DUMP" --dump-obs-error "$DUMP_OBS_ERROR")
+if [[ -n "$MONTHS" ]]; then
+    EXTRA+=(--months "$MONTHS")
+else
+    EXTRA+=(--month "$MONTH")
+fi
+[[ -n "$START" ]] && EXTRA+=(--start "$START")
+[[ -n "$END" ]] && EXTRA+=(--end "$END")
 [[ -n "${OSSE_DUMP_NETWORK:-}" ]] && EXTRA+=(--dump-network "$OSSE_DUMP_NETWORK")
 if [[ "$PSEUDO_SATELLITE" == "1" ]]; then
     EXTRA+=(--pseudo-satellite)
@@ -77,7 +119,8 @@ fi
 echo "Checkpoint: $CKPT"
 echo "Networks: $NETWORKS   Layout: $LAYOUT   Obs error: $OBS_ERROR"
 echo "Dump observation-error case: $DUMP_OBS_ERROR"
-echo "Days: $DAYS   Members: $MEMBERS   Month: $MONTH   Withhold: $WITHHOLD"
+echo "Days: $DAYS   Members: $MEMBERS   Month(s): ${MONTHS:-$MONTH}   Withhold: $WITHHOLD"
+echo "Date bounds: ${START:-checkpoint test start} to ${END:-checkpoint test end}"
 echo "Pseudo-satellite: $PSEUDO_SATELLITE (factor 2 = exact 0.1-degree footprints)"
 echo "Observation mode: ${OBSERVATION_MODE:-legacy}   satellite stride: $SATELLITE_STRIDE"
 
@@ -86,7 +129,6 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --ckpt "$CKPT" \
     --days "$DAYS" \
     --members "$MEMBERS" \
-    --month "$MONTH" \
     --networks "$NETWORKS" \
     --station-layout "$LAYOUT" \
     --obs-error "$OBS_ERROR" \
@@ -101,8 +143,8 @@ if [[ -f "$DUMP" ]]; then
     echo "=============== DA verification suite ==============="
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/11_da_diagnostics.py \
         --dump "$DUMP" \
-        --out-figure "${OSSE_DIAG_FIGURE:-data/processed/da_diagnostics.png}" \
-        --out-report "${OSSE_DIAG_REPORT:-data/processed/da_diagnostics.json}"
+        --out-figure "$DIAG_FIGURE" \
+        --out-report "$DIAG_REPORT"
 fi
 
 # Spatial impact maps from the same dump.
@@ -112,9 +154,9 @@ if [[ -f "$DUMP" ]]; then
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/12_da_impact_maps.py \
         --dump "$DUMP" \
         --cases "${OSSE_IMPACT_CASES:-3}" \
-        --out-cases "${OSSE_IMPACT_CASES_FIGURE:-data/processed/da_impact_cases.png}" \
-        --out-aggregate "${OSSE_IMPACT_FIGURE:-data/processed/da_impact_aggregate.png}" \
-        --out-report "${OSSE_IMPACT_REPORT:-data/processed/da_impact.json}"
+        --out-cases "$IMPACT_CASES_FIGURE" \
+        --out-aggregate "$IMPACT_FIGURE" \
+        --out-report "$IMPACT_REPORT"
 fi
 
 # Reconstruction maps and metric matrices. These explicitly separate the
@@ -125,9 +167,9 @@ if [[ -f "$DUMP" ]]; then
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/14_osse_summary.py \
         --dump "$DUMP" \
         --cases "${OSSE_SUMMARY_CASES:-4}" \
-        --out-reconstruction "${OSSE_RECONSTRUCTION_FIGURE:-data/processed/osse_reconstruction_maps.png}" \
-        --out-matrix "${OSSE_MATRIX_FIGURE:-data/processed/osse_metric_matrix.png}" \
-        --out-report "${OSSE_SCALE_REPORT:-data/processed/osse_scale_summary.json}"
+        --out-reconstruction "$RECONSTRUCTION_FIGURE" \
+        --out-matrix "$MATRIX_FIGURE" \
+        --out-report "$SCALE_REPORT"
 fi
 
 # Dedicated downscaling test. This removes every field's own 0.1-degree block
@@ -139,7 +181,8 @@ if [[ -f "$DUMP" ]]; then
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/22_evaluate_osse_downscaling.py \
         --dump "$DUMP" \
         --minimum-valid-fraction "${OSSE_SUBGRID_VALID_FRACTION:-1.0}" \
-        --out-figure "${OSSE_DOWNSCALING_FIGURE:-data/processed/osse_downscaling_diagnostics.png}" \
-        --out-report "${OSSE_DOWNSCALING_REPORT:-data/processed/osse_downscaling_diagnostics.json}" \
-        --out-spatial-data "${OSSE_DOWNSCALING_DATA:-data/processed/osse_downscaling_spatial.nc}"
+        --out-figure "$DOWNSCALING_FIGURE" \
+        --out-report "$DOWNSCALING_REPORT" \
+        --out-spatial-data "$DOWNSCALING_DATA" \
+        --out-curve-data "$DOWNSCALING_CURVES"
 fi
