@@ -93,8 +93,14 @@ class PrecipDataset(Dataset):
         self.n_cond = full_n_cond
         # Optional channel subset.  This lets experiments choose CPC precipitation,
         # ERA5 precipitation, or no precipitation while sharing one packed store.
+        # Real Zarr groups expose metadata through ``.attrs``.  ``store`` is
+        # intentionally documented to accept any mapping for in-memory tests
+        # and callers that already hold arrays, so a plain dict has no attrs.
+        # Treat absent metadata as an empty channel-name list; selecting a
+        # named subset still fails clearly below because it cannot be verified.
+        store_attrs = getattr(self.z, "attrs", {})
         self.all_cond_channels = [
-            str(name) for name in self.z.attrs.get("cond_channels", [])
+            str(name) for name in store_attrs.get("cond_channels", [])
         ]
         if cfg.cond_channels:
             missing = set(cfg.cond_channels) - set(self.all_cond_channels)
