@@ -2,8 +2,8 @@
 """Observing-system simulation experiment: how much does assimilation buy?
 
 CHIRPS is treated as the nature run.  Pseudo-gauges sample it at station
-locations and, optionally, exact nested 2x2 means provide a 0.1-degree
-pseudo-satellite. The primary ``exact`` experiment does not perturb either
+locations and, optionally, exact nested block means provide configurable
+pseudo-satellite footprints. The primary ``exact`` experiment does not perturb either
 pseudo-observation stream; the small positive likelihood variance is only a
 numerical regulariser. A subset of gauges plus the dense satellite are
 assimilated, and the 0.05-degree analysis is scored against the truth. Because
@@ -42,7 +42,7 @@ WHAT IS MEASURED
 
 OBSERVATION ERROR
     ``--obs-error exact`` is the primary mechanistic OSSE. It passes exact
-    same-day CHIRPS values at BMD locations and exact physical 2x2 CHIRPS block
+    same-day CHIRPS values at gauge locations and exact physical CHIRPS block
     means. It adds no shared or member-wise random error. R remains small and
     positive only because the diffusion-posterior likelihood is singular at
     zero variance near the final integration time.
@@ -162,6 +162,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="retain every Nth pseudo-satellite footprint in each direction",
+    )
+    parser.add_argument(
+        "--satellite-factor",
+        type=int,
+        default=None,
+        help="override the configured fine-grid footprint factor. On the 0.05° "
+             "grid, factors 2, 4, and 10 represent 0.1°, 0.2°, and 0.5°.",
+    )
+    parser.add_argument(
+        "--satellite-crop",
+        type=int,
+        nargs=4,
+        metavar=("ROW_START", "ROW_STOP", "COL_START", "COL_STOP"),
+        default=None,
+        help="optional fine-grid window used by the footprint operator. This "
+             "allows non-divisor factors to share identical spatial coverage; "
+             "all four indices use Python half-open slicing.",
     )
     parser.add_argument(
         "--satellite-correlation-control",
@@ -378,6 +395,7 @@ def block_mean_mm(
     valid: np.ndarray,
     factor: int = 2,
     min_valid_fraction: float = 0.999,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Physical footprint means and validity on the nested coarse grid.
 
@@ -387,6 +405,10 @@ def block_mean_mm(
     """
     if field_mm.shape != valid.shape:
         raise ValueError(f"field {field_mm.shape} and valid mask {valid.shape} differ")
+    if crop is not None:
+        row_start, row_stop, col_start, col_stop = crop
+        field_mm = field_mm[row_start:row_stop, col_start:col_stop]
+        valid = valid[row_start:row_stop, col_start:col_stop]
     height, width = field_mm.shape
     if height % factor or width % factor:
         raise ValueError(f"grid {field_mm.shape} is not divisible by factor {factor}")
@@ -613,21 +635,50 @@ def main() -> None:
 
     gauge_cfg = config["observations"]["gauges"]
     satellite_cfg = config["observations"]["imerg"]
-    satellite_factor = int(satellite_cfg["factor"])
-    if use_satellite and (
-        grid.nlat % satellite_factor or grid.nlon % satellite_factor
+    satellite_factor = int(
+        args.satellite_factor
+        if args.satellite_factor is not None
+        else satellite_cfg["factor"]
+    )
+    if satellite_factor < 1:
+        raise ValueError("--satellite-factor must be >= 1")
+    satellite_crop = tuple(
+        args.satellite_crop or (0, grid.nlat, 0, grid.nlon)
+    )
+    row_start, row_stop, col_start, col_stop = satellite_crop
+    if not (
+        0 <= row_start < row_stop <= grid.nlat
+        and 0 <= col_start < col_stop <= grid.nlon
     ):
         raise ValueError(
-            f"grid {grid.nlat}x{grid.nlon} is not divisible by satellite factor "
-            f"{satellite_factor}"
+            f"invalid --satellite-crop {satellite_crop} for "
+            f"{grid.nlat}x{grid.nlon} grid"
+        )
+    satellite_height = row_stop - row_start
+    satellite_width = col_stop - col_start
+    if use_satellite and (
+        satellite_height % satellite_factor
+        or satellite_width % satellite_factor
+    ):
+        raise ValueError(
+            f"satellite crop {satellite_height}x{satellite_width} is not "
+            f"divisible by factor {satellite_factor}"
         )
     satellite_shape = (
-        grid.nlat // satellite_factor,
-        grid.nlon // satellite_factor,
+        satellite_height // satellite_factor,
+        satellite_width // satellite_factor,
     )
     satellite_count = int(np.prod(satellite_shape)) if use_satellite else 0
     satellite_selection = np.zeros(satellite_shape, dtype=bool)
     satellite_selection[::args.satellite_stride, ::args.satellite_stride] = True
+    satellite_resolution_deg = float(grid.res * satellite_factor)
+    if use_satellite:
+        print(
+            f"[osse] exact pseudo-satellite: {satellite_resolution_deg:g}° "
+            f"({satellite_factor}x{satellite_factor} fine cells), "
+            f"fine-grid crop={satellite_crop}, coarse shape={satellite_shape}",
+            flush=True,
+        )
     selected_satellite_count = int(satellite_selection.sum()) if use_satellite else 0
     satellite_r_inflation = 1.0
     if use_satellite and args.satellite_correlation_control:
@@ -880,7 +931,10 @@ def main() -> None:
                 if use_satellite:
                     operators.append(
                         PhysicalBlockAverageObsOperator(
-                            satellite_factor, transform, valid=valid
+                            satellite_factor,
+                            transform,
+                            valid=valid,
+                            crop=satellite_crop,
                         )
                     )
                     if error_name in {"perfect", "exact"}:
@@ -999,7 +1053,7 @@ def main() -> None:
                     satellite_observed_mm = None
                     if use_satellite:
                         satellite_truth_mm, _ = block_mean_mm(
-                            truth, valid, satellite_factor
+                            truth, valid, satellite_factor, crop=satellite_crop
                         )
                         satellite_truth_transformed = transform.forward(
                             satellite_truth_mm
@@ -1054,7 +1108,7 @@ def main() -> None:
                                 raise RuntimeError(
                                     "exact OSSE invariant failed: "
                                     "pseudo-satellite differs from the same-day "
-                                    "CHIRPS 2x2 mean"
+                                    f"CHIRPS {satellite_factor}x{satellite_factor} mean"
                                 )
                             exact_satellite_max_abs_error_mm = max(
                                 exact_satellite_max_abs_error_mm,
@@ -1229,6 +1283,9 @@ def main() -> None:
                     "pseudo_satellite": bool(use_satellite),
                     "satellite_noise_sd_transformed": satellite_noise_sd,
                     "satellite_stride": int(args.satellite_stride),
+                    "satellite_factor": int(satellite_factor),
+                    "satellite_resolution_deg": satellite_resolution_deg,
+                    "satellite_crop": list(satellite_crop),
                     "satellite_selected_footprints": selected_satellite_count,
                     "satellite_r_inflation": satellite_r_inflation,
                     **{f"setting_{k}": v for k, v in setting.items()},
@@ -1288,6 +1345,12 @@ def main() -> None:
                         satellite_obs_noise_sd=np.float32(satellite_noise_sd),
                         pseudo_satellite_enabled=np.bool_(use_satellite),
                         satellite_factor=np.int32(satellite_factor),
+                        satellite_resolution_deg=np.float32(
+                            satellite_resolution_deg
+                        ),
+                        satellite_crop=np.asarray(
+                            satellite_crop, dtype=np.int32
+                        ),
                         satellite_stride=np.int32(args.satellite_stride),
                         satellite_selection=satellite_selection,
                         satellite_r_inflation=np.float32(satellite_r_inflation),
@@ -1310,7 +1373,8 @@ def main() -> None:
                             else "same-day CHIRPS sampled at synthetic stations"
                         ),
                         pseudo_satellite_source=np.str_(
-                            "same-day CHIRPS exact physical 2x2 block means"
+                            "same-day CHIRPS exact physical "
+                            f"{satellite_factor}x{satellite_factor} block means"
                         ),
                         day_selection=np.str_(
                             "balanced by available year-month"
@@ -1388,7 +1452,8 @@ def main() -> None:
             else "same-day CHIRPS sampled at configured station networks"
         ),
         "pseudo_satellite_source": (
-            "same-day CHIRPS exact physical 2x2 block means"
+            "same-day CHIRPS exact physical "
+            f"{satellite_factor}x{satellite_factor} block means"
             if use_satellite
             else None
         ),
@@ -1398,6 +1463,10 @@ def main() -> None:
         "observation_mode": observation_mode,
         "pseudo_satellite": bool(use_satellite),
         "satellite_factor": satellite_factor if use_satellite else None,
+        "satellite_resolution_deg": satellite_resolution_deg
+        if use_satellite
+        else None,
+        "satellite_crop": list(satellite_crop) if use_satellite else None,
         "satellite_stride": args.satellite_stride if use_satellite else None,
         "satellite_selected_footprints": selected_satellite_count
         if use_satellite
@@ -1412,7 +1481,7 @@ def main() -> None:
             "the nature truth and pseudo-observations. Withheld gauges are not "
             "fully independent when dense pseudo-satellite footprints are also "
             "assimilated; they test sub-footprint allocation at unseen point "
-            "locations. Read the 0.1-degree footprint and 0.05-degree subgrid "
+            "locations. Read the footprint and within-footprint subgrid "
             "scores separately before concluding that fine structure was recovered."
         ),
         "results": results,

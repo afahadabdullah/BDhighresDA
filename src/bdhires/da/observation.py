@@ -89,31 +89,40 @@ class BilinearObsOperator(torch.nn.Module):
 
 
 class BlockAverageObsOperator(torch.nn.Module):
-    """H: 0.05 deg state -> 0.1 deg satellite footprints (exact 2x2 block mean).
+    """H: fine state -> nested satellite footprints by exact block averaging.
 
-    Used to assimilate IMERG as an *observation* rather than feeding it in as a
-    conditioning channel.  The block average is the correct forward operator: a
-    0.1 deg IMERG value is (to first order) the area-average of the true field
-    over that footprint, so H is exactly a 2x2 mean when the grids nest -- which
-    ours do, because both ``BD`` and ``WIDE`` have edges on multiples of 0.1 deg.
+    Used to assimilate a satellite product as an *observation* rather than
+    feeding it in as a conditioning channel. The block average is the correct
+    forward operator: a
+    footprint value is (to first order) the area-average of the true field.
+    ``factor`` sets the exact nested block size; ``crop`` permits factors that
+    do not divide the full domain while preserving a shared comparison window.
 
     Cells whose footprint is not fully valid (partly ocean, where CHIRPS has no
     data) are returned but should be masked out via NaNs in ``y``.
     """
 
     def __init__(self, factor: int = 2, valid: np.ndarray | None = None,
-                 min_valid_frac: float = 0.999):
+                 min_valid_frac: float = 0.999,
+                 crop: tuple[int, int, int, int] | None = None):
         super().__init__()
         self.factor = factor
+        self.crop = crop
         keep = None
         if valid is not None:
             v = torch.as_tensor(valid, dtype=torch.float32)[None, None]
+            if crop is not None:
+                row_start, row_stop, col_start, col_stop = crop
+                v = v[..., row_start:row_stop, col_start:col_stop]
             frac = F.avg_pool2d(v, factor)
             keep = (frac >= min_valid_frac).flatten()
         self.register_buffer("keep", keep if keep is not None else torch.empty(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c = x.shape[:2]
+        if self.crop is not None:
+            row_start, row_stop, col_start, col_stop = self.crop
+            x = x[..., row_start:row_stop, col_start:col_stop]
         coarse = F.avg_pool2d(x, self.factor)          # (B, C, H/f, W/f)
         out = coarse.reshape(b, c, -1)
         return out
@@ -164,8 +173,8 @@ class PhysicalBilinearObsOperator(BilinearObsOperator):
 class PhysicalBlockAverageObsOperator(BlockAverageObsOperator):
     """Satellite operator: average mm/day footprints, then transform.
 
-    A 0.1-degree satellite footprint is a physical area mean of four nested
-    0.05-degree cells.  Averaging transformed precipitation would bias that
+    A satellite footprint is a physical area mean of nested 0.05-degree cells.
+    Averaging transformed precipitation would bias that
     footprint because the precipitation transform is nonlinear.  The returned
     values are still in transformed units, as required by the likelihood.
     """
@@ -176,8 +185,11 @@ class PhysicalBlockAverageObsOperator(BlockAverageObsOperator):
         transform: PrecipTransform,
         valid: np.ndarray | None = None,
         min_valid_frac: float = 0.999,
+        crop: tuple[int, int, int, int] | None = None,
     ):
-        super().__init__(factor=factor, valid=valid, min_valid_frac=min_valid_frac)
+        super().__init__(
+            factor=factor, valid=valid, min_valid_frac=min_valid_frac, crop=crop
+        )
         self.transform = transform
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

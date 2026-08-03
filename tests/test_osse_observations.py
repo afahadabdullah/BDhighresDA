@@ -23,6 +23,20 @@ def test_block_average_is_taken_in_mm_before_transforming():
     assert not torch.allclose(actual, transformed.mean())
 
 
+def test_block_average_supports_common_crop_for_half_degree_footprints():
+    transform = PrecipTransform(kind="log1p", eps=0.1)
+    physical = torch.arange(128 * 128, dtype=torch.float32).reshape(1, 1, 128, 128)
+    operator = PhysicalBlockAverageObsOperator(
+        10, transform, crop=(4, 124, 8, 128)
+    )
+
+    actual = transform.inverse(operator(transform.forward(physical))).reshape(12, 12)
+    expected = physical[..., 4:124, 8:128].reshape(1, 1, 12, 10, 12, 10).mean((3, 5))[0, 0]
+
+    assert actual.shape == (12, 12)
+    assert torch.allclose(actual, expected, atol=2e-3)
+
+
 def test_bilinear_station_interpolates_mm_before_transforming():
     grid = Grid("tiny", lon_min=90.0, lat_min=20.0, nlon=2, nlat=2, res=0.05)
     transform = PrecipTransform(kind="sqrt", mu=0.4, sd=1.3)

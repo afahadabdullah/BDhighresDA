@@ -116,6 +116,23 @@ def test_production_dump_is_normalized_to_member_first(tmp_path):
     assert loaded["truth"].shape[0] == 6
 
 
+def test_common_crop_allows_factor_ten_scale_evaluation(tmp_path):
+    path = make_dump(tmp_path / "ensemble.npz", size=32)
+    with np.load(path, allow_pickle=False) as original:
+        payload = {name: original[name] for name in original.files}
+    payload["satellite_factor"] = np.int32(10)
+    payload["satellite_resolution_deg"] = np.float32(0.5)
+    payload["satellite_crop"] = np.array([1, 31, 1, 31], dtype=np.int32)
+    np.savez_compressed(path, **payload)
+
+    loaded = EVAL.apply_satellite_crop(EVAL.load_dump(path))
+    report, mask, *_ = EVAL.evaluate_claims(loaded, factor=10, minimum_valid_fraction=1.0)
+
+    assert loaded["truth"].shape[-2:] == (30, 30)
+    assert report["factor"] == 10
+    assert mask.shape[-2:] == (30, 30)
+
+
 # --------------------------------------------------------------------------
 # Claim structure
 # --------------------------------------------------------------------------

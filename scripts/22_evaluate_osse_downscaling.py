@@ -145,6 +145,19 @@ def load_dump(path: Path) -> dict:
         "obs_error": str(_scalar(data, "obs_error", "unknown")),
         "observation_mode": str(_scalar(data, "observation_mode", "unknown")),
         "satellite_factor": int(_scalar(data, "satellite_factor", 2) or 2),
+        "satellite_resolution_deg": float(
+            _scalar(data, "satellite_resolution_deg", 0.0) or 0.0
+        ),
+        "satellite_crop": tuple(
+            int(value)
+            for value in np.atleast_1d(
+                _scalar(
+                    data,
+                    "satellite_crop",
+                    np.array([0, truth.shape[-2], 0, truth.shape[-1]]),
+                )
+            )
+        ),
         "pseudo_satellite": bool(_scalar(data, "pseudo_satellite_enabled", False)),
         "checkpoint": str(_scalar(data, "checkpoint", "unknown")),
         "station_lat": np.atleast_1d(_scalar(data, "station_lat", np.array([]))),
@@ -164,6 +177,30 @@ def load_dump(path: Path) -> dict:
         np.asarray(coarse, dtype=np.float64) if coarse is not None else None
     )
     return out
+
+
+def apply_satellite_crop(dump: dict) -> dict:
+    """Restrict scale diagnostics to the common footprint-ablation window."""
+    row_start, row_stop, col_start, col_stop = dump["satellite_crop"]
+    height, width = dump["truth"].shape[-2:]
+    if not (
+        0 <= row_start < row_stop <= height
+        and 0 <= col_start < col_stop <= width
+    ):
+        raise SystemExit(
+            f"invalid satellite_crop {dump['satellite_crop']} for {height}x{width}"
+        )
+    spatial = (slice(row_start, row_stop), slice(col_start, col_stop))
+    for name in ("truth", "valid", "background", "analysis", "coarse_base_mm"):
+        if dump.get(name) is not None:
+            dump[name] = dump[name][..., spatial[0], spatial[1]]
+    if dump["grid_lat"] is not None:
+        dump["grid_lat"] = np.asarray(dump["grid_lat"])[row_start:row_stop]
+    if dump["grid_lon"] is not None:
+        dump["grid_lon"] = np.asarray(dump["grid_lon"])[col_start:col_stop]
+    dump["satellite_crop_original"] = dump["satellite_crop"]
+    dump["satellite_crop"] = (0, row_stop - row_start, 0, col_stop - col_start)
+    return dump
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +615,7 @@ def plot_diagnostics(path: Path, report: dict, structure: dict, dump: dict,
 
 def main() -> None:
     args = parse_args()
-    dump = load_dump(Path(args.dump))
+    dump = apply_satellite_crop(load_dump(Path(args.dump)))
     factor = args.factor or dump["satellite_factor"] or 2
 
     report, mask, truth_sub, bg_sub, an_sub = evaluate_claims(
@@ -601,6 +638,12 @@ def main() -> None:
         observation_mode=dump["observation_mode"],
         obs_error=dump["obs_error"],
         pseudo_satellite=dump["pseudo_satellite"],
+        satellite_factor=int(factor),
+        satellite_resolution_deg=(
+            dump["satellite_resolution_deg"]
+            or float(factor * args.fine_degrees)
+        ),
+        satellite_crop=list(dump["satellite_crop_original"]),
         minimum_valid_fraction=args.minimum_valid_fraction,
         case_index=case,
         case_day=dump["days"][case] if dump["days"] else None,

@@ -101,6 +101,26 @@ def subgrid_component(field: np.ndarray, factor: int) -> np.ndarray:
     return field - upsample_blocks(coarsen(field, factor), factor)
 
 
+def satellite_crop(data, shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Return the fine-grid footprint window, with legacy full-grid fallback."""
+    if "satellite_crop" in data.files:
+        crop = tuple(int(value) for value in data["satellite_crop"])
+    else:
+        crop = (0, shape[0], 0, shape[1])
+    row_start, row_stop, col_start, col_stop = crop
+    if not (
+        0 <= row_start < row_stop <= shape[0]
+        and 0 <= col_start < col_stop <= shape[1]
+    ):
+        raise ValueError(f"invalid satellite crop {crop} for shape {shape}")
+    return crop
+
+
+def crop_spatial(field: np.ndarray, crop: tuple[int, int, int, int]) -> np.ndarray:
+    row_start, row_stop, col_start, col_stop = crop
+    return field[..., row_start:row_stop, col_start:col_stop]
+
+
 def masked_member_moment(
     field: np.ndarray, valid: np.ndarray, *, standard_deviation: bool = False
 ) -> np.ndarray:
@@ -196,13 +216,20 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
     analysis = data["analysis"]
     truth = data["truth"]
     valid = data["valid"].astype(bool)
+    crop = satellite_crop(data, truth.shape[-2:])
+    cropped_truth = crop_spatial(truth, crop)
+    resolution = float(
+        data["satellite_resolution_deg"]
+        if "satellite_resolution_deg" in data.files
+        else factor * grid.res
+    )
     days = data["days"].astype(str)
     station_lat, station_lon = data["station_lat"], data["station_lon"]
     assim_idx, eval_idx = data["assim_idx"], data["eval_idx"]
     satellite_truth = (
         data["pseudo_satellite_truth_mm"]
         if "pseudo_satellite_truth_mm" in data.files
-        else coarsen(truth, factor)
+        else coarsen(cropped_truth, factor)
     )
     satellite_observed = (
         data["pseudo_satellite_mm"]
@@ -220,11 +247,11 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         else False
     )
     if not pseudo_satellite:
-        satellite_title = "Perfect-footprint null\n0.1°; not assimilated"
+        satellite_title = f"Perfect-footprint null\n{resolution:g}°; not assimilated"
     elif observation_values == "exact CHIRPS":
-        satellite_title = "Pseudo-satellite\n0.1° exact CHIRPS"
+        satellite_title = f"Pseudo-satellite\n{resolution:g}° exact CHIRPS"
     else:
-        satellite_title = "Pseudo-satellite\n0.1° with synthetic error"
+        satellite_title = f"Pseudo-satellite\n{resolution:g}° with synthetic error"
 
     domain_mean = np.nanmean(truth, axis=(1, 2))
     order = np.argsort(domain_mean)
@@ -264,10 +291,17 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         grid.lat[0] - grid.res / 2,
         grid.lat[-1] + grid.res / 2,
     ]
+    row_start, row_stop, col_start, col_stop = crop
+    satellite_extent = [
+        grid.lon[col_start] - grid.res / 2,
+        grid.lon[col_stop - 1] + grid.res / 2,
+        grid.lat[row_start] - grid.res / 2,
+        grid.lat[row_stop - 1] + grid.res / 2,
+    ]
     precip_images, error_images, spread_images = [], [], []
     titles = [
         "CHIRPS truth\n0.05° nature run",
-        "Exact CHIRPS mean\n0.1° noiseless",
+        f"Exact CHIRPS mean\n{resolution:g}° noiseless",
         satellite_title,
         "Background mean\n0.05°",
         "Analysis mean\n0.05°",
@@ -300,7 +334,7 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         for column, field in enumerate(panels):
             if column in (1, 2):
                 image = axes[row, column].imshow(
-                    field, origin="lower", extent=extent, cmap="viridis",
+                    field, origin="lower", extent=satellite_extent, cmap="viridis",
                     vmin=0, vmax=rain_max, interpolation="nearest", aspect="auto"
                 )
                 precip_images.append(image)
@@ -324,6 +358,8 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
                 spread_images.append(image)
             axes[row, column].set_xticks([])
             axes[row, column].set_yticks([])
+            axes[row, column].set_xlim(extent[0], extent[1])
+            axes[row, column].set_ylim(extent[2], extent[3])
 
         for column in (2, 4):
             axes[row, column].scatter(
@@ -338,9 +374,10 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
             )
         bg_rmse = np.sqrt(np.nanmean(errors[0][valid] ** 2))
         an_rmse = np.sqrt(np.nanmean(errors[1][valid] ** 2))
-        truth_sub = subgrid_component(truth[day_index], factor)
-        an_sub = subgrid_component(an_mean, factor)
-        sub_keep = valid & np.isfinite(truth_sub) & np.isfinite(an_sub)
+        truth_sub = subgrid_component(crop_spatial(truth[day_index], crop), factor)
+        an_sub = subgrid_component(crop_spatial(an_mean, crop), factor)
+        cropped_valid = crop_spatial(valid, crop)
+        sub_keep = cropped_valid & np.isfinite(truth_sub) & np.isfinite(an_sub)
         sub_corr = (
             np.corrcoef(truth_sub[sub_keep], an_sub[sub_keep])[0, 1]
             if sub_keep.sum() > 2
@@ -388,6 +425,12 @@ def main() -> None:
     truth = data["truth"]                 # (D, H, W)
     factor = int(data["satellite_factor"]) if "satellite_factor" in data.files else 2
     grid = get_grid(str(data["grid_name"]))
+    crop = satellite_crop(data, truth.shape[-2:])
+    resolution = float(
+        data["satellite_resolution_deg"]
+        if "satellite_resolution_deg" in data.files
+        else factor * grid.res
+    )
 
     plot_reconstruction(
         data, grid, factor, args.cases, Path(args.out_reconstruction)
@@ -400,10 +443,13 @@ def main() -> None:
         "background": ensemble_score(bg_all, truth),
         "analysis": ensemble_score(an_all, truth),
     }
+    cropped_background = crop_spatial(background, crop)
+    cropped_analysis = crop_spatial(analysis, crop)
+    cropped_truth = crop_spatial(truth, crop)
     background_coarse, analysis_coarse, truth_coarse = (
-        coarsen(background, factor),
-        coarsen(analysis, factor),
-        coarsen(truth, factor),
+        coarsen(cropped_background, factor),
+        coarsen(cropped_analysis, factor),
+        coarsen(cropped_truth, factor),
     )
     coarse_scores = {
         "background": ensemble_score(np.moveaxis(background_coarse, 1, 0), truth_coarse),
@@ -420,9 +466,9 @@ def main() -> None:
     satellite_observation_score = ensemble_score(
         satellite_observed[None], satellite_target
     )
-    background_subgrid = subgrid_component(background, factor)
-    analysis_subgrid = subgrid_component(analysis, factor)
-    truth_subgrid = subgrid_component(truth, factor)
+    background_subgrid = subgrid_component(cropped_background, factor)
+    analysis_subgrid = subgrid_component(cropped_analysis, factor)
+    truth_subgrid = subgrid_component(cropped_truth, factor)
     subgrid_scores = {
         "background": ensemble_score(np.moveaxis(background_subgrid, 1, 0), truth_subgrid),
         "analysis": ensemble_score(np.moveaxis(analysis_subgrid, 1, 0), truth_subgrid),
@@ -446,8 +492,8 @@ def main() -> None:
 
     scopes = {
         "Fine field": field_scores,
-        "Coarse 0.1°": coarse_scores,
-        "Subgrid 0.05°": subgrid_scores,
+        f"Footprints {resolution:g}°": coarse_scores,
+        f"Within-{resolution:g}° residual": subgrid_scores,
         "Withheld gauges": withheld_scores,
     }
     raw_metrics = [
@@ -545,8 +591,8 @@ def main() -> None:
     )
     figure.suptitle(
         "CHIRPS pseudo-satellite + station OSSE metric matrix\n"
-        "Coarse scores measure information directly observed at 0.1°; subgrid "
-        "scores isolate structure that only the generative prior can supply.",
+        f"Footprint scores measure information directly observed at {resolution:g}°; "
+        "subgrid scores isolate structure that only the generative prior can supply.",
         fontsize=14,
     )
     Path(args.out_matrix).parent.mkdir(parents=True, exist_ok=True)
@@ -563,7 +609,13 @@ def main() -> None:
         "n_assimilated": int(len(data["assim_idx"])),
         "n_withheld": int(len(eval_idx)),
         "pseudo_satellite": pseudo_satellite_enabled,
+        "satellite_factor": factor,
+        "satellite_resolution_deg": resolution,
+        "satellite_crop": list(crop),
         "field_0p05": field_scores,
+        "footprint": coarse_scores,
+        "pseudo_satellite_observation": satellite_observation_score,
+        "subgrid": subgrid_scores,
         "footprint_0p1": coarse_scores,
         "pseudo_satellite_observation_0p1": satellite_observation_score,
         # Retain the historical key for consumers of older experiment reports.

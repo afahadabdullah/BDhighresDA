@@ -887,3 +887,30 @@ the corresponding CSV/JSON/LaTeX table, and the remaining paper diagnostics.
 This is a controlled network-density ablation, not an experiment using 50 real
 BMD stations and not a claim that a point gauge resolves scales finer than the
 0.05-degree CHIRPS nature run.
+# Exact footprint-resolution OSSE ablation (0.1°, 0.2°, 0.5°)
+
+This full-paper run uses 50 spread CHIRPS pseudo-gauges (40 assimilated and 10
+withheld), 16 members, and every JJA day in 2021--2024. It runs a gauges-only
+control plus satellite-only and simultaneous arms at exact 0.1°, 0.2°, and
+0.5° CHIRPS footprints. All satellite arms use the same nested 120-by-120
+fine-grid window, so the footprint scale changes without changing coverage.
+
+```bash
+git pull --ff-only origin main
+bash slurm/submit_osse_footprint_ablation.sh
+```
+
+Monitor the two job IDs printed by the submission wrapper:
+
+```bash
+squeue -u "$USER"
+tail -f logs/bdhires-osse-footprint-<ARRAY_JOB>_<TASK>.out
+tail -f logs/bdhires-osse-footprint-finalize-<FINAL_JOB>.out
+```
+
+Paper artifacts are written to
+`data/processed/osse_footprint_ablation_50_2021_2024/paper/`, including
+`fig_footprint_ablation.png`, `fig_footprint_ablation_matrix.png`, CSV/JSON
+values, and a LaTeX table. This is a CHIRPS-on-CHIRPS upper-bound experiment;
+withheld pseudo-gauges are the primary point target, while full-field,
+footprint, and sub-footprint scores explain scale behavior.
