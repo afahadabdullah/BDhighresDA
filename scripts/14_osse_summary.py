@@ -211,11 +211,17 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         if "pseudo_observation_values" in data.files
         else "synthetically noisy"
     )
-    satellite_title = (
-        "Pseudo-satellite\n0.1° exact CHIRPS"
-        if observation_values == "exact CHIRPS"
-        else "Pseudo-satellite\n0.1° with synthetic error"
+    pseudo_satellite = (
+        bool(data["pseudo_satellite_enabled"])
+        if "pseudo_satellite_enabled" in data.files
+        else False
     )
+    if not pseudo_satellite:
+        satellite_title = "Perfect-footprint null\n0.1°; not assimilated"
+    elif observation_values == "exact CHIRPS":
+        satellite_title = "Pseudo-satellite\n0.1° exact CHIRPS"
+    else:
+        satellite_title = "Pseudo-satellite\n0.1° with synthetic error"
 
     domain_mean = np.nanmean(truth, axis=(1, 2))
     order = np.argsort(domain_mean)
@@ -369,6 +375,11 @@ def main() -> None:
         if "pseudo_observation_values" in data.files
         else "unknown"
     )
+    pseudo_satellite_enabled = (
+        bool(data["pseudo_satellite_enabled"])
+        if "pseudo_satellite_enabled" in data.files
+        else False
+    )
     background = data["background"]       # (D, M, H, W)
     analysis = data["analysis"]
     truth = data["truth"]                 # (D, H, W)
@@ -510,9 +521,13 @@ def main() -> None:
         axes[1, 0], scale_matrix, [x[0] for x in scale_metrics],
         [
             "Background",
-            "Exact pseudo-satellite"
-            if observation_values == "exact CHIRPS"
-            else "Noisy pseudo-satellite",
+            (
+                "Exact pseudo-satellite"
+                if observation_values == "exact CHIRPS"
+                else "Noisy pseudo-satellite"
+            )
+            if pseudo_satellite_enabled
+            else "Perfect-footprint null",
             "Analysis",
         ],
         "C. Scale separation — does 0.05° structure improve?",
@@ -544,9 +559,7 @@ def main() -> None:
         "network": str(data["network"]),
         "n_assimilated": int(len(data["assim_idx"])),
         "n_withheld": int(len(eval_idx)),
-        "pseudo_satellite": bool(data["pseudo_satellite_enabled"])
-        if "pseudo_satellite_enabled" in data.files
-        else False,
+        "pseudo_satellite": pseudo_satellite_enabled,
         "field_0p05": field_scores,
         "footprint_0p1": coarse_scores,
         "pseudo_satellite_observation_0p1": satellite_observation_score,
@@ -556,6 +569,11 @@ def main() -> None:
             str(data["pseudo_observation_values"].item())
             if "pseudo_observation_values" in data.files
             else "unknown"
+        ),
+        "footprint_reference_role": (
+            "assimilated pseudo-satellite observation"
+            if pseudo_satellite_enabled
+            else "evaluation-only perfect-footprint null"
         ),
         "subgrid_0p05": subgrid_scores,
         "withheld_gauges": withheld_scores,

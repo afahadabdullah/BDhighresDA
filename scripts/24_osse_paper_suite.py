@@ -39,6 +39,9 @@ import numpy as np
 # Arms are rendered in this order when present.  Order encodes the argument of
 # the results section: establish capacity, then degrade toward realism.
 PREFERRED_ORDER = [
+    "gauges_exact_bmd",
+    "satellite_exact_bmd",
+    "simultaneous_exact_bmd",
     "simultaneous_perfect_40",
     "gauges_realistic_40",
     "satellite_realistic_40",
@@ -49,6 +52,9 @@ PREFERRED_ORDER = [
 ]
 
 PRETTY = {
+    "gauges_exact_bmd": "BMD pseudo-gauges only",
+    "satellite_exact_bmd": "Exact 0.1° footprints only",
+    "simultaneous_exact_bmd": "Simultaneous (primary)",
     "simultaneous_perfect_40": "Perfect obs (upper bound)",
     "gauges_realistic_40": "Gauges only",
     "satellite_realistic_40": "Pseudo-IMERG only",

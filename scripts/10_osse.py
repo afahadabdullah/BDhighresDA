@@ -209,7 +209,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="which network to dump (default: the largest synthetic one)",
     )
-    parser.add_argument("--dump-obs-error", default="realistic")
+    parser.add_argument("--dump-obs-error", default="exact")
     parser.add_argument(
         "--tune-network",
         default=None,
@@ -413,13 +413,20 @@ def score(members_mm: np.ndarray, truth: np.ndarray) -> dict:
         else float("nan")
     )
     low, high = np.quantile(ensemble, [0.05, 0.95], axis=0)
+    rmse = float(np.sqrt(np.mean(difference**2)))
+    finite_sample_inflation = np.sqrt((ensemble.shape[0] + 1) / ensemble.shape[0])
     return {
-        "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+        "rmse_mm": rmse,
         "mae_mm": float(np.mean(np.abs(difference))),
         "bias_mm": float(np.mean(difference)),
         "crps_mm": float(crps_ensemble(ensemble, observed)),
         "correlation": correlation,
         "spread_mm": float(spread.mean()),
+        "spread_skill": (
+            float(spread.mean() * finite_sample_inflation / rmse)
+            if rmse > 0
+            else float("nan")
+        ),
         "coverage_90": float(np.mean((observed >= low) & (observed <= high))),
         "n": int(finite.sum()),
     }

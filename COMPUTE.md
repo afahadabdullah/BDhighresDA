@@ -822,3 +822,34 @@ Outputs are isolated under
 `data/processed/osse_jja_2021_2024_bmd_exact/` by default. The log must print
 all 12 selected CHIRPS dates, the BMD catalogue path, and the message
 `same checkpoint day ... no date offset` before sampling begins.
+
+## Final matched overnight OSSE
+
+The final observation-ablation suite uses 36 balanced JJA dates (three dates
+per year-month), 16 members, actual BMD station geometry, exact CHIRPS
+pseudo-values, a common seed and a common geographically spread 20% holdout.
+It compares only the following matched arms:
+
+1. BMD pseudo-gauges only;
+2. exact 0.1-degree CHIRPS footprints only; and
+3. gauges and footprints assimilated simultaneously.
+
+Submit a three-day/four-member QC job, the dependent overnight GPU array, and
+the dependent CPU summary with one command:
+
+```bash
+bash slurm/submit_osse_final.sh
+```
+
+The full array starts only if the combined-arm QC job passes the exact-value
+invariants and produces its ensemble dump. Outputs are written below
+`data/processed/osse_final_jja_2021_2024/`; the comparison tables and combined
+figures are written below its `paper/` subdirectory.
+
+The primary evaluation order is: (i) confirm pseudo-satellite RMSE, MAE and
+bias are numerically zero; (ii) compare withheld-gauge CRPS and deterministic
+scores; (iii) compare full-field and 0.1-degree footprint scores; (iv) test
+0.05-degree sub-footprint RMSE, correlation and CRPS against the perfect-
+footprint null; and (v) inspect rank histograms, coverage, spread/skill,
+intensity-stratified CRPS, FSS and power spectra. CHIRPS-on-CHIRPS results are
+an optimistic mechanistic upper bound, not independent product validation.
