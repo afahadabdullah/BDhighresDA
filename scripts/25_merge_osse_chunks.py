@@ -27,6 +27,15 @@ DAY_ARRAYS = {
     "days",
 }
 
+# These scalars are QC maxima accumulated within each month, not invariant run
+# metadata.  The merged value must be the worst (largest) discrepancy over all
+# chunks.  Averaging would weaken the exact-observation audit; requiring equality
+# incorrectly rejects sound chunks whose round-off maxima differ.
+MAX_DIAGNOSTICS = {
+    "exact_gauge_max_abs_error_transformed",
+    "exact_satellite_max_abs_error_mm",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -42,6 +51,17 @@ def same_value(left: np.ndarray, right: np.ndarray) -> bool:
     if np.issubdtype(left.dtype, np.number):
         return bool(np.allclose(left, right, equal_nan=True))
     return bool(np.array_equal(left, right))
+
+
+def finite_max(values) -> float:
+    finite = []
+    for value in values:
+        if value is None:
+            continue
+        scalar = float(np.asarray(value).item())
+        if np.isfinite(scalar):
+            finite.append(scalar)
+    return max(finite) if finite else float("nan")
 
 
 def weighted_merge(values: list, weights: np.ndarray):
@@ -97,7 +117,7 @@ def main() -> None:
                     f"extra={sorted(set(store.files) - expected_keys)}"
                 )
 
-        for key in sorted(expected_keys - DAY_ARRAYS):
+        for key in sorted(expected_keys - DAY_ARRAYS - MAX_DIAGNOSTICS):
             reference = stores[0][key]
             for directory, store in zip(chunk_dirs[1:], stores[1:]):
                 if not same_value(reference, store[key]):
@@ -107,6 +127,11 @@ def main() -> None:
         for key in sorted(expected_keys):
             if key in DAY_ARRAYS:
                 merged[key] = np.concatenate([store[key] for store in stores], axis=0)
+            elif key in MAX_DIAGNOSTICS:
+                merged[key] = np.asarray(
+                    finite_max([store[key] for store in stores]),
+                    dtype=stores[0][key].dtype,
+                )
             else:
                 merged[key] = stores[0][key]
 
@@ -140,6 +165,10 @@ def main() -> None:
             raise ValueError("each chunk must contain exactly one OSSE result row")
         rows.append(report["results"][0])
     result = weighted_merge(rows, weights)
+    for key in MAX_DIAGNOSTICS:
+        values = [row.get(key) for row in rows]
+        if any(value is not None for value in values):
+            result[key] = finite_max(values)
 
     for scope in ("withheld", "assimilated", "field"):
         for metric in ("rmse_mm", "crps_mm", "mae_mm"):

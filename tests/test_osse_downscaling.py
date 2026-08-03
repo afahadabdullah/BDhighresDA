@@ -32,6 +32,7 @@ def _load(name: str, filename: str):
 
 EVAL = _load("_osse_downscaling", "22_evaluate_osse_downscaling.py")
 SUITE = _load("_osse_paper_suite", "24_osse_paper_suite.py")
+MERGE = _load("_osse_chunk_merge", "25_merge_osse_chunks.py")
 
 
 # --------------------------------------------------------------------------
@@ -167,6 +168,14 @@ def test_missing_required_array_is_rejected(tmp_path):
     np.savez(path, truth=np.zeros((1, 4, 4)))
     with pytest.raises(SystemExit):
         EVAL.load_dump(path)
+
+
+def test_chunk_exactness_diagnostics_merge_by_worst_case():
+    """Per-month round-off maxima vary and must not be static metadata."""
+    values = [np.float32(0.0), np.float32(2.4e-6), np.float32(8.0e-7)]
+    assert MERGE.finite_max(values) == pytest.approx(2.4e-6)
+    assert "exact_satellite_max_abs_error_mm" in MERGE.MAX_DIAGNOSTICS
+    assert "exact_gauge_max_abs_error_transformed" in MERGE.MAX_DIAGNOSTICS
 
 
 # --------------------------------------------------------------------------
