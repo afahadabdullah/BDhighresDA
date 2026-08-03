@@ -853,3 +853,17 @@ scores; (iii) compare full-field and 0.1-degree footprint scores; (iv) test
 footprint null; and (v) inspect rank histograms, coverage, spread/skill,
 intensity-stratified CRPS, FSS and power spectra. CHIRPS-on-CHIRPS results are
 an optimistic mechanistic upper bound, not independent product validation.
+
+For the maximum paper run, use every June--August day in 2021--2024: 368 days
+per arm, 16 members and the same three matched observation arms. The workload
+is split into 36 GPU array tasks (arm x year x month), with at most six active
+at once. A dependent 96-GB CPU job validates and merges the 12 monthly chunks
+for each arm, then produces all diagnostics and paper artifacts:
+
+```bash
+bash slurm/submit_osse_full_jja.sh
+```
+
+This run writes below `data/processed/osse_full_jja_2021_2024/`. The finalizer
+refuses duplicate dates, inconsistent station splits or metadata, missing JJA
+days, and any failed upstream chunk.
