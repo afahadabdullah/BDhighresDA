@@ -800,23 +800,25 @@ conditioning, CHIRPS truth, and both pseudo-observation types all use the same
 checkpoint day; the BMD/IMERG 03:00 UTC offset logic is not used in this OSSE.
 
 The reproducible JJA experiment selects one interior date from June, July and
-August in each of 2021--2024 (12 dates), generates 16 members, uses 40 spread
-stations with 20% withheld, and restores the original dense satellite design
-(stride 1, no correlation-control R inflation):
+August in each of 2021--2024 (12 dates), generates 16 members, uses the actual
+BMD station catalogue with a geographically spread 20% withheld, and uses the
+original dense satellite design (stride 1, no correlation-control R inflation).
+Both pseudo-observation streams contain the exact CHIRPS values: the small
+positive likelihood variance is only a numerical regularizer and does not add
+random error to the observations or to individual ensemble members.
 
 ```bash
 bash slurm/submit_osse_jja.sh
 ```
 
-Run the perfect-observation mechanistic upper bound separately so it cannot
-overwrite or be confused with the realistic experiment:
+The uncalibrated legacy transformed-Gaussian error experiment is not the main
+OSSE. It can be run only as an explicitly labelled sensitivity:
 
 ```bash
-OSSE_OBS_ERROR=perfect bash slurm/submit_osse_jja.sh
+OSSE_OBS_ERROR=realistic bash slurm/submit_osse_jja.sh
 ```
 
 Outputs are isolated under
-`data/processed/osse_jja_2021_2024_realistic/` and
-`data/processed/osse_jja_2021_2024_perfect/`. The log must print all 12 selected
-CHIRPS dates and the message `same checkpoint day ... no date offset` before
-sampling begins.
+`data/processed/osse_jja_2021_2024_bmd_exact/` by default. The log must print
+all 12 selected CHIRPS dates, the BMD catalogue path, and the message
+`same checkpoint day ... no date offset` before sampling begins.

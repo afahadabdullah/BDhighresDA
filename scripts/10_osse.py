@@ -3,9 +3,11 @@
 
 CHIRPS is treated as the nature run.  Pseudo-gauges sample it at station
 locations and, optionally, exact nested 2x2 means provide a 0.1-degree
-pseudo-satellite. Observation error is added, a subset of gauges plus the dense
-satellite are assimilated, and the 0.05-degree analysis is scored against the
-truth. Because the true full field is known, this answers questions that real
+pseudo-satellite. The primary ``exact`` experiment does not perturb either
+pseudo-observation stream; the small positive likelihood variance is only a
+numerical regulariser. A subset of gauges plus the dense satellite are
+assimilated, and the 0.05-degree analysis is scored against the truth. Because
+the true full field is known, this answers questions that real
 gauges never can: how much skill the DA adds, whether it reconstructs subgrid
 structure rather than merely copying coarse footprints, and whether the guidance
 hyperparameters are set sensibly.
@@ -39,10 +41,15 @@ WHAT IS MEASURED
     quantity that measures the assimilation.
 
 OBSERVATION ERROR
-    Added in TRANSFORMED space with standard deviation sqrt(sigma_obs^2 +
-    representativeness^2), which is exactly what ``build_R`` tells the likelihood
-    to expect.  Perturbing in mm and then transforming would make the assumed R
-    wrong and would quietly mis-tune everything downstream.
+    ``--obs-error exact`` is the primary mechanistic OSSE. It passes exact
+    same-day CHIRPS values at BMD locations and exact physical 2x2 CHIRPS block
+    means. It adds no shared or member-wise random error. R remains small and
+    positive only because the diffusion-posterior likelihood is singular at
+    zero variance near the final integration time.
+
+    The legacy ``realistic`` sensitivity adds Gaussian error in transformed
+    space. Because inverse transformation exponentiates that error, it is not a
+    calibrated IMERG simulator and must not be used as the primary OSSE.
 
     ``--obs-error perfect`` sets it small but NOT zero.  The likelihood variance
     is V(t) = R + gamma*(1-t)^2/t^2, which collapses to R as t -> 1; with R ~ 0
@@ -87,7 +94,8 @@ from bdhires.da import (  # noqa: E402
     perturb_observations,
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
-from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
+from bdhires.bmd import read_station_catalog, spread_holdout  # noqa: E402
+from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
@@ -122,9 +130,18 @@ def parse_args() -> argparse.Namespace:
         help="comma-separated station counts, plus 'bmd' for the real geometry",
     )
     parser.add_argument(
+        "--bmd-stations",
+        default="data/bmd/Stations.csv",
+        help="BMD coordinate catalogue used by the 'bmd' network token. The "
+             "rainfall column is not used: pseudo-gauge values come from CHIRPS.",
+    )
+    parser.add_argument(
         "--obs-error",
-        default="realistic,perfect",
-        help="comma-separated: 'realistic' uses da.yaml, 'perfect' uses ~0",
+        default="exact",
+        help="comma-separated: 'exact' uses noiseless CHIRPS pseudo-values with "
+             "a small numerical likelihood variance; 'realistic' uses the "
+             "legacy synthetic-error experiment; 'perfect' is retained as a "
+             "backward-compatible small-noise experiment",
     )
     parser.add_argument(
         "--pseudo-satellite",
@@ -170,6 +187,12 @@ def parse_args() -> argparse.Namespace:
         help="'spread' uses farthest-point sampling for even coverage, which is "
              "what a real gauge network looks like. Matters most for sparse "
              "networks, where a uniform draw leaves big gaps and clustered pairs.",
+    )
+    parser.add_argument(
+        "--holdout-layout",
+        default="spread",
+        choices=["random", "spread"],
+        help="choose withheld gauges randomly or geographically spread",
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
@@ -514,16 +537,48 @@ def main() -> None:
     # -- station networks -----------------------------------------------------
     rng = np.random.default_rng(args.seed)
     networks: dict[str, StationSet] = {}
+    bmd_station_source: str | None = None
     for token in args.networks.split(","):
         token = token.strip()
         if not token:
             continue
         if token.lower() == "bmd":
-            csv = config["observations"]["gauges"]["csv"]
-            if not Path(csv).is_file():
-                print(f"[osse] skipping 'bmd': {csv} not found")
-                continue
-            bmd, _ = load_stations(csv, times, grid=grid, min_coverage=0.0)
+            station_path = Path(args.bmd_stations)
+            if not station_path.is_file():
+                fallback = Path("data/stations/Stations.csv")
+                if fallback.is_file():
+                    station_path = fallback
+                else:
+                    print(
+                        f"[osse] skipping 'bmd': station catalogue not found: "
+                        f"{args.bmd_stations}"
+                    )
+                    continue
+            catalog = read_station_catalog(station_path)
+            lo, la, hi, ha = grid.bbox
+            margin = grid.res / 2
+            inside = (
+                (catalog["lon"] > lo + margin)
+                & (catalog["lon"] < hi - margin)
+                & (catalog["lat"] > la + margin)
+                & (catalog["lat"] < ha - margin)
+            )
+            if (~inside).any():
+                print(
+                    f"[osse] dropping {int((~inside).sum())} BMD station(s) "
+                    f"outside the {grid.name} interpolation domain"
+                )
+            catalog = catalog.loc[inside].reset_index(drop=True)
+            bmd = StationSet(
+                lat=catalog["lat"].to_numpy(float),
+                lon=catalog["lon"].to_numpy(float),
+                ids=catalog["station_id"].to_numpy(),
+            )
+            print(
+                f"[osse] BMD geometry: {len(bmd)} locations from {station_path}; "
+                "rainfall values will be sampled from same-day CHIRPS"
+            )
+            bmd_station_source = str(station_path)
             networks[f"bmd ({len(bmd)})"] = bmd
         else:
             n = int(token)
@@ -575,9 +630,16 @@ def main() -> None:
             2.0 * np.pi * (correlation_cells / args.satellite_stride) ** 2,
         )
     error_levels = {}
+    unknown_error_levels: list[str] = []
     for token in args.obs_error.split(","):
         token = token.strip().lower()
-        if token == "realistic":
+        if token == "exact":
+            # Observed values are the exact CHIRPS pseudo-data. R must remain
+            # positive because the diffusion-posterior likelihood becomes
+            # singular at t -> 1 when R=0; 0.05 is a numerical regulariser,
+            # not noise added to the observations.
+            error_levels["exact"] = (0.05, 0.0)
+        elif token == "realistic":
             error_levels["realistic"] = (
                 float(gauge_cfg["sigma_obs"]),
                 float(gauge_cfg["representativeness"]),
@@ -589,8 +651,22 @@ def main() -> None:
             # which destroys the analysis rather than sharpening it. 0.05 is
             # small enough to bound the achievable skill without that.
             error_levels["perfect"] = (0.05, 0.0)
+        elif token:
+            unknown_error_levels.append(token)
+    if unknown_error_levels:
+        raise ValueError(
+            "unknown observation-error level(s): "
+            + ", ".join(sorted(set(unknown_error_levels)))
+        )
     if not error_levels:
         raise ValueError("no observation-error levels selected")
+    if "realistic" in error_levels:
+        print(
+            "[osse] WARNING: 'realistic' is the legacy uncalibrated "
+            "transformed-Gaussian error sensitivity. It is not the primary "
+            "CHIRPS OSSE; use --obs-error exact for exact pseudo-data.",
+            flush=True,
+        )
 
     base_sampler = replace(
         SamplerConfig(**config["sampler"]), mask_fill=dataset.mask_fill
@@ -726,6 +802,14 @@ def main() -> None:
         return background_cache[key]
 
     dump_target = args.dump_network
+    if dump_target is not None and dump_target.strip().lower() == "bmd":
+        bmd_labels = [name for name in networks if name.startswith("bmd (")]
+        if len(bmd_labels) != 1:
+            raise ValueError(
+                "--dump-network bmd requires exactly one BMD network; found "
+                f"{bmd_labels}"
+            )
+        dump_target = bmd_labels[0]
     if args.dump and dump_target is None:
         synthetic = [n for n in networks if n.replace(" ", "").isdigit()]
         dump_target = max(synthetic, key=int) if synthetic else list(networks)[0]
@@ -733,6 +817,7 @@ def main() -> None:
 
     results = []
     for name, stations in networks.items():
+        is_bmd_network = name.startswith("bmd (")
         n_stations = len(stations)
         if n_stations < 2:
             raise ValueError(f"network {name!r} needs at least two stations")
@@ -740,13 +825,23 @@ def main() -> None:
             n_stations - 1, max(1, int(round(args.withhold * n_stations)))
         )
         split_rng = np.random.default_rng(args.seed + n_stations)
-        order = split_rng.permutation(n_stations)
-        eval_idx = np.sort(order[:n_withhold])
-        assim_idx = np.sort(order[n_withhold:])
+        if args.holdout_layout == "spread":
+            eval_idx = np.sort(
+                spread_holdout(stations.lat, stations.lon, n_withhold)
+            )
+        else:
+            order = split_rng.permutation(n_stations)
+            eval_idx = np.sort(order[:n_withhold])
+        eval_set = set(eval_idx.tolist())
+        assim_idx = np.asarray(
+            [index for index in range(n_stations) if index not in eval_set],
+            dtype=int,
+        )
         active_assim_idx = assim_idx if use_gauges else np.array([], dtype=int)
 
         for error_name, (sigma, representativeness) in error_levels.items():
             for setting in combinations:
+                exact_observations = error_name == "exact"
                 sigma_used = setting.get("sigma_obs", sigma)
                 guidance = replace(
                     base_guidance, gamma=setting.get("gamma", base_guidance.gamma)
@@ -781,7 +876,7 @@ def main() -> None:
                             satellite_factor, transform, valid=valid
                         )
                     )
-                    if error_name == "perfect":
+                    if error_name in {"perfect", "exact"}:
                         satellite_sigma, satellite_repr = 0.05, 0.0
                     else:
                         satellite_sigma = float(satellite_cfg["sigma_obs"])
@@ -815,6 +910,8 @@ def main() -> None:
                 field_background, field_analysis = [], []
                 assim_background, assim_analysis = [], []
                 fit_transformed = []
+                exact_satellite_max_abs_error_mm = 0.0
+                exact_gauge_max_abs_error_transformed = 0.0
                 collect = (
                     args.dump
                     and name == dump_target
@@ -851,14 +948,33 @@ def main() -> None:
                     )[0]
 
                     # Observations: truth sampled at stations, error added in
-                    # TRANSFORMED space so it matches what R claims.
+                    # TRANSFORMED space only for the legacy noisy sensitivity.
+                    # The primary exact OSSE passes CHIRPS values unchanged.
                     truth_at_stations = sample_at_stations(truth, grid, stations)[0]
                     observation_rng = np.random.default_rng(args.seed + index)
-                    gauge_obs_transformed = transform.forward(
+                    gauge_truth_transformed = transform.forward(
                         np.clip(truth_at_stations, 0.0, None)
-                    ) + observation_rng.normal(
-                        0.0, gauge_noise_sd, n_stations
                     )
+                    if exact_observations:
+                        gauge_obs_transformed = gauge_truth_transformed.copy()
+                        exact_gauge_max_abs_error_transformed = max(
+                            exact_gauge_max_abs_error_transformed,
+                            float(
+                                np.nanmax(
+                                    np.abs(
+                                        gauge_obs_transformed
+                                        - gauge_truth_transformed
+                                    )
+                                )
+                            ),
+                        )
+                    else:
+                        gauge_obs_transformed = (
+                            gauge_truth_transformed
+                            + observation_rng.normal(
+                                0.0, gauge_noise_sd, n_stations
+                            )
+                        )
                     truth_obs = []
                     observed = []
                     if use_gauges:
@@ -888,22 +1004,27 @@ def main() -> None:
                         # pseudo-IMERG product.  Member-wise perturbations below
                         # then preserve posterior ensemble variance.
                         satellite_R = R[len(active_assim_idx):]
-                        satellite_observed = perturb_observations(
-                            satellite_truth_transformed,
-                            satellite_R,
-                            1,
-                            seed=args.seed + index + 100_000,
-                            corr_blocks=[
-                                (
-                                    0,
-                                    satellite_shape[0],
-                                    satellite_shape[1],
-                                    float(
-                                        satellite_cfg.get("error_corr_cells", 0.0)
-                                    ),
-                                )
-                            ],
-                        )[0].astype(np.float32)
+                        if exact_observations:
+                            satellite_observed = satellite_truth_transformed.copy()
+                        else:
+                            satellite_observed = perturb_observations(
+                                satellite_truth_transformed,
+                                satellite_R,
+                                1,
+                                seed=args.seed + index + 100_000,
+                                corr_blocks=[
+                                    (
+                                        0,
+                                        satellite_shape[0],
+                                        satellite_shape[1],
+                                        float(
+                                            satellite_cfg.get(
+                                                "error_corr_cells", 0.0
+                                            )
+                                        ),
+                                    )
+                                ],
+                            )[0].astype(np.float32)
                         satellite_observed[
                             ~np.isfinite(satellite_truth_transformed)
                         ] = np.nan
@@ -912,18 +1033,53 @@ def main() -> None:
                         satellite_observed_mm = transform.inverse(
                             satellite_observed
                         ).reshape(satellite_shape).astype(np.float32)
+                        if exact_observations:
+                            exact_footprints = (
+                                satellite_selection
+                                & np.isfinite(satellite_truth_mm)
+                            )
+                            if not np.allclose(
+                                satellite_observed_mm[exact_footprints],
+                                satellite_truth_mm[exact_footprints],
+                                rtol=1e-5,
+                                atol=1e-5,
+                            ):
+                                raise RuntimeError(
+                                    "exact OSSE invariant failed: "
+                                    "pseudo-satellite differs from the same-day "
+                                    "CHIRPS 2x2 mean"
+                                )
+                            exact_satellite_max_abs_error_mm = max(
+                                exact_satellite_max_abs_error_mm,
+                                float(
+                                    np.nanmax(
+                                        np.abs(
+                                            satellite_observed_mm[exact_footprints]
+                                            - satellite_truth_mm[exact_footprints]
+                                        )
+                                    )
+                                ),
+                            )
 
                     y_truth = np.concatenate(truth_obs).astype(np.float32)
                     y_assim = np.concatenate(observed).astype(np.float32)
                     y_assim[~np.isfinite(y_truth)] = np.nan
 
-                    perturbed = perturb_observations(
-                        y_assim,
-                        R,
-                        args.members,
-                        seed=index,
-                        corr_blocks=corr_blocks,
-                    )
+                    if exact_observations:
+                        # R remains a small positive regulariser in the
+                        # likelihood, but no random error is added either to the
+                        # shared pseudo-observation or member-specific copies.
+                        perturbed = np.repeat(
+                            y_assim[None, :], args.members, axis=0
+                        )
+                    else:
+                        perturbed = perturb_observations(
+                            y_assim,
+                            R,
+                            args.members,
+                            seed=index,
+                            corr_blocks=corr_blocks,
+                        )
                     y_tensor = torch.from_numpy(
                         perturbed[:, None].astype(np.float32)
                     ).to(device)
@@ -1045,6 +1201,22 @@ def main() -> None:
                     "n_assimilated": int(len(active_assim_idx)),
                     "n_withheld": int(len(eval_idx)),
                     "obs_error": error_name,
+                    "pseudo_observation_values": (
+                        "exact CHIRPS" if exact_observations else "synthetically noisy"
+                    ),
+                    "observation_noise_added": not exact_observations,
+                    "likelihood_sd_transformed": gauge_noise_sd,
+                    "exact_gauge_max_abs_error_transformed": (
+                        exact_gauge_max_abs_error_transformed
+                        if exact_observations
+                        else None
+                    ),
+                    "exact_satellite_max_abs_error_mm": (
+                        exact_satellite_max_abs_error_mm
+                        if exact_observations and use_satellite
+                        else None
+                    ),
+                    "station_geometry": "BMD catalogue" if is_bmd_network else name,
                     "observation_mode": observation_mode,
                     "obs_noise_sd_transformed": gauge_noise_sd,
                     "pseudo_satellite": bool(use_satellite),
@@ -1094,6 +1266,18 @@ def main() -> None:
                         eval_idx=eval_idx,
                         valid=valid,
                         obs_noise_sd=np.float32(gauge_noise_sd),
+                        observation_noise_added=np.bool_(not exact_observations),
+                        likelihood_sd_transformed=np.float32(gauge_noise_sd),
+                        exact_gauge_max_abs_error_transformed=np.float32(
+                            exact_gauge_max_abs_error_transformed
+                            if exact_observations
+                            else np.nan
+                        ),
+                        exact_satellite_max_abs_error_mm=np.float32(
+                            exact_satellite_max_abs_error_mm
+                            if exact_observations and use_satellite
+                            else np.nan
+                        ),
                         satellite_obs_noise_sd=np.float32(satellite_noise_sd),
                         pseudo_satellite_enabled=np.bool_(use_satellite),
                         satellite_factor=np.int32(satellite_factor),
@@ -1101,12 +1285,22 @@ def main() -> None:
                         satellite_selection=satellite_selection,
                         satellite_r_inflation=np.float32(satellite_r_inflation),
                         observation_mode=np.str_(observation_mode),
+                        pseudo_observation_values=np.str_(
+                            "exact CHIRPS"
+                            if exact_observations
+                            else "synthetically noisy"
+                        ),
+                        station_geometry=np.str_(
+                            "BMD catalogue" if is_bmd_network else name
+                        ),
                         temporal_alignment=np.str_(
                             "same checkpoint day; no offset"
                         ),
                         nature_source=np.str_("CHIRPS 0.05-degree target"),
                         pseudo_gauge_source=np.str_(
-                            "same-day CHIRPS sampled at synthetic stations"
+                            "same-day CHIRPS sampled at BMD catalogue locations"
+                            if is_bmd_network
+                            else "same-day CHIRPS sampled at synthetic stations"
                         ),
                         pseudo_satellite_source=np.str_(
                             "same-day CHIRPS exact physical 2x2 block means"
@@ -1139,6 +1333,19 @@ def main() -> None:
                         )
 
                 results.append(entry)
+                if exact_observations:
+                    satellite_qc = (
+                        f"; satellite max|error| "
+                        f"{exact_satellite_max_abs_error_mm:.3g} mm/day"
+                        if use_satellite
+                        else ""
+                    )
+                    print(
+                        "[osse] exact observation QC: gauge max|error| "
+                        f"{exact_gauge_max_abs_error_transformed:.3g} transformed"
+                        f"{satellite_qc}",
+                        flush=True,
+                    )
                 print(
                     f"  {name:>12s}  {error_name:<9s} "
                     + (f"{setting} " if setting else "")
@@ -1168,7 +1375,11 @@ def main() -> None:
         ),
         "temporal_alignment": "same checkpoint day; no offset",
         "nature_source": "CHIRPS 0.05-degree checkpoint target",
-        "pseudo_gauge_source": "same-day CHIRPS sampled at synthetic stations",
+        "pseudo_gauge_source": (
+            "same-day CHIRPS sampled at BMD catalogue locations"
+            if all(name.startswith("bmd (") for name in networks)
+            else "same-day CHIRPS sampled at configured station networks"
+        ),
         "pseudo_satellite_source": (
             "same-day CHIRPS exact physical 2x2 block means"
             if use_satellite
@@ -1186,6 +1397,8 @@ def main() -> None:
         else None,
         "satellite_r_inflation": satellite_r_inflation if use_satellite else None,
         "station_layout": args.station_layout,
+        "holdout_layout": args.holdout_layout,
+        "bmd_station_catalog": bmd_station_source,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (
             "This is an optimistic upper-bound OSSE because CHIRPS supplies both "

@@ -46,8 +46,10 @@ MONTHS="${OSSE_MONTHS:-}"
 START="${OSSE_START:-}"
 END="${OSSE_END:-}"
 NETWORKS="${OSSE_NETWORKS:-40}"
+BMD_STATIONS="${OSSE_BMD_STATIONS:-data/bmd/Stations.csv}"
 LAYOUT="${OSSE_LAYOUT:-spread}"
-OBS_ERROR="${OSSE_OBS_ERROR:-realistic}"
+HOLDOUT_LAYOUT="${OSSE_HOLDOUT_LAYOUT:-spread}"
+OBS_ERROR="${OSSE_OBS_ERROR:-exact}"
 DUMP_OBS_ERROR="${OSSE_DUMP_OBS_ERROR:-${OBS_ERROR%%,*}}"
 WITHHOLD="${OSSE_WITHHOLD:-0.2}"
 PSEUDO_SATELLITE="${OSSE_PSEUDO_SATELLITE:-1}"
@@ -118,6 +120,7 @@ fi
 
 echo "Checkpoint: $CKPT"
 echo "Networks: $NETWORKS   Layout: $LAYOUT   Obs error: $OBS_ERROR"
+echo "BMD catalogue: $BMD_STATIONS   Holdout layout: $HOLDOUT_LAYOUT"
 echo "Dump observation-error case: $DUMP_OBS_ERROR"
 echo "Days: $DAYS   Members: $MEMBERS   Month(s): ${MONTHS:-$MONTH}   Withhold: $WITHHOLD"
 echo "Date bounds: ${START:-checkpoint test start} to ${END:-checkpoint test end}"
@@ -130,7 +133,9 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
     --days "$DAYS" \
     --members "$MEMBERS" \
     --networks "$NETWORKS" \
+    --bmd-stations "$BMD_STATIONS" \
     --station-layout "$LAYOUT" \
+    --holdout-layout "$HOLDOUT_LAYOUT" \
     --obs-error "$OBS_ERROR" \
     --withhold "$WITHHOLD" \
     "${EXTRA[@]}" \

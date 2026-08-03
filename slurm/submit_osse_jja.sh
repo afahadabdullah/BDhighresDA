@@ -7,15 +7,21 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(cd -- "$SCRIPT_DIR/.." && pwd)"
 mkdir -p logs
 
-OBS_ERROR="${OSSE_OBS_ERROR:-realistic}"
+OBS_ERROR="${OSSE_OBS_ERROR:-exact}"
 
 export OSSE_START="${OSSE_START:-2021-01-01}"
 export OSSE_END="${OSSE_END:-2024-12-31}"
 export OSSE_MONTHS="${OSSE_MONTHS:-6,7,8}"
 export OSSE_DAYS="${OSSE_DAYS:-12}"
 export OSSE_MEMBERS="${OSSE_MEMBERS:-16}"
-export OSSE_NETWORKS="${OSSE_NETWORKS:-40}"
+export OSSE_NETWORKS="${OSSE_NETWORKS:-bmd}"
+if [[ -f "${OSSE_BMD_STATIONS:-data/bmd/Stations.csv}" ]]; then
+    export OSSE_BMD_STATIONS="${OSSE_BMD_STATIONS:-data/bmd/Stations.csv}"
+else
+    export OSSE_BMD_STATIONS="${OSSE_BMD_STATIONS:-data/stations/Stations.csv}"
+fi
 export OSSE_LAYOUT="${OSSE_LAYOUT:-spread}"
+export OSSE_HOLDOUT_LAYOUT="${OSSE_HOLDOUT_LAYOUT:-spread}"
 export OSSE_WITHHOLD="${OSSE_WITHHOLD:-0.2}"
 export OSSE_PSEUDO_SATELLITE="${OSSE_PSEUDO_SATELLITE:-1}"
 export OSSE_OBSERVATION_MODE="${OSSE_OBSERVATION_MODE:-combined}"
@@ -23,6 +29,6 @@ export OSSE_SATELLITE_STRIDE="${OSSE_SATELLITE_STRIDE:-1}"
 export OSSE_SATELLITE_CORRELATION_CONTROL="${OSSE_SATELLITE_CORRELATION_CONTROL:-0}"
 export OSSE_OBS_ERROR="$OBS_ERROR"
 export OSSE_DUMP_OBS_ERROR="${OSSE_DUMP_OBS_ERROR:-$OBS_ERROR}"
-export OSSE_OUT_DIR="${OSSE_OUT_DIR:-data/processed/osse_jja_2021_2024_${OBS_ERROR}}"
+export OSSE_OUT_DIR="${OSSE_OUT_DIR:-data/processed/osse_jja_2021_2024_bmd_${OBS_ERROR}}"
 
 exec sbatch "$@" slurm/osse.sbatch

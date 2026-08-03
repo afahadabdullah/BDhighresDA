@@ -206,6 +206,16 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
         if "pseudo_satellite_mm" in data.files
         else satellite_truth
     )
+    observation_values = (
+        str(data["pseudo_observation_values"].item())
+        if "pseudo_observation_values" in data.files
+        else "synthetically noisy"
+    )
+    satellite_title = (
+        "Pseudo-satellite\n0.1° exact CHIRPS"
+        if observation_values == "exact CHIRPS"
+        else "Pseudo-satellite\n0.1° with synthetic error"
+    )
 
     domain_mean = np.nanmean(truth, axis=(1, 2))
     order = np.argsort(domain_mean)
@@ -249,7 +259,7 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
     titles = [
         "CHIRPS truth\n0.05° nature run",
         "Exact CHIRPS mean\n0.1° noiseless",
-        "Pseudo-satellite\n0.1° with error",
+        satellite_title,
         "Background mean\n0.05°",
         "Analysis mean\n0.05°",
         "Analysis member 1\ntexture check",
@@ -354,6 +364,11 @@ def plot_reconstruction(data, grid, factor: int, n_cases: int, output: Path) -> 
 def main() -> None:
     args = parse_args()
     data = np.load(args.dump, allow_pickle=False)
+    observation_values = (
+        str(data["pseudo_observation_values"].item())
+        if "pseudo_observation_values" in data.files
+        else "unknown"
+    )
     background = data["background"]       # (D, M, H, W)
     analysis = data["analysis"]
     truth = data["truth"]                 # (D, H, W)
@@ -385,8 +400,11 @@ def main() -> None:
         if "pseudo_satellite_mm" in data.files
         else truth_coarse
     )
+    satellite_target = np.where(
+        np.isfinite(satellite_observed), truth_coarse, np.nan
+    )
     satellite_observation_score = ensemble_score(
-        satellite_observed[None], truth_coarse
+        satellite_observed[None], satellite_target
     )
     background_subgrid = subgrid_component(background, factor)
     analysis_subgrid = subgrid_component(analysis, factor)
@@ -490,7 +508,13 @@ def main() -> None:
     )
     heatmap(
         axes[1, 0], scale_matrix, [x[0] for x in scale_metrics],
-        ["Background", "Noisy satellite", "Analysis"],
+        [
+            "Background",
+            "Exact pseudo-satellite"
+            if observation_values == "exact CHIRPS"
+            else "Noisy pseudo-satellite",
+            "Analysis",
+        ],
         "C. Scale separation — does 0.05° structure improve?",
         formats=[x[3] for x in scale_metrics],
     )
@@ -525,7 +549,14 @@ def main() -> None:
         else False,
         "field_0p05": field_scores,
         "footprint_0p1": coarse_scores,
+        "pseudo_satellite_observation_0p1": satellite_observation_score,
+        # Retain the historical key for consumers of older experiment reports.
         "pseudo_satellite_error_0p1": satellite_observation_score,
+        "pseudo_observation_values": (
+            str(data["pseudo_observation_values"].item())
+            if "pseudo_observation_values" in data.files
+            else "unknown"
+        ),
         "subgrid_0p05": subgrid_scores,
         "withheld_gauges": withheld_scores,
         "directional_improvement_percent": {
