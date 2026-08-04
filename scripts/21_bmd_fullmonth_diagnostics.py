@@ -499,6 +499,41 @@ def main() -> None:
     expected_indices = list(range(len(reference_ids)))
     if sorted(all_eval_indices) != expected_indices:
         raise ValueError("folds must withhold every station exactly once")
+    date_start = str(dates[0])
+    date_end = str(dates[-1])
+    years = sorted({int(str(value)[:4]) for value in dates})
+    year_text = str(years[0]) if len(years) == 1 else f"{years[0]}--{years[-1]}"
+    period_title = f"{date_start} to {date_end}"
+    if max(years) <= 2018:
+        evidence_text = (
+            f"{year_text} is inside prior training;\n"
+            "this is development evidence,\n"
+            "not independent product skill."
+        )
+        evidence_caveat = (
+            f"{period_title} is inside checkpoint training and is not independent "
+            "model validation."
+        )
+    elif min(years) >= 2021:
+        evidence_text = (
+            f"{year_text} is outside prior training;\n"
+            "method tuning and calibration must\n"
+            "remain external to this evaluation."
+        )
+        evidence_caveat = (
+            f"{period_title} is outside the 1981--2018 checkpoint training period; "
+            "method tuning and observation-error calibration must remain external."
+        )
+    else:
+        evidence_text = (
+            "period crosses prior-training boundary;\n"
+            "inside- and outside-training years\n"
+            "must be reported separately."
+        )
+        evidence_caveat = (
+            f"{period_title} crosses the checkpoint training boundary and requires "
+            "separate reporting by year."
+        )
     observed_all = np.concatenate(observed_chunks)
     distance_all = np.concatenate(distance_chunks)
     ensembles = {
@@ -688,15 +723,14 @@ def main() -> None:
         f"IMERG innovation sd     {innovation_report['IMERG footprints']['sd']:.2f}\n\n"
         f"FORMAL GATE             {'PASS' if gate['passes'] else 'FAIL'}\n"
         f"provisional method      {summary['provisional_recommendation']}\n\n"
-        "2018 is inside prior training;\n"
-        "this is development evidence,\n"
-        "not independent product skill."
+        f"{evidence_text}"
     )
     axis.text(0, 1, summary_text, va="top", ha="left", family="monospace", fontsize=9.5)
     axis.set_title("I. Consistency and selection summary", fontsize=10)
 
     figure.suptitle(
-        "Full-May real-observation data-assimilation verification suite\n"
+        "Real-observation data-assimilation verification suite\n"
+        f"{period_title}\n"
         f"{len(dates)} exact BMD 03:00-to-03:00 UTC days | {member_count} members | "
         f"{len(reference_ids)} stations withheld once across {len(args.dumps)} folds\n"
         "All skill and calibration panels use withheld BMD; spectral curves are context only",
@@ -818,7 +852,7 @@ def main() -> None:
             zorder=6,
         )
     figure.suptitle(
-        "Full-May DA spatial impact across rotated BMD networks — not gridded validation\n"
+        f"DA spatial impact, {period_title}, across rotated BMD networks — not gridded validation\n"
         "Maps A–E show how the posterior changed; only panel F uses independent withheld observations",
         fontsize=14,
     )
@@ -865,7 +899,7 @@ def main() -> None:
         },
         "selection": summary["fusion_gate"],
         "provisional_recommendation": summary["provisional_recommendation"],
-        "caveat": "May 2018 is inside checkpoint training and is not independent model validation.",
+        "caveat": evidence_caveat,
     }
     Path(args.out_report).write_text(
         json.dumps(json_safe(diagnostic_report), indent=2, allow_nan=False) + "\n"
@@ -874,7 +908,7 @@ def main() -> None:
     print(f"wrote {args.out_spatial}")
     print(f"wrote {args.out_report}")
     print(
-        f"full-month gate: simultaneous - gauges CRPS "
+        f"multi-day gate: simultaneous - gauges CRPS "
         f"{summary['fusion_gate']['pooled_difference_mm']:+.3f}; "
         f"recommendation {summary['provisional_recommendation']}"
     )

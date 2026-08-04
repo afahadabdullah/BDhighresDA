@@ -9,7 +9,7 @@
 #SBATCH --time=18:00:00
 #SBATCH --output=logs/%x-%j.out
 
-# Bounded May 2018 real-observation experiment: exact 03:00-03:00 UTC BMD
+# Configurable bounded real-observation experiment: exact 03:00-03:00 UTC BMD
 # reporting windows, background, gauges-only, correlation-controlled
 # IMERG-only, and stabilized simultaneous DA. BMD stations remain withheld
 # from every active assimilation arm.
@@ -53,6 +53,7 @@ HOLDOUT_FOLD="${BMD_HOLDOUT_FOLD:-0}"
 IMERG_MIN_COUNT="${IMERG_MIN_COUNT:-48}"
 IMERG_STRIDE="${IMERG_STRIDE:-3}"
 IMERG_R_MULTIPLIER="${IMERG_R_MULTIPLIER:-1.0}"
+IMERG_REUSE_PREPARED="${IMERG_REUSE_PREPARED:-0}"
 
 DAILY="${BMD_DAILY:-data/processed/bmd_daily_may2018.csv}"
 STATION_SUMMARY="${BMD_STATION_SUMMARY:-data/processed/bmd_stations_may2018.csv}"
@@ -84,7 +85,7 @@ echo "Checkpoint: $CKPT"
 echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
 echo "Holdout fold: $HOLDOUT_FOLD of $HOLDOUT_FOLDS"
 echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
-echo "NOTE: 2018 is in checkpoint training; this is a process test, not final skill."
+echo "NOTE: dates through 2018 are in checkpoint training; such runs are process tests, not final skill."
 echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
@@ -96,15 +97,19 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
     --summary "$STATION_SUMMARY" \
     --report "$BMD_QC"
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
-    --input "$IMERG_DIR" \
-    --source-frequency "$IMERG_SOURCE_FREQUENCY" \
-    --start "$START" \
-    --end "$END" \
-    --min-count "$IMERG_MIN_COUNT" \
-    --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
-    --out "$IMERG_PREPARED" \
-    --report "$IMERG_QC"
+if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" && -s "$IMERG_QC" ]]; then
+    echo "Reusing validated IMERG preparation: $IMERG_PREPARED"
+else
+    srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
+        --input "$IMERG_DIR" \
+        --source-frequency "$IMERG_SOURCE_FREQUENCY" \
+        --start "$START" \
+        --end "$END" \
+        --min-count "$IMERG_MIN_COUNT" \
+        --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
+        --out "$IMERG_PREPARED" \
+        --report "$IMERG_QC"
+fi
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --config "$CONFIG" \
@@ -133,7 +138,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --out-intercomparison "$INTERCOMPARISON" \
     --out-evaluation "$EVALUATION"
 
-echo "BMD + IMERG May 2018 experiment complete."
+echo "BMD + IMERG experiment complete for $START through $END."
 echo "Metrics: $REPORT"
 echo "IMERG QC: $IMERG_QC"
 echo "Diagnostics: $DIAGNOSTICS"

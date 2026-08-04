@@ -190,8 +190,30 @@ def main() -> None:
     recommendation = "Simultaneous" if passes else "Gauges only"
 
     day_count = len(folds[0]["dates"])
+    date_start = str(folds[0]["dates"][0])
+    date_end = str(folds[0]["dates"][-1])
+    years = sorted({int(str(value)[:4]) for value in folds[0]["dates"]})
+    year_text = str(years[0]) if len(years) == 1 else f"{years[0]}--{years[-1]}"
+    if max(years) <= 2018:
+        caveat = (
+            f"The {year_text} dates are inside checkpoint training; this is a "
+            "process test, and final skill requires excluded evaluation years."
+        )
+    elif min(years) >= 2021:
+        caveat = (
+            f"The {year_text} dates are outside the 1981--2018 checkpoint training "
+            "period; observation-model tuning must still exclude evaluated folds and years."
+        )
+    else:
+        caveat = (
+            f"The {year_text} period crosses the checkpoint evidence boundary; report "
+            "inside- and outside-training years separately."
+        )
     summary = {
-        "experiment": f"offset-minus-one {day_count}-day rotated BMD spatial holdout",
+        "experiment": (
+            f"offset-minus-one {day_count}-day rotated BMD spatial holdout, "
+            f"{date_start} to {date_end}"
+        ),
         "primary_reference": "BMD gauges withheld once each across disjoint folds",
         "observation_dates": folds[0]["dates"],
         "background_day_offset": -1,
@@ -224,10 +246,7 @@ def main() -> None:
             "rule": "pooled CRPS must be lower and simultaneous must win at least half the folds",
         },
         "provisional_recommendation": recommendation,
-        "caveat": (
-            f"These {day_count} days from 2018 are inside checkpoint training; "
-            "final skill requires an excluded model year."
-        ),
+        "caveat": caveat,
     }
 
     x = np.arange(expected)
@@ -293,7 +312,8 @@ def main() -> None:
         axis.set_xticks(x, fold_labels, rotation=20)
     figure.suptitle(
         "Offset −1 DA method gate across disjoint spatial BMD folds\n"
-        f"Every station withheld once; recommendation: {recommendation}",
+        f"{date_start} to {date_end}; every station withheld once; "
+        f"recommendation: {recommendation}",
         fontsize=15,
     )
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)

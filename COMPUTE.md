@@ -914,3 +914,46 @@ Paper artifacts are written to
 values, and a LaTeX table. This is a CHIRPS-on-CHIRPS upper-bound experiment;
 withheld pseudo-gauges are the primary point target, while full-field,
 footprint, and sub-footprint scores explain scale behavior.
+
+## 2017 May--September BMD + IMERG process test
+
+This workflow exercises the real-observation pipeline over all 153 days from
+1 May through 30 September 2017. The local legacy archive contains 35 BMD
+stations with complete coverage over this period (5,355 station-days). The
+current checkpoint was trained through 2018, so this run is a smoke/process
+test and must not be reported as independent product skill. The locked final
+evaluation remains 2021--2024, conditional on obtaining actual BMD records for
+those years.
+
+The wrapper downloads and validates the 7,344 half-hourly IMERG subsets needed
+for exact BMD 03:00--03:00 UTC days, runs five disjoint spatial folds on Grace
+GPUs, and builds the pooled withheld-BMD and Cartopy diagnostics. The retained
+products are background, gauges only, IMERG only, and simultaneous gauges +
+IMERG. The default four-member ensemble keeps this a bounded process test.
+
+```bash
+git pull --ff-only origin main
+bash slurm/submit_bmd_imerg_2017_may_sep_smoke.sh
+```
+
+To use eight members while retaining the process-test label:
+
+```bash
+bash slurm/submit_bmd_imerg_2017_may_sep_smoke.sh \
+  --export=ALL,BMD_MEMBERS=8
+```
+
+The downloader is resumable and skips already valid granules. Monitor the
+three job IDs printed by the wrapper:
+
+```bash
+squeue -u "$USER"
+tail -f logs/imerg-hh-2017-smoke-<DOWNLOAD_JOB>.out
+tail -f logs/bdhires-bmd-2017-smoke-<ARRAY_JOB>_<TASK>.out
+tail -f logs/bdhires-2017-summary-<SUMMARY_JOB>.out
+```
+
+Artifacts are written under
+`data/processed/bmd_imerg_smoke_2017_may_sep/`, especially
+`rotated_summary.json`, `rotated_summary.png`, `verification.png`,
+`spatial_impact.png`, and `diagnostics.json`.

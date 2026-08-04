@@ -475,8 +475,17 @@ def main() -> None:
             ),
         },
         "caveats": [
-            "Five days and one six-station holdout are a process gate, not final skill.",
-            "May 2018 lies inside the checkpoint training period.",
+            (
+                f"{len(time)} days and one spatial holdout are a process gate, not a "
+                "final skill estimate; final selection uses rotated spatial folds."
+            ),
+            (
+                f"{str(time[0])} to {str(time[-1])} lies inside the checkpoint training "
+                "period and is not independent temporal validation."
+                if bool(report.get("scope", {}).get("in_checkpoint_training_period", False))
+                else f"{str(time[0])} to {str(time[-1])} is outside the checkpoint training "
+                "period; independence still requires all tuning to be frozen beforehand."
+            ),
             "IMERG Final has monthly GPCC gauge adjustment; BMD/GPCC overlap must be audited.",
             "IMERG uses exact BMD 03:00-03:00 UTC accumulation windows.",
             (
@@ -602,10 +611,19 @@ def main() -> None:
     axis.grid(alpha=0.2)
     axis.legend(fontsize=7)
 
+    in_training_period = bool(
+        report.get("scope", {}).get("in_checkpoint_training_period", False)
+    )
+    temporal_label = (
+        "inside checkpoint training; process test only"
+        if in_training_period
+        else "outside checkpoint training; tuning must remain frozen"
+    )
     figure.suptitle(
-        "Five-day DA gate: primary evaluation against withheld BMD gauges\n"
+        "DA process gate: primary evaluation against withheld BMD gauges\n"
+        f"{str(time[0])} to {str(time[-1])}; {len(time)} days; "
         f"{len(assim_idx)} assimilated; {len(eval_idx)} withheld; "
-        f"n={np.isfinite(observed).sum()} station-days; 2018 is inside training years\n{control_text}",
+        f"n={np.isfinite(observed).sum()} station-days; {temporal_label}\n{control_text}",
         fontsize=15,
     )
     Path(args.out_diagnostics).parent.mkdir(parents=True, exist_ok=True)
@@ -854,7 +872,8 @@ def main() -> None:
             axis.tick_params(labelsize=7)
             figure.colorbar(images[column], ax=axis, orientation="horizontal", fraction=0.045, pad=0.04)
     figure.suptitle(
-        "Five-day DA spatial cases anchored by BMD station observations\n"
+        f"Selected DA spatial cases from {str(time[0])} to {str(time[-1])}, "
+        "anchored by BMD station observations\n"
         "Filled circles are assimilated gauges; cyan-edged circles are withheld; maps are qualitative\n"
         + control_text,
         fontsize=14,
@@ -891,7 +910,7 @@ def main() -> None:
     texture_limit = max(1.0, float(np.nanpercentile(np.abs(np.stack(texture)), 98)))
     row_fields = [period_mean, wet_frequency, texture]
     row_specs = [
-        ("viridis", 0.0, rain_limit, "Five-day mean (mm day$^{-1}$)"),
+        ("viridis", 0.0, rain_limit, f"{len(time)}-day mean (mm day$^{{-1}}$)"),
         ("Blues", 0.0, 1.0, "Wet-day frequency (≥1 mm)"),
         ("RdBu_r", -texture_limit, texture_limit, "Fine-scale departure from 0.2° mean"),
     ]

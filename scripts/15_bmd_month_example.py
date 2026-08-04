@@ -783,11 +783,19 @@ def main() -> None:
         and int(str(np.datetime64(args.start, "Y"))[:4]) >= int(train_years[0])
         and int(str(np.datetime64(args.end, "Y"))[:4]) <= int(train_years[1])
     )
+    period_label = f"{args.start} to {args.end}"
+    temporal_status = (
+        "inside the checkpoint training period; these are process and consistency "
+        "diagnostics, not independent temporal validation"
+        if in_training_period
+        else "outside the checkpoint training period, subject to confirming that all "
+        "method tuning and configuration choices were fixed independently"
+    )
     report = {
         "experiment": (
-            "May 2018 controlled four-arm real-BMD plus real-IMERG DA example"
+            f"{period_label} controlled four-arm real-BMD plus real-IMERG DA experiment"
             if imerg is not None
-            else "May 2018 real-BMD gauge-only DA process example"
+            else f"{period_label} real-BMD gauge-only DA process experiment"
         ),
         "scope": {
             "start": args.start,
@@ -905,8 +913,9 @@ def main() -> None:
             "imerg_only": grid_imerg,
             "simultaneous": grid_combined,
             "interpretation": (
-                "CHIRPS is the checkpoint target and May 2018 is in training; these are "
-                "consistency diagnostics, not independent truth scores."
+                f"CHIRPS is the checkpoint target and {period_label} is {temporal_status}. "
+                "CHIRPS scores are contextual consistency diagnostics, not an independent "
+                "truth evaluation."
             ),
         },
         "chirps_spatial_evaluation": {
@@ -915,8 +924,8 @@ def main() -> None:
             "domain": "all valid land grid cells and requested days, unweighted",
             "interpretation": (
                 "CHIRPS is treated as the gridded target for comparing products, but "
-                "May 2018 lies inside checkpoint training and CHIRPS is gauge-based; "
-                "these are consistency scores, not independent validation."
+                f"{period_label} is {temporal_status}. CHIRPS is also gauge-based, so "
+                "these are consistency scores rather than independent validation."
             ),
         },
         "physical_ranges": {
