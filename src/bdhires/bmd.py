@@ -198,6 +198,17 @@ def read_legacy_bmd(
     return out, report
 
 
+EXTRA_STATION_COORDS = {
+    "dimla": {"catalog_name": "Dimla", "lat": 26.12833, "lon": 88.92500, "station_id": 36},
+    "rajarhat": {"catalog_name": "Rajarhat", "lat": 25.80500, "lon": 89.66833, "station_id": 37},
+    "gopalgonj": {"catalog_name": "Gopalgonj", "lat": 23.00722, "lon": 89.83333, "station_id": 38},
+    "natrakona": {"catalog_name": "Natrakona", "lat": 24.87750, "lon": 90.72750, "station_id": 39},
+    "nikli": {"catalog_name": "Nikli", "lat": 24.31667, "lon": 90.91667, "station_id": 40},
+    "tarash": {"catalog_name": "Tarash", "lat": 24.43333, "lon": 89.36667, "station_id": 41},
+    "tetulia": {"catalog_name": "Tetulia", "lat": 26.58333, "lon": 88.55000, "station_id": 42},
+}
+
+
 def read_station_dir_bmd(
     data_dir: str | Path,
     catalog_csv: str | Path,
@@ -246,14 +257,16 @@ def read_station_dir_bmd(
 
         st_info = catalog_map.get(key)
         if st_info is None:
-            # Fallback: check substring matching or catalog name matching
             for cat_key, row in catalog_map.items():
                 if key in cat_key or cat_key in key:
                     st_info = row
                     break
+        if st_info is None and key in EXTRA_STATION_COORDS:
+            st_info = pd.Series(EXTRA_STATION_COORDS[key])
         if st_info is None:
             unmatched_files.append(fpath.name)
             continue
+
 
         raw = pd.read_csv(fpath, dtype=str, keep_default_na=False)
         cols = {str(c).strip().lower(): c for c in raw.columns}
