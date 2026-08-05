@@ -26,8 +26,11 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/22_summarize_multiyear_bmd_eval.py \
                 data/processed/bmd_imerg_eval_2023_may_sep/rotated_summary.json \
                 data/processed/bmd_imerg_eval_2024_may_jun/rotated_summary.json \
     --out-json data/processed/bmd_imerg_2021_2024_pooled_summary.json \
-    --out-markdown data/processed/bmd_imerg_2021_2024_pooled_summary.md
+    --out-markdown data/processed/bmd_imerg_2021_2024_pooled_summary.md \
+    --out-plot data/processed/bmd_imerg_2021_2024_pooled_summary.png
 
 echo "Multi-year pooled summary complete."
 echo "Markdown Table: data/processed/bmd_imerg_2021_2024_pooled_summary.md"
 echo "JSON Data: data/processed/bmd_imerg_2021_2024_pooled_summary.json"
+echo "Summary Plot: data/processed/bmd_imerg_2021_2024_pooled_summary.png"
+
