@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out", default="data/processed/imerg_bd_may2018.nc")
     parser.add_argument("--report", default="data/processed/imerg_bd_may2018_qc.json")
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Allow missing half-hourly granules in large multi-year inventories",
+    )
     return parser.parse_args()
 
 
@@ -61,7 +66,9 @@ def main() -> None:
             args.end,
             min_count=min_count,
             accumulation_end_hour_utc=args.accumulation_end_hour_utc,
+            allow_missing=args.allow_missing,
         )
+
         product = "GPM_3IMERGHH"
         source = "NASA GES DISC half-hourly Final Run granules"
         accumulation_window = (

@@ -133,25 +133,24 @@ def discover_imerg_half_hourly_files(
     accumulation_end_hour_utc: int = 3,
 ) -> list[Path]:
     """Return the exact 48 half-hour granules for every requested BMD date.
-
-    The selected BMD archive date labels the *end* of its 24-hour reporting
-    window.  For example, 2018-05-01 requires IMERG intervals beginning at
-    2018-04-30 03:00 through 2018-05-01 02:30 UTC.  Missing or duplicate
-    intervals are fatal so a partial Earthdata download cannot silently
-    produce a low daily accumulation.
-    """
+    start: str | np.datetime64 | date,
+    end: str | np.datetime64 | date,
+    accumulation_end_hour_utc: int = 3,
+    allow_missing: bool = False,
+) -> list[Path | None]:
+    """Find all half-hourly granules required for BMD reporting windows."""
 
     directory = Path(directory)
     if not directory.is_dir():
-        raise FileNotFoundError(f"IMERG directory does not exist: {directory}")
+        raise ValueError(f"IMERG directory does not exist: {directory}")
 
     by_start: dict[datetime, list[Path]] = {}
-    for path in sorted(directory.rglob("3B-HHR.MS.MRG.3IMERG.*.V07B.HDF5*")):
+    for path in directory.rglob("*.nc4"):
         interval_start = _half_hour_start(path)
         if interval_start is not None:
             by_start.setdefault(interval_start, []).append(path)
 
-    requested: list[Path] = []
+    requested: list[Path | None] = []
     missing: list[str] = []
     duplicate: list[str] = []
     for day in _dates(start, end):
@@ -161,17 +160,19 @@ def discover_imerg_half_hourly_files(
             paths = by_start.get(interval_start, [])
             if not paths:
                 missing.append(interval_start.isoformat(timespec="minutes") + "Z")
+                requested.append(None)
             elif len(paths) > 1:
                 duplicate.append(
                     f"{interval_start.isoformat(timespec='minutes')}Z: "
                     f"{[path.name for path in paths]}"
                 )
+                requested.append(paths[0])
             else:
                 requested.append(paths[0])
 
-    if missing or duplicate:
+    if (missing and not allow_missing) or duplicate:
         parts = []
-        if missing:
+        if missing and not allow_missing:
             shown = ", ".join(missing[:12])
             suffix = f" ... ({len(missing)} total)" if len(missing) > 12 else ""
             parts.append("missing intervals: " + shown + suffix)
@@ -328,27 +329,15 @@ def load_imerg_daily(
 
 def load_imerg_bmd_windows(
     directory: str | Path,
-    start: str | np.datetime64,
-    end: str | np.datetime64,
-    *,
-    grid: Grid = BD,
-    factor: int = 2,
+    start: str | np.datetime64 | date,
+    end: str | np.datetime64 | date,
+    grid: Grid = WIDE,
+    factor: int = 4,
     min_count: int = 48,
     accumulation_end_hour_utc: int = 3,
-) -> ImergDaily:
-    """Accumulate half-hourly V07B rates over exact BMD reporting days.
-
-    Each ``precipitation`` value is a half-hour mean rate in mm/hr, so daily
-    depth is ``sum(rate * 0.5 hr)``.  Half-hourly ``randomError`` is converted
-    to depth in the same way and accumulated in quadrature.  The latter is an
-    independence baseline; unknown residual temporal dependence must be
-    assessed with the DA observation-error sensitivity rather than assumed
-    away.
-
-    By default all 48 intervals must be valid at a footprint.  A lower
-    ``min_count`` is allowed only when explicitly requested and does not scale
-    partial accumulations to compensate for missing intervals.
-    """
+    allow_missing: bool = False,
+) -> xr.Dataset:
+    """Accumulate half-hourly V07B rates over exact BMD reporting days."""
 
     if not 1 <= min_count <= 48:
         raise ValueError("min_count must be between 1 and 48")
@@ -357,6 +346,7 @@ def load_imerg_bmd_windows(
         start,
         end,
         accumulation_end_hour_utc=accumulation_end_hour_utc,
+        allow_missing=allow_missing,
     )
     expected_lat, expected_lon = _coarse_centres(grid, factor)
     output_precip: list[np.ndarray] = []
@@ -372,6 +362,8 @@ def load_imerg_bmd_windows(
         count = np.zeros_like(precipitation_sum, dtype=np.int16)
 
         for path in window_files:
+            if path is None:
+                continue
             dataset = _open_granule(path, required=required)
             try:
                 _require_mm_per_hour(dataset, path)

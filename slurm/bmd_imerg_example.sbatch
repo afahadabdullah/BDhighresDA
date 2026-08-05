@@ -105,6 +105,10 @@ fi
 if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" && -s "$IMERG_QC" ]]; then
     echo "Reusing validated IMERG preparation: $IMERG_PREPARED"
 else
+    EXTRA_FLAGS=()
+    if [[ "${IMERG_ALLOW_MISSING:-0}" == "1" ]]; then
+        EXTRA_FLAGS+=("--allow-missing")
+    fi
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
         --input "$IMERG_DIR" \
         --source-frequency "$IMERG_SOURCE_FREQUENCY" \
@@ -113,8 +117,10 @@ else
         --min-count "$IMERG_MIN_COUNT" \
         --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
         --out "$IMERG_PREPARED" \
-        --report "$IMERG_QC"
+        --report "$IMERG_QC" \
+        "${EXTRA_FLAGS[@]}"
 fi
+
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --config "$CONFIG" \
