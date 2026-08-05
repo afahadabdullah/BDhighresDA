@@ -51,3 +51,5 @@ echo "submitted dependent CPU summary & diagnostics: ${summary_job}"
 echo "period: ${BMD_START} through ${BMD_END}"
 echo "ensemble members: ${BMD_MEMBERS}"
 echo "outputs: ${ROOT}/"
+echo "SUMMARY_JOB:${summary_job}"
+
