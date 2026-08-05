@@ -409,7 +409,8 @@ def load_imerg_bmd_windows(
         count=np.stack(output_count),
         lat=expected_lat,
         lon=expected_lon,
-        source_files=tuple(path.name for path in files),
+        source_files=tuple(path.name for path in files if path is not None),
+
         min_count=min_count,
         source_frequency="half-hourly",
         accumulation_end_hour_utc=accumulation_end_hour_utc,
