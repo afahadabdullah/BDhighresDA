@@ -88,14 +88,19 @@ echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
 echo "NOTE: dates through 2018 are in checkpoint training; such runs are process tests, not final skill."
 echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
-    --rainfall "$RAINFALL" \
-    --stations "$STATIONS" \
-    --start "$START" \
-    --end "$END" \
-    --out "$DAILY" \
-    --summary "$STATION_SUMMARY" \
-    --report "$BMD_QC"
+if [[ "${BMD_REUSE_CONVERTED:-0}" == "1" || ( "$RAINFALL" == "$DAILY" && -s "$DAILY" ) ]]; then
+    echo "Reusing prepared canonical station observations: $DAILY"
+else
+    srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
+        --rainfall "$RAINFALL" \
+        --stations "$STATIONS" \
+        --start "$START" \
+        --end "$END" \
+        --out "$DAILY" \
+        --summary "$STATION_SUMMARY" \
+        --report "$BMD_QC"
+fi
+
 
 if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" && -s "$IMERG_QC" ]]; then
     echo "Reusing validated IMERG preparation: $IMERG_PREPARED"

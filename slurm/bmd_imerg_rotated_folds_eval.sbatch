@@ -38,6 +38,8 @@ export IMERG_PREPARED="${IMERG_PREPARED:-$ROOT/imerg_aligned_${START_CLEAN}_${EN
 export IMERG_QC="${IMERG_QC:-$ROOT/imerg_aligned_${START_CLEAN}_${END_CLEAN}_qc.json}"
 
 export IMERG_REUSE_PREPARED="1"
+export BMD_REUSE_CONVERTED="1"
+
 
 export BMD_DAILY="${PREFIX}_bmd.csv"
 export BMD_STATION_SUMMARY="${PREFIX}_stations.csv"
