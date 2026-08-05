@@ -56,3 +56,33 @@ def test_spread_folds_are_deterministic_balanced_and_exhaustive():
     assert [len(fold) for fold in folds] == [6] * 5
     assert np.array_equal(np.sort(np.concatenate(folds)), np.arange(30))
     assert sum(len(np.unique(fold)) for fold in folds) == 30
+
+
+def test_station_dir_bmd_conversion(tmp_path: Path):
+    from bdhires.bmd import read_station_dir_bmd
+
+    stations = tmp_path / "Stations.csv"
+    stations.write_text(
+        "StationNumber,Station,StationId,Latitude,Longitude\n"
+        "1,Dhaka,0,23.76,90.38\n"
+        "2,Chittagonj,0,22.27,91.82\n"
+    )
+    s1 = tmp_path / "Dhaka.csv"
+    s1.write_text("Datetime,Rainfall\n2021-05-01,10.5\n2021-05-02,0.0\n2021-05-03,***\n")
+
+    s2 = tmp_path / "Chittagong.csv"
+    s2.write_text("date,precip_mm\n2021-05-01,5.0\n2021-05-02,12.0\n2021-05-03,0.0\n")
+
+    daily, report = read_station_dir_bmd(
+        data_dir=tmp_path,
+        catalog_csv=stations,
+        start="2021-05-01",
+        end="2021-05-03",
+    )
+
+    assert len(daily) == 6
+    assert daily["station_id"].nunique() == 2
+    assert report["valid_observations"] == 5
+    assert report["missing_observations"] == 1
+    assert report["stations"] == 2
+

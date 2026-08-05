@@ -198,6 +198,146 @@ def read_legacy_bmd(
     return out, report
 
 
+def read_station_dir_bmd(
+    data_dir: str | Path,
+    catalog_csv: str | Path,
+    start: str | np.datetime64 | None = None,
+    end: str | np.datetime64 | None = None,
+    max_mm: float = 1000.0,
+) -> tuple[pd.DataFrame, dict]:
+    """Convert per-station CSV files in a directory to canonical daily long form.
+
+    Expects a folder of CSV files where each file contains daily station data
+    (e.g., columns ``Datetime``/``date`` and ``Rainfall``/``precip_mm``) and a
+    catalog CSV (e.g., ``Stations.csv``).
+
+    Returns a dataframe with columns ``station_id,name,lat,lon,date,precip_mm``
+    and an auditable QC report.
+    """
+    data_dir = Path(data_dir)
+    catalog_csv = Path(catalog_csv)
+    if not data_dir.is_dir():
+        raise ValueError(f"data directory does not exist: {data_dir}")
+    if not catalog_csv.is_file():
+        raise ValueError(f"catalog CSV does not exist: {catalog_csv}")
+
+    catalog = read_station_catalog(catalog_csv)
+
+    csv_files = [
+        path for path in data_dir.glob("*.csv")
+        if path.resolve() != catalog_csv.resolve() and not path.name.lower().endswith("stations.csv")
+    ]
+    if not csv_files:
+        raise ValueError(f"no station CSV files found in {data_dir}")
+
+    catalog_map = {row["station_key"]: row for _, row in catalog.iterrows()}
+
+    records = []
+    invalid_calendar = 0
+    sentinels_count = 0
+    negative_count = 0
+    too_large_count = 0
+    unmatched_files = []
+
+    for fpath in sorted(csv_files):
+        fname_base = fpath.stem
+        key_source = _station_key(fname_base)
+        key = STATION_ALIASES.get(key_source, key_source)
+
+        st_info = catalog_map.get(key)
+        if st_info is None:
+            # Fallback: check substring matching or catalog name matching
+            for cat_key, row in catalog_map.items():
+                if key in cat_key or cat_key in key:
+                    st_info = row
+                    break
+        if st_info is None:
+            unmatched_files.append(fpath.name)
+            continue
+
+        raw = pd.read_csv(fpath, dtype=str, keep_default_na=False)
+        cols = {str(c).strip().lower(): c for c in raw.columns}
+
+        date_col = cols.get("datetime") or cols.get("date")
+        val_col = cols.get("rainfall") or cols.get("precip_mm") or cols.get("rain")
+        if not date_col or not val_col:
+            continue
+
+        df = pd.DataFrame()
+        df["date"] = pd.to_datetime(raw[date_col].str.strip(), errors="coerce")
+        bad_dates = int(df["date"].isna().sum())
+        invalid_calendar += bad_dates
+        df = df[df["date"].notna()].copy()
+
+        source_vals = raw.loc[df.index, val_col].astype(str).str.strip()
+        token_upper = source_vals.str.upper()
+        known_missing = token_upper.isin(MISSING_TOKENS)
+        numeric = pd.to_numeric(source_vals.where(~known_missing), errors="coerce")
+
+        sentinel = numeric.isin(SENTINELS)
+        negative = numeric < 0
+        too_large = numeric > max_mm
+
+        sentinels_count += int(sentinel.sum())
+        negative_count += int(negative.sum())
+        too_large_count += int(too_large.sum())
+
+        df["precip_mm"] = numeric.mask(sentinel | negative | too_large)
+        df["station_id"] = int(st_info["station_id"])
+        df["name"] = str(st_info["catalog_name"])
+        df["lat"] = float(st_info["lat"])
+        df["lon"] = float(st_info["lon"])
+
+        records.append(df)
+
+    if not records:
+        raise ValueError(f"no matching station data parsed from {data_dir}")
+
+    merged = pd.concat(records, ignore_index=True)
+
+    if start is not None:
+        merged = merged[merged["date"] >= pd.Timestamp(start)]
+    if end is not None:
+        merged = merged[merged["date"] <= pd.Timestamp(end)]
+    if merged.empty:
+        raise ValueError(f"no BMD observations remain in requested period {start} to {end}")
+
+    if merged.duplicated(["station_id", "date"]).any():
+        duplicate = merged.loc[
+            merged.duplicated(["station_id", "date"], keep=False), ["station_id", "date"]
+        ].head(20)
+        raise ValueError(f"duplicate BMD station-days:\n{duplicate.to_string(index=False)}")
+
+    out = merged[["station_id", "name", "lat", "lon", "date", "precip_mm"]].copy()
+    out = out.sort_values(["station_id", "date"]).reset_index(drop=True)
+    finite = out["precip_mm"].notna()
+
+    report = {
+        "data_dir": str(data_dir),
+        "station_source": str(catalog_csv),
+        "requested_start": None if start is None else str(pd.Timestamp(start).date()),
+        "requested_end": None if end is None else str(pd.Timestamp(end).date()),
+        "date_start": str(out["date"].min().date()),
+        "date_end": str(out["date"].max().date()),
+        "stations": int(out["station_id"].nunique()),
+        "calendar_station_days": int(len(out)),
+        "valid_observations": int(finite.sum()),
+        "missing_observations": int((~finite).sum()),
+        "coverage": float(finite.mean()),
+        "wet_fraction_of_valid": float((out.loc[finite, "precip_mm"] > 0).mean()),
+        "mean_mm_per_valid_day": float(out.loc[finite, "precip_mm"].mean()),
+        "maximum_mm": float(out.loc[finite, "precip_mm"].max()),
+        "invalid_calendar_cells_dropped": invalid_calendar,
+        "sentinel_values_removed": sentinels_count,
+        "negative_values_removed": negative_count,
+        "values_over_max_removed": too_large_count,
+        "max_mm_threshold": float(max_mm),
+        "unmatched_files": unmatched_files,
+    }
+    return out, report
+
+
+
 def summarize_daily(frame: pd.DataFrame) -> pd.DataFrame:
     """Return per-station availability and rainfall summaries."""
     rows = []
