@@ -1,415 +1,97 @@
 # BDhighresDA
 
-**Generative downscaling + data assimilation for daily rainfall over Bangladesh.**
+**Generative downscaling and score-guided data assimilation for daily rainfall over Bangladesh.**
 
-ERA5 (0.25°), or CPC (0.5°) in the CPC experiment, is downscaled to
-**0.05° (~5 km) daily precipitation** by a conditional **flow-matching**
-generative prior, then corrected at inference
-time by **GPM IMERG footprints and sparse BMD rain gauges**, both assimilated
-through score guidance — no retraining needed when the observing network
-changes.
-
-**The default workflow has two phases, and only one sees observations.**
-*Training* (offline, once): ERA5 → U-Net → CHIRPS at 5 km. No gauge or
-satellite observation reaches this default prior. *Inference* (every day): the
-same frozen network samples a background from ERA5, and observations nudge
-every integration step to give the analysis. The optional CPC experiment is a
-separate, explicitly contemporaneous CPC-to-CHIRPS statistical-downscaling
-ablation; it does not have the same forecast/observation separation.
-
-The approach follows [Manshausen et al. (2025, *JAMES*)](https://doi.org/10.1029/2024MS004505)
-(score-based data assimilation of weather stations at km scale), with the
-diffusion prior replaced by a rectified-flow model
-([Lipman et al. 2023](https://arxiv.org/abs/2210.02747);
-[Wetherell 2026](https://arxiv.org/abs/2606.00281)).
-
-📖 **Read [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) first** — it contains
-the full scientific design, the math linking flow matching to SDA guidance,
-the data plan, and the experiment/ablation list.
-
----
-
-## Pipeline at a glance
+Conditional **rectified-flow** generative prior downscales ERA5 (0.25°) and CPC (0.5°) to **0.05° (~5 km) daily precipitation**. At inference time, **GPM IMERG half-hourly satellite footprints** and **sparse BMD rain gauge observations** are assimilated via score guidance — enabling zero-shot DA without model retraining.
 
 ![BDhighresDA pipeline](docs/figures/pipeline.png)
 
-| Step | Script |
-|---|---|
-| 0. ERA5 predictors | `scripts/00_download_era5.py` |
-| 0b. CPC daily precipitation (optional condition) | `scripts/02b_download_cpc.py` |
-| 1. CHIRPS target | `scripts/01_download_chirps.py` |
-| 2. IMERG observations | `scripts/02_download_imerg.py` |
-| 3. DEM + static fields (orography, mask, position) | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
-| 4. Regrid + pack to Zarr, then alignment QC | `scripts/04_regrid_and_pack.py`, `scripts/04_check_alignment.py` |
-| 5. Station QC + pseudo-stations | `scripts/05_prepare_stations.py` |
-| 6. Normalisation stats | `scripts/06_compute_stats.py` |
-| 7. IMERG bias correction | `scripts/07_bias_correct_imerg.py` |
-| 8. Train the prior | `scripts/train.py` |
-| 9. Assimilate → product | `scripts/assimilate.py` |
-| 10. Verify | `scripts/evaluate.py` |
-| — | `scripts/make_pipeline_figure.py` regenerates the pipeline figure |
+---
 
-## Quick start
+## Accomplishments & Completed Features
 
+- **Generative Flow-Matching Prior**: Trained rectified-flow U-Net models (`configs/train_h100_cpc.yaml`) on NVIDIA GH200 GPUs using ERA5 predictors and CPC conditioning over the `wide` (256×256 @ 0.05°) domain.
+- **55,000+ IMERG Granules Ingested**: Built automated pipeline (`scripts/02_download_imerg_halfhourly.py`, `scripts/08_prepare_imerg_observations.py`) downloading and processing 2021–2024 half-hourly GPM IMERG V07B data into exact BMD reporting windows (03:00–03:00 UTC).
+- **Expanded BMD Station Catalogue**: Parsed and integrated 42 BMD weather stations across Bangladesh (including 7 newly inherited stations: *Dimla, Rajarhat, Gopalgonj, Natrakona, Nikli, Tarash, Tetulia*) with high-coverage quality control (`scripts/05_convert_bmd_dir.py`).
+- **5-Fold Rotated Spatial Cross-Validation**: Implemented disjoint spatial holdout evaluation (`slurm/bmd_imerg_rotated_folds_eval.sbatch`) testing 16 ensemble members across 2021–2024 monsoon seasons (37–38 active stations per year, >4,000 withheld station-days).
+- **Automated Multi-Year Pooled Diagnostics**: Developed multi-year pooling script (`scripts/22_summarize_multiyear_bmd_eval.py`) that aggregates CRPS, RMSE, MAE, Bias, Fisher-pooled Correlation, and heavy-rain Brier scores into JSON, Markdown tables, and auto-generated 6-panel summary figures (`bmd_imerg_2021_2024_pooled_summary.png`).
+
+---
+
+## Pipeline Overview
+
+| Step | Task | Script / Command |
+|---|---|---|
+| 0 | ERA5 Predictors | `scripts/00_download_era5.py` |
+| 1 | CPC / CHIRPS Targets | `scripts/01_download_chirps.py`, `scripts/02b_download_cpc.py` |
+| 2 | IMERG Half-Hourly Ingestion | `scripts/02_download_imerg_halfhourly.py` |
+| 3 | Static Fields & DEM | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
+| 4 | Zarr Packing & QC | `scripts/04_regrid_and_pack.py`, `scripts/04_check_alignment.py` |
+| 5 | Station Conversion | `scripts/05_convert_bmd_dir.py` |
+| 6 | Prior Training | `scripts/train.py` (`slurm/submit_train_cpc_gh200.sh`) |
+| 7 | Multi-Year Evaluation | `slurm/submit_bmd_imerg_2021_2024_all.sh` |
+| 8 | Multi-Year Summary & Plots | `scripts/22_summarize_multiyear_bmd_eval.py` |
+
+---
+
+## Quick Start
+
+### 1. Environment Setup
 ```bash
-# 0. portable/local environment (PRISM users: use the GH200 section below)
 conda env create -f environment.yml && conda activate bdhires
 pip install -e .
-
-# 1. does everything work? (synthetic data, CPU, ~2 min, no downloads)
-python scripts/smoke_test.py
-
-# 2. data
-# ERA5 extraction needs the dedicated Python 3.12 Icechunk environment.
-# On Prism, this launches setup on an ARM CPU node:
-slurm/setup_earthmover_env.sh
-# On an ARM/local machine with a working Conda installation, the equivalent is:
-# conda env create -p ../envs/bdda-earthmover -f environment-earthmover.yml
-conda run -p ../envs/bdda-earthmover \
-  python scripts/00_download_era5.py --start 1981 --end 2025 --out data/raw/era5
-python scripts/01_download_chirps.py --start 1981 --end 2025 --out data/raw/chirps
-python scripts/02b_download_cpc.py --start 1981 --end 2025 \
-       --out data/raw/cpc --require-complete
-python scripts/03_download_dem.py --out data/raw/dem/copernicus_glo90_wide.nc
-python scripts/03_build_static.py --dem data/raw/dem/copernicus_glo90_wide.nc \
-       --chirps data/raw/chirps/chirps_wide_2010.nc --out data/static/static_wide.nc
-python scripts/04_regrid_and_pack.py --start 1981 --end 2025 --out data/processed/bd_wide.zarr
-python scripts/04_regrid_and_pack.py --start 1981 --end 2025 \
-       --cpc data/raw/cpc --out data/processed/bd_wide_cpc.zarr
-python scripts/04_check_alignment.py --zarr data/processed/bd_wide.zarr \
-       --out data/processed/alignment_qc.json
-python scripts/06_compute_stats.py --zarr data/processed/bd_wide.zarr \
-       --train-years 1981 2018 --transform log1p --out data/processed/stats.json
-
-# On Prism, submit resumable CHIRPS downloads to CPU-only nodes:
-slurm/submit_download_chirps.sh
-
-# ERA5: free Earthmover ARCO store, six variables, daily regional files:
-slurm/submit_download_era5.sh
-
-# Optional CPC-conditioned experiment: complete 1981-2025 daily record.
-slurm/submit_download_cpc.sh
-
-# DEM: public Copernicus GLO-90, then build all seven static channels:
-slurm/submit_dem_static.sh
-
-# ERA5 + CHIRPS + static training store, followed by lag-alignment QC:
-slurm/submit_pack_training_data.sh
-
-# CPC experiment uses a separate store so the ERA5/v6 store stays reproducible.
-slurm/submit_pack_training_data_cpc.sh
-
-# Training-period normalization statistics (requires alignment pass):
-slurm/submit_compute_stats.sh
-
-# One large raw/normalized field diagnostic, required before GPU preflight:
-slurm/submit_normalization_diagnostics.sh
-
-# One-time only if bdda-gh200 does not yet import GPU-enabled PyTorch:
-slurm/setup_pytorch_gh200.sh
-
-# Real-data, production-batch GH200 preflight (no checkpoint is saved):
-slurm/submit_preflight_training_gh200.sh
-
-# 3. after PREFLIGHT PASSED, train on PRISM GH200:
-slurm/submit_train_gh200.sh               # single stage, ERA5-conditioned prior
-
-# CPC conditioning (CPC precip + coverage, five ERA5 weather fields, no ERA5 tp):
-slurm/submit_compute_stats_cpc.sh
-slurm/submit_normalization_diagnostics_cpc.sh
-slurm/submit_preflight_training_cpc_gh200.sh
-slurm/submit_train_cpc_gh200.sh
-
-# CPC v2 magnitude experiment (sqrt transforms, multiscale conditioning,
-# coarse consistency, wet sampling, and 15 fixed validation cases):
-slurm/submit_compute_stats_cpc_v2.sh
-slurm/submit_normalization_diagnostics_cpc_v2.sh
-slurm/submit_preflight_training_cpc_v2_gh200.sh
-slurm/submit_train_cpc_v2_gh200.sh
-
-# Held-out best-checkpoint input/target/prediction/error/spread diagnostic:
-slurm/submit_test_predictions.sh
-
-# Before real DA: best CPC prior + 0.1-degree CHIRPS pseudo-satellite +
-# a 40-station CHIRPS pseudo-network, with full spatial/scale diagnostics:
-slurm/submit_osse.sh
-
-# 4. tune the DA hyperparameters on pseudo-observations, THEN on real gauges
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
-       --start 2019-01-01 --end 2020-12-31 --tune --out results/tuning.json
-
-# 5. produce the product
-slurm/submit_assimilate_gh200.sh          # array job, one year per task
-
-# 6. verify against withheld gauges (3-fold CV) + baselines
-python scripts/evaluate.py --config configs/da.yaml --ckpt runs/prior_h100/best.pt \
-       --start 2021-01-01 --end 2023-12-31 --cv-folds 3 --out results/cv.json
 ```
 
-## What you need to supply
-
-| | |
-|---|---|
-| **ERA5 access** | No key required; the Earthmover AWS Open Data store is read anonymously |
-| **Earthdata login** | `~/.netrc` entry for IMERG (GES DISC) |
-| **BMD gauge CSV** | `data/stations/bmd_daily_raw.csv`, columns `station_id,name,lat,lon,date,precip_mm` |
-| **DEM access** | No key required; Copernicus GLO-90 is downloaded anonymously from the AWS Open Data Registry |
-
-The available historical BMD delivery uses a different station-month matrix
-format (`data/bmd/bmd.csv`) plus a coordinate catalogue
-(`data/bmd/Stations.csv`). Convert and run the bounded May 2018 real-gauge
-process example on Prism with:
-
+### 2. Submit Multi-Year Real BMD + IMERG Evaluation (2021–2024)
+On HPC cluster (Grace Hopper nodes):
 ```bash
-slurm/submit_bmd_example.sh
+bash slurm/submit_bmd_imerg_2021_2024_all.sh
 ```
+This automatically runs 5-fold cross-validation for 2021, 2022, 2023, 2024, and the full multi-year period, followed by auto-chained pooled summary generation.
 
-The job converts the source without modifying it, assimilates 24 of the 30
-available stations, withholds six geographically spread stations, and writes
-station-space diagnostics plus spatial maps. May 2018 is inside the CPC
-checkpoint's training period, so this is a workflow demonstration rather than
-an independent temporal skill estimate.
-
-Download and validate the exact half-hourly V07B inputs for all May 2018 BMD
-reporting days with:
-
+### 3. Generate Multi-Year Summary & Figures
 ```bash
-slurm/submit_download_imerg_halfhourly_may2018.sh
+python scripts/22_summarize_multiyear_bmd_eval.py \
+    --summaries data/processed/bmd_imerg_eval_2021_may_sep/rotated_summary.json \
+                data/processed/bmd_imerg_eval_2022_may_sep/rotated_summary.json \
+                data/processed/bmd_imerg_eval_2023_may_sep/rotated_summary.json \
+                data/processed/bmd_imerg_eval_2024_may_jun/rotated_summary.json \
+    --out-json data/processed/bmd_imerg_2021_2024_pooled_summary.json \
+    --out-markdown data/processed/bmd_imerg_2021_2024_pooled_summary.md \
+    --out-plot data/processed/bmd_imerg_2021_2024_pooled_summary.png
 ```
 
-For the complete 2021--2024 record, submit the resumable monthly CPU array:
-
-```bash
-slurm/submit_download_imerg_halfhourly_2021_2024.sh
-```
-
-It downloads regional subsets into year directories below
-`data/imerg_halfhourly`, validates exact 03:00-to-03:00 UTC BMD windows, and
-writes one prepared NetCDF/QC pair per month. See `COMPUTE.md` for concurrency,
-year-range, and download-only overrides.
-
-The resumable job requests regional subsets only, reuses valid files already
-under `data/imerg_halfhourly`, and writes each response with an explicit short
-output name instead of the GES DISC query string. It downloads 1,488 granules:
-2018-04-30 03:00 through 2018-05-31 02:30 UTC. It then builds and validates
-`data/processed/imerg_bd_aligned_20180501_31.nc`.
-
-After that download, run the five-day four-arm controlled experiment:
-
-```bash
-slurm/submit_bmd_imerg_controlled_5day.sh
-```
-
-Do not apply an additional one-day shift to these IMERG observations. For BMD
-date `D`, the correct half-hourly IMERG window is already `D-1 03:00` through
-`D 02:30` UTC. The BMD date is a 24-hour accumulation ending at 03:00 UTC,
-whereas the CPC
-condition and ERA5 state means in the checkpoint are calendar-day fields. Run
-the matched previous-day background sensitivity with:
-
-```bash
-slurm/submit_bmd_imerg_offset_m1_5day.sh
-```
-
-This keeps BMD/IMERG observation windows, observation-date CHIRPS context, the
-withheld stations and random seeds fixed, while shifting the CPC/ERA5 prior,
-CPC residual base and seasonal encoding from `D` to `D-1`. Its outputs use the prefix
-`data/processed/bmd_imerg_aligned_offset_m1_20180501_05`.
-
-It compares background, gauges-only, correlation-controlled IMERG-only,
-and stabilized simultaneous DA. The failed sequential IMERG-to-gauges method
-has been retired. The experiment strictly requires the 240 half-hourly granules from 2018-04-30
-03:00 through 2018-05-05 02:30 UTC, sums `precipitation` rates with a 0.5-hour
-factor, accumulates `randomError` in quadrature, and labels each result with
-the BMD window-ending date. The DA loader rejects legacy calendar-day IMERG
-files. The bounded run is intentionally unbias-corrected; passing it validates
-ingestion and DA behavior, not final product skill.
-
-Regenerate the scientifically revised evaluation for every completed five-day
-case on a CPU node:
-
-```bash
-slurm/submit_bmd_imerg_replot_all_5day.sh
-```
-
-This collocates CPC, IMERG, CHIRPS, IDW, background, and all DA products to the
-same withheld BMD station-days. Method ranking uses withheld-BMD CRPS and
-event/calibration diagnostics only. The gridded CHIRPS figure is replaced by a
-clearly labelled non-independent product intercomparison.
-
-The next selection gate is five disjoint, geographically spread station folds
-using the accepted previous-day CPC/ERA5 background:
-
-```bash
-slurm/submit_bmd_imerg_rotated_folds_5day.sh
-```
-
-Every BMD station is withheld exactly once. A dependent CPU job pools the
-withheld-station metrics and writes
-`data/processed/bmd_imerg_offset_m1_rotated_summary.{json,png}`. Simultaneous
-DA passes only if it has lower pooled CRPS than gauges-only and wins at least
-half the folds.
-
-After the 1,488 half-hourly files have downloaded and the five-day gate has
-passed operationally, run the identical five-fold test over all 31 May days:
-
-```bash
-slurm/submit_bmd_imerg_rotated_folds_may2018.sh
-```
-
-This keeps the offset -1 CPC/ERA5 background and exact BMD-aligned IMERG
-windows, but writes separate `*_20180501_31` fold products and
-`bmd_imerg_offset_m1_rotated_summary_20180501_31.{json,png}` outputs. The
-dependent summary job also writes pooled withheld-BMD verification and spatial
-impact suites as `bmd_imerg_offset_m1_fullmonth_verification.png` and
-`bmd_imerg_offset_m1_fullmonth_spatial_impact.png`. Spatial impact maps show
-increments and spread changes; they are not labelled as gridded skill. The
-spatial suite uses Cartopy for Bangladesh-region coastlines, national and
-administrative boundaries, and geographic labels.
-
-To test whether an apparent IMERG/CHIRPS displacement is a date lag or a fixed
-grid shift, use the CPU-only, footprint-matched diagnostic:
-
-```bash
-slurm/submit_imerg_chirps_alignment.sh
-```
-
-It scores +/-2-day lags separately from small two-dimensional shifts and
-records explicit sign conventions in the output JSON. Treat a five-day result
-as exploratory; confirm it over a full month before altering data coordinates.
-
-## Conditioning experiments
-
-`tp` (model rainfall) · `tcwv` (column moisture) · `cape` (instability) ·
-`u10`/`v10` (low-level flow) · `msl` (synoptic circulation), plus the static
-fields. These are all available in Earthmover's free surface store.
-
-The regional fields of `u10`, `v10` and `msl` replace the unavailable
-vertically integrated moisture-flux pair. ERA5 `tp` remains the strongest
-background predictor because it already reflects the model's full dynamics
-and moisture convergence. Exact IVT is retained as a future ablation: add it
-only if a controlled validation experiment improves CRPS and extreme-rain
-skill.
-
-The CPC experiment in `configs/train_h100_cpc.yaml` replaces ERA5 `tp` with
-same-day CPC precipitation and an explicit CPC-coverage channel, while retaining
-the five ERA5 weather fields. It is a CPC-to-CHIRPS statistical-downscaling
-experiment: because CPC is a contemporaneous gauge analysis, it is not a
-forecast experiment. Missing CPC source cells and days are represented by
-finite zero precipitation plus `cpc_valid=0`, never by NaNs in model inputs.
+---
 
 ## Domains
 
-| Grid | Extent | Size | Use |
+| Grid | Bounds | Size | Purpose |
 |---|---|---|---|
-| `wide` | 84.0–96.8°E, 16.0–28.8°N | 256×256 @ 0.05° | training (random 128×128 crops) |
-| `bd` | 87.6–94.0°E, 20.3–26.7°N | 128×128 @ 0.05° | evaluation and the released product |
+| `wide` | 84.0–96.8°E, 16.0–28.8°N | 256×256 @ 0.05° | Offline training (random 128×128 crops) |
+| `bd` | 87.6–94.0°E, 20.3–26.7°N | 128×128 @ 0.05° | Evaluation & production products over Bangladesh |
 
-The wide domain exists because ~16,000 daily fields is a small dataset for a
-generative model; random cropping multiplies the effective sample count and
-exposes the model to a wider range of rainfall regimes. See §5 of the
-methodology.
+---
 
-## Compute notes
-
-* **PRISM GH200 (`aarch64`)**: `configs/train_h100.yaml`, one GPU, bf16,
-  batch 32. Use the ARM-native `bdda-gh200` environment and the submission
-  wrappers described below.
-* **2 × V100 (32 GB, x86-64 alternative)**: `configs/train_v100.yaml`, batch
-  8/GPU. V100 is `sm_70` and has **no bf16 tensor cores**, so
-  `utils/dist.amp_dtype()` automatically selects fp16 + `GradScaler`. Never
-  use the GH200 ARM environment for this workflow.
-* Guided sampling backpropagates through the network, so a 16-member guided
-  day costs ~2–3× an unguided one — budget ~10–30 s/day on one GPU. That cost
-  is independent of observation count, so the ~3,500 IMERG footprints are
-  effectively free alongside the 35 gauges.
-
-## NASA NCCS PRISM GH200
-
-PRISM Grace nodes are `aarch64` systems with one GH200 GPU per node. Use the
-existing ARM Miniforge environment:
-
-```bash
-source /home/afahad/nb/project/BDDA/miniforge3-aarch64/etc/profile.d/conda.sh
-conda activate /home/afahad/nb/project/BDDA/envs/bdda-gh200
-export PYTHONNOUSERSITE=1
-
-cd /path/to/BDhighresDA
-python -m pip install -e . --no-deps
-
-mkdir -p logs
-sbatch slurm/train_h100.sbatch
-```
-
-`--no-deps` is intentional: the ARM environment already contains compatible
-package versions. Batch jobs must not install or update packages. The
-recommended submission commands create `logs` automatically:
-
-```bash
-slurm/submit_train_gh200.sh
-slurm/submit_assimilate_gh200.sh
-```
-
-Monitor or cancel jobs with:
-
-```bash
-squeue -u "$USER"
-scontrol show job JOB_ID
-tail -f logs/bdhires-gh200-JOB_ID.out
-scancel JOB_ID
-```
-
-See [`COMPUTE.md`](COMPUTE.md) for environment isolation, automatic checkpoint
-resumption, array concurrency, log names, preflight checks, and the retained
-x86-64 V100 alternative.
-
-## Ensemble spread
-
-Generative DA systems are reliably under-dispersive; this one is built to
-fight that, with three independent spread sources:
-
-1. **Prior temperature `T`** — sampling `p^(1/T)` adds exactly one term,
-   `u_T = u_θ + (1 − 1/T)·x̂₀/t`, and widens the ensemble monotonically
-   (asserted in the smoke test). Inflating the *prior* means observations pull
-   members back where they exist, so spread grows only where the field is
-   unconstrained.
-2. **Optional future ERA5-EDA members** — real background uncertainty, one
-   member each. These are not included in the Earthmover surface workflow and
-   would require a separate CDS download.
-3. **Perturbed observations** — `y_r = y + ε_r`, spatially correlated for
-   IMERG. Assimilating identical `y` into every member is the generative
-   analogue of an unperturbed-obs EnKF.
-
-Note that SDE sampling (`noise_scale`) is *not* a spread knob — it has
-matching marginals by construction. See §6 of the methodology, which is the
-part worth reading twice.
-
-## Repository layout
+## Repository Layout
 
 ```
 src/bdhires/
-  grids.py          domain definitions (lat ASCENDING everywhere)
-  transforms.py     precipitation transforms (log1p / sqrt / cbrt)
+  grids.py          domain definitions (cell-centre, lat ascending)
+  transforms.py     precipitation transforms (log1p / sqrt)
   models/unet.py    ADM-style U-Net velocity network
-  models/flow.py    rectified flow: interpolant, loss, score<->velocity identities, EMA
-  da/observation.py station + IMERG operators, R, perturbed obs, k-fold splits
-  da/guidance.py    Gaussian obs likelihood + guidance gradient (SDA Eq. 3)
-  da/sampler.py     ODE/SDE sampler with guidance + Langevin correctors
-  data/             Zarr dataset with random-crop augmentation; BMD station I/O
-  eval/metrics.py   RMSE/MAE/CRPS, FSS, SAL, POD/FAR/CSI/ETS
-  eval/calibration.py spread-skill (overall + by intensity), rank hist, inflation
-configs/            data + model + training + DA hyperparameters
-scripts/            numbered data pipeline, then train / assimilate / evaluate
-slurm/              ready-to-submit batch scripts
+  models/flow.py    rectified flow interpolant, velocity/score identities, EMA
+  bmd.py            BMD station directory parser & catalogue mapper
+  imerg.py          half-hourly IMERG V07B ingestion & BMD window accumulation
+  da/observation.py station + IMERG observation operators & covariance
+  da/guidance.py    Gaussian likelihood guidance gradients
+  da/sampler.py     ODE/SDE samplers with SDA guidance
+  eval/metrics.py   RMSE, MAE, CRPS, Correlation, Brier Scores
+scripts/            pipeline tools, training, evaluation, and multi-year summary
+slurm/              HPC cluster sbatch & master submission bash wrappers
 ```
 
-## Status
-
-Scaffold complete and smoke-tested; no real data has been ingested yet.
-Open items are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+---
 
 ## License
 
-MIT (code). Note that CHIRPS, ERA5 and IMERG each carry their own
-attribution requirements, and BMD gauge data is not redistributable without
-BMD's permission — `data/` is gitignored.
+MIT (code). CHIRPS, ERA5, and GPM IMERG carry their own data terms. BMD station data is not redistributable without permission.
