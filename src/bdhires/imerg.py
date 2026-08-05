@@ -127,18 +127,13 @@ def _bmd_window_bounds(day: date, end_hour_utc: int) -> tuple[datetime, datetime
 
 def discover_imerg_half_hourly_files(
     directory: str | Path,
-    start: str | np.datetime64,
-    end: str | np.datetime64,
-    *,
-    accumulation_end_hour_utc: int = 3,
-) -> list[Path]:
-    """Return the exact 48 half-hour granules for every requested BMD date.
     start: str | np.datetime64 | date,
     end: str | np.datetime64 | date,
     accumulation_end_hour_utc: int = 3,
     allow_missing: bool = False,
 ) -> list[Path | None]:
     """Find all half-hourly granules required for BMD reporting windows."""
+
 
     directory = Path(directory)
     if not directory.is_dir():
