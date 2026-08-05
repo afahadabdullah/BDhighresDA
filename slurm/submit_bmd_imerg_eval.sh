@@ -20,19 +20,8 @@ DAILY_CSV="$ROOT/bmd_daily.csv"
 STATION_CSV="$ROOT/bmd_stations.csv"
 QC_JSON="$ROOT/bmd_qc.json"
 
-export ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
-PYTHON_BIN="${PYTHON_BIN:-$ENV_PREFIX/bin/python}"
+# Station conversion will be handled on compute nodes inside slurm/bmd_imerg_rotated_folds_eval.sbatch
 
-if [[ -x "$PYTHON_BIN" ]]; then
-    "$PYTHON_BIN" scripts/05_convert_bmd_dir.py \
-        --data-dir "$BMD_DATA_DIR" \
-        --stations "$BMD_STATIONS" \
-        --start "$BMD_START" \
-        --end "$BMD_END" \
-        --out "$DAILY_CSV" \
-        --summary "$STATION_CSV" \
-        --report "$QC_JSON"
-fi
 
 array_result="$(sbatch --parsable \
     --export="ALL,BMD_START=$BMD_START,BMD_END=$BMD_END,BMD_EVAL_LABEL=$BMD_EVAL_LABEL,BMD_DATA_DIR=$BMD_DATA_DIR,BMD_STATIONS=$BMD_STATIONS,BMD_MEMBERS=$BMD_MEMBERS" \

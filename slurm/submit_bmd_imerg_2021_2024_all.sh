@@ -17,43 +17,39 @@ echo "============================================================"
 # Helper function to submit an eval run and extract summary job ID
 submit_period() {
     local start="$1" end="$2" label="$3"
+    shift 3
     local output
     output="$(BMD_START="$start" BMD_END="$end" BMD_EVAL_LABEL="$label" BMD_MEMBERS="$BMD_MEMBERS" \
       bash slurm/submit_bmd_imerg_eval.sh "$@")"
-    echo "$output"
+    echo "$output" >&2
     local job_id
-    job_id="$(echo "$output" | grep "^SUMMARY_JOB:" | cut -d':' -f2)"
+    job_id="$(echo "$output" | grep "^SUMMARY_JOB:" | cut -d':' -f2 | tr -d '[:space:]')"
     echo "$job_id"
 }
 
 # 1. Year 2021 May - September (Monsoon)
-echo -e "\n[1/5] Submitting 2021 May--September..."
-out2021="$(submit_period "2021-05-01" "2021-09-30" "2021_may_sep" "$@")"
-job2021="$(echo "$out2021" | tail -n 1)"
+echo -e "\n[1/5] Submitting 2021 May--September..." >&2
+job2021="$(submit_period "2021-05-01" "2021-09-30" "2021_may_sep" "$@")"
 
 # 2. Year 2022 May - September (Monsoon)
-echo -e "\n[2/5] Submitting 2022 May--September..."
-out2022="$(submit_period "2022-05-01" "2022-09-30" "2022_may_sep" "$@")"
-job2022="$(echo "$out2022" | tail -n 1)"
+echo -e "\n[2/5] Submitting 2022 May--September..." >&2
+job2022="$(submit_period "2022-05-01" "2022-09-30" "2022_may_sep" "$@")"
 
 # 3. Year 2023 May - September (Monsoon)
-echo -e "\n[3/5] Submitting 2023 May--September..."
-out2023="$(submit_period "2023-05-01" "2023-09-30" "2023_may_sep" "$@")"
-job2023="$(echo "$out2023" | tail -n 1)"
+echo -e "\n[3/5] Submitting 2023 May--September..." >&2
+job2023="$(submit_period "2023-05-01" "2023-09-30" "2023_may_sep" "$@")"
 
 # 4. Year 2024 May - June (Available Archive Period)
-echo -e "\n[4/5] Submitting 2024 May--June..."
-out2024="$(submit_period "2024-05-01" "2024-06-30" "2024_may_jun" "$@")"
-job2024="$(echo "$out2024" | tail -n 1)"
+echo -e "\n[4/5] Submitting 2024 May--June..." >&2
+job2024="$(submit_period "2024-05-01" "2024-06-30" "2024_may_jun" "$@")"
 
 # 5. Full Combined Multi-Year Record (2021-05-01 through 2024-06-30)
-echo -e "\n[5/5] Submitting Full Multi-Year Record (2021-05-01 to 2024-06-30)..."
-outfull="$(submit_period "2021-05-01" "2024-06-30" "2021_2024_full" "$@")"
-jobfull="$(echo "$outfull" | tail -n 1)"
+echo -e "\n[5/5] Submitting Full Multi-Year Record (2021-05-01 to 2024-06-30)..." >&2
+jobfull="$(submit_period "2021-05-01" "2024-06-30" "2021_2024_full" "$@")"
 
 # 6. Schedule dependent pooled multi-year summary job after all yearly summaries finish
 dep_jobs="${job2021}:${job2022}:${job2023}:${job2024}"
-echo -e "\n[Final] Submitting dependent multi-year pooled summary job (afterok:${dep_jobs})..."
+echo -e "\n[Final] Submitting dependent multi-year pooled summary job (afterok:${dep_jobs})..." >&2
 
 pooled_result="$(sbatch --parsable --dependency="afterok:${dep_jobs}" "$@" \
     slurm/bmd_imerg_multiyear_pooled_summary.sbatch)"
