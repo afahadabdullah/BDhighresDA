@@ -73,6 +73,41 @@ from bdhires.transforms import PrecipTransform  # noqa: E402
 
 SEASONS = {"DJF": (12, 1, 2), "MAM": (3, 4, 5), "JJAS": (6, 7, 8, 9), "ON": (10, 11)}
 SEASON_ORDER = ["DJF", "MAM", "JJAS", "ON"]
+MONTH_ORDER = [f"M{month:02d}" for month in range(1, 13)]
+
+
+def strata_for(mode: str) -> list[str]:
+    """The stratification labels, in a fixed order, for ``--season-mode``."""
+    if mode == "month":
+        return MONTH_ORDER
+    if mode == "season":
+        return SEASON_ORDER
+    raise ValueError(f"unknown season mode {mode!r}")
+
+
+def stratify(dates: np.ndarray, mode: str) -> np.ndarray:
+    """Label each date with its stratum.
+
+    ``season`` uses the four South Asian seasons. Note that this puts **May in
+    MAM and June in JJAS**, so a May-June window straddles two bins and the
+    JJAS map is fitted mostly on July-August peak-monsoon intensities. Applying
+    that to monsoon-onset June mis-scales it; that is exactly what degraded the
+    2024 holdout, whose window is May-June only while the other years run
+    May-September.
+
+    ``month`` sidesteps the problem: each calendar month gets its own map, so a
+    month is only ever corrected by statistics from the same month in other
+    years. With 5x5 spatial pooling there are thousands of samples per
+    month-cell here, which is ample.
+    """
+    dates = np.asarray(dates).astype("datetime64[D]")
+    months = dates.astype("datetime64[M]").astype(int) % 12 + 1
+    if mode == "month":
+        return np.array([f"M{month:02d}" for month in months], dtype=object)
+    labels = np.empty(len(dates), dtype=object)
+    for name, month_set in SEASONS.items():
+        labels[np.isin(months, month_set)] = name
+    return labels
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,6 +122,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stats", required=True, help="stats JSON holding precip_transform")
     parser.add_argument("--grid", default="bd")
     parser.add_argument("--factor", type=int, default=2, help="0.05 -> 0.1 degree block factor")
+    parser.add_argument(
+        "--months",
+        nargs="+",
+        type=int,
+        default=None,
+        help="restrict fit AND holdout to these calendar months, e.g. --months 5 6. "
+        "Use this to match the seasonal composition across years when one year's "
+        "window is shorter than the others.",
+    )
+    parser.add_argument(
+        "--season-mode",
+        choices=("season", "month"),
+        default="season",
+        help="'season' groups DJF/MAM/JJAS/ON (May and June fall in DIFFERENT bins); "
+        "'month' fits one map per calendar month, which avoids correcting a month "
+        "with another month's distribution. Prefer 'month' when the record is long "
+        "enough, which with 5x5 pooling it usually is.",
+    )
     parser.add_argument(
         "--pool",
         type=int,
@@ -303,11 +356,8 @@ def load_chirps_on_imerg_lattice(
 
 
 def season_of(dates: np.ndarray) -> np.ndarray:
-    months = dates.astype("datetime64[M]").astype(int) % 12 + 1
-    labels = np.empty(len(dates), dtype=object)
-    for name, month_set in SEASONS.items():
-        labels[np.isin(months, month_set)] = name
-    return labels
+    """Backwards-compatible alias for season-mode stratification."""
+    return stratify(dates, "season")
 
 
 def main() -> None:
@@ -319,12 +369,27 @@ def main() -> None:
     transform = PrecipTransform.from_dict(stats["precip_transform"])
 
     time, imerg, lat, lon = load_imerg_files(args.imerg)
+
+    if args.months:
+        keep_month = np.isin(time.astype("datetime64[M]").astype(int) % 12 + 1, args.months)
+        if not keep_month.any():
+            raise ValueError(f"no days in months {sorted(args.months)} across the IMERG files")
+        dropped = int((~keep_month).sum())
+        time, imerg = time[keep_month], imerg[keep_month]
+        print(
+            f"[fit] --months {sorted(args.months)}: kept {len(time)} days, dropped {dropped}. "
+            "Every year is now restricted to the same calendar months, so a short "
+            "year is no longer corrected by another year's different season.",
+            flush=True,
+        )
+
     chirps = load_chirps_on_imerg_lattice(args.zarr, args.grid, args.factor, time)
     if chirps.shape != imerg.shape:
         raise ValueError(f"shape mismatch: IMERG {imerg.shape} versus CHIRPS {chirps.shape}")
 
     years = time.astype("datetime64[Y]").astype(int) + 1970
-    seasons = season_of(time)
+    strata = strata_for(args.season_mode)
+    seasons = stratify(time, args.season_mode)
     available_years = sorted(set(int(y) for y in years))
     if len(available_years) < 2:
         raise ValueError(
@@ -349,7 +414,9 @@ def main() -> None:
         "pool": np.int32(args.pool),
         "factor": np.int32(args.factor),
         "holdout_years": np.asarray(available_years, dtype=np.int32),
-        "season_order": np.asarray(SEASON_ORDER, dtype="U4"),
+        "season_order": np.asarray(strata, dtype="U4"),
+        "stratify_mode": np.asarray(args.season_mode, dtype="U8"),
+        "months": np.asarray(sorted(args.months) if args.months else [], dtype=np.int32),
     }
     report: dict = {
         "source_files": list(args.imerg),
@@ -358,6 +425,8 @@ def main() -> None:
         "pool": args.pool,
         "n_quantiles": args.n_quantiles,
         "wet_threshold": args.wet_threshold,
+        "season_mode": args.season_mode,
+        "months": sorted(args.months) if args.months else None,
         "holdouts": {},
     }
 
@@ -365,13 +434,13 @@ def main() -> None:
         fit_mask = years != holdout
         n_fit_years = len(set(int(y) for y in years[fit_mask]))
         source_knots = np.zeros(
-            (len(SEASON_ORDER), args.n_quantiles, nlat, nlon), np.float32
+            (len(strata), args.n_quantiles, nlat, nlon), np.float32
         )
         target_knots = np.zeros_like(source_knots)
-        cuts = np.zeros((len(SEASON_ORDER), nlat, nlon), np.float32)
-        fitted = np.zeros((len(SEASON_ORDER), nlat, nlon), bool)
+        cuts = np.zeros((len(strata), nlat, nlon), np.float32)
+        fitted = np.zeros((len(strata), nlat, nlon), bool)
 
-        for season_index, season in enumerate(SEASON_ORDER):
+        for season_index, season in enumerate(strata):
             select = fit_mask & (seasons == season)
             if not select.any():
                 continue
@@ -432,6 +501,7 @@ def main() -> None:
                 source_knots,
                 target_knots,
                 cuts,
+                strata=strata,
             )
             reference = chirps[holdout_mask]
             raw = imerg[holdout_mask]
@@ -447,6 +517,42 @@ def main() -> None:
                     np.sqrt(np.mean((corrected[both] - reference[both]) ** 2))
                 ),
             )
+            # Per-stratum breakdown. A map that helps in one month and hurts in
+            # another is invisible in the pooled number, and that is exactly the
+            # May-versus-June behaviour that made the short 2024 window look bad.
+            by_stratum = {}
+            holdout_labels = seasons[holdout_mask]
+            for label in strata:
+                inside = holdout_labels == label
+                if not inside.any():
+                    continue
+                r, c, x = raw[inside], reference[inside], corrected[inside]
+                ok = np.isfinite(r) & np.isfinite(c)
+                if not ok.any():
+                    continue
+                by_stratum[label] = {
+                    "n_days": int(inside.sum()),
+                    "raw_bias_mm": float(np.mean(r[ok] - c[ok])),
+                    "corrected_bias_mm": float(np.mean(x[ok] - c[ok])),
+                    "raw_wet_fraction": wet_frequency(r[ok], args.wet_threshold),
+                    "corrected_wet_fraction": wet_frequency(x[ok], args.wet_threshold),
+                    "chirps_wet_fraction": wet_frequency(c[ok], args.wet_threshold),
+                }
+            diagnostics["by_stratum"] = by_stratum
+            for label, entry in by_stratum.items():
+                flag = (
+                    "  <-- correction makes this stratum WORSE"
+                    if abs(entry["corrected_bias_mm"]) > abs(entry["raw_bias_mm"]) + 0.05
+                    else ""
+                )
+                print(
+                    f"[fit]   {holdout} {label}: {entry['n_days']:3d}d  bias "
+                    f"{entry['raw_bias_mm']:+.3f} -> {entry['corrected_bias_mm']:+.3f}  "
+                    f"wet {entry['raw_wet_fraction']:.3f} -> "
+                    f"{entry['corrected_wet_fraction']:.3f} "
+                    f"(CHIRPS {entry['chirps_wet_fraction']:.3f}){flag}",
+                    flush=True,
+                )
             print(
                 f"[fit] holdout {holdout}: bias {diagnostics['raw_bias_mm']:+.3f} -> "
                 f"{diagnostics['corrected_bias_mm']:+.3f} mm/day, wet fraction "
@@ -506,10 +612,23 @@ def apply_map_to_series(
     source_knots: np.ndarray,
     target_knots: np.ndarray,
     cuts: np.ndarray,
+    strata: list[str] | None = None,
 ) -> np.ndarray:
-    """Apply a fitted leave-one-year-out map to a (T, nlat, nlon) IMERG series."""
+    """Apply a fitted leave-one-year-out map to a (T, nlat, nlon) IMERG series.
+
+    ``strata`` must be the same label list, in the same order, that the map was
+    fitted with -- otherwise stratum *i* of the map would be applied to a
+    different stratum of the data. It defaults to the four seasons only for
+    backwards compatibility with maps written before ``--season-mode`` existed.
+    """
+    strata = list(strata) if strata is not None else SEASON_ORDER
+    if source_knots.shape[0] != len(strata):
+        raise ValueError(
+            f"map has {source_knots.shape[0]} strata but {len(strata)} labels were "
+            "supplied; the stratification used at fit time and apply time must match"
+        )
     out = np.full_like(values, np.nan, dtype=np.float32)
-    for season_index, season in enumerate(SEASON_ORDER):
+    for season_index, season in enumerate(strata):
         select = np.where(seasons == season)[0]
         if not len(select):
             continue
@@ -546,12 +665,44 @@ def load_and_apply(
             "evaluation year would leak CHIRPS into the observation."
         )
     prefix = f"y{holdout_year}"
+    # Stratify the incoming dates exactly as the map was fitted. Reading the mode
+    # back from the archive (rather than assuming seasons) is what keeps a
+    # month-mode map from being applied with season labels.
+    mode = str(archive["stratify_mode"]) if "stratify_mode" in archive else "season"
+    strata = (
+        [str(s) for s in archive["season_order"]]
+        if "season_order" in archive
+        else strata_for(mode)
+    )
+    dates = np.asarray(dates).astype("datetime64[D]")
+    labels = stratify(dates, mode)
+
+    unfitted = sorted({str(s) for s in labels} - set(strata))
+    if unfitted:
+        raise ValueError(
+            f"{npz_path} was fitted with mode {mode!r} covering {strata}, but the "
+            f"requested dates fall in {unfitted}, which has no map."
+        )
+    months_fitted = (
+        sorted(int(m) for m in archive["months"]) if "months" in archive else []
+    )
+    if months_fitted:
+        requested = sorted(set((dates.astype("datetime64[M]").astype(int) % 12 + 1).tolist()))
+        outside = [m for m in requested if m not in months_fitted]
+        if outside:
+            raise ValueError(
+                f"{npz_path} was fitted with --months {months_fitted}, but the requested "
+                f"dates include month(s) {outside}. Refit including them, or restrict "
+                "the evaluation window to the fitted months."
+            )
+
     corrected = apply_map_to_series(
         np.asarray(values, np.float32),
-        season_of(np.asarray(dates).astype("datetime64[D]")),
+        labels,
         archive[f"{prefix}_source_knots"],
         archive[f"{prefix}_target_knots"],
         archive[f"{prefix}_cut"],
+        strata=strata,
     )
     meta = {
         "path": str(npz_path),
@@ -559,6 +710,8 @@ def load_and_apply(
         "fitted_cells": int(archive[f"{prefix}_fitted"].sum()),
         "pool": int(archive["pool"]),
         "wet_threshold": float(archive["wet_threshold"]),
+        "stratify_mode": mode,
+        "months_fitted": months_fitted or None,
     }
     if f"{prefix}_error_sigma" in archive:
         meta["error_sigma_transformed"] = archive[f"{prefix}_error_sigma"].tolist()

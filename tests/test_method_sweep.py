@@ -108,6 +108,82 @@ def test_pooled_slice_stays_inside_the_array():
     assert qm.pooled_slice(5, 5, 10) == slice(3, 8)
 
 
+# ------------------------------------------------------------- stratification
+
+
+def test_may_and_june_fall_in_different_season_bins():
+    """The reason a May-June window is mis-corrected in season mode.
+
+    June lands in JJAS, whose map is fitted mostly on July-August peak-monsoon
+    intensities. Applying that to monsoon-onset June mis-scales it, which is
+    what degraded the short 2024 holdout.
+    """
+    may = np.array(["2024-05-15"], dtype="datetime64[D]")
+    june = np.array(["2024-06-15"], dtype="datetime64[D]")
+    assert qm.stratify(may, "season")[0] == "MAM"
+    assert qm.stratify(june, "season")[0] == "JJAS"
+    assert qm.stratify(may, "month")[0] == "M05"
+    assert qm.stratify(june, "month")[0] == "M06"
+
+
+def test_strata_for_covers_the_full_cycle():
+    assert len(qm.strata_for("season")) == 4
+    assert len(qm.strata_for("month")) == 12
+    with pytest.raises(ValueError, match="unknown season mode"):
+        qm.strata_for("fortnight")
+
+
+def test_season_of_still_means_season_mode():
+    dates = np.array(["2024-05-15", "2024-06-15"], dtype="datetime64[D]")
+    assert list(qm.season_of(dates)) == list(qm.stratify(dates, "season"))
+
+
+def test_apply_rejects_a_stratification_mismatch():
+    """Applying a 4-season map with 12 month labels would silently misalign."""
+    knots = np.zeros((4, 5, 2, 2), np.float32)
+    cuts = np.zeros((4, 2, 2), np.float32)
+    with pytest.raises(ValueError, match="strata"):
+        qm.apply_map_to_series(
+            np.zeros((1, 2, 2), np.float32),
+            np.array(["M05"], dtype=object),
+            knots, knots, cuts, strata=qm.MONTH_ORDER,
+        )
+
+
+def test_month_stratification_isolates_a_month_dependent_bias():
+    """Pooling months only matters when the bias RELATIONSHIP differs by month.
+
+    A monotone bias is recovered by per-cell quantile mapping however the months
+    are pooled -- pooling changes knot density, not the shape of the transfer
+    function. But when onset and peak-monsoon months are biased differently, a
+    map fitted on the pooled distribution splits the difference and mis-corrects
+    both. This asserts the fit recovers each month's own relationship when the
+    months are kept separate.
+    """
+    rng = np.random.default_rng(11)
+    quantiles = np.linspace(0, 1, 31)
+    onset_truth = rng.gamma(0.6, 6.0, 4000)
+    peak_truth = rng.gamma(0.6, 22.0, 4000)
+    onset_imerg = onset_truth * 1.15 + 2.2          # additive-ish, light rain
+    peak_imerg = peak_truth * 1.85                  # multiplicative, deep convection
+
+    separate = []
+    for source, target in ((onset_imerg, onset_truth), (peak_imerg, peak_truth)):
+        sk, tk, cut = qm.fit_quantile_map(source, target, quantiles, 0.1)
+        separate.append(float(np.mean(qm.apply_quantile_map(source, sk, tk, cut) - target)))
+
+    pooled_source = np.concatenate([onset_imerg, peak_imerg])
+    pooled_target = np.concatenate([onset_truth, peak_truth])
+    sk, tk, cut = qm.fit_quantile_map(pooled_source, pooled_target, quantiles, 0.1)
+    pooled_onset_bias = float(
+        np.mean(qm.apply_quantile_map(onset_imerg, sk, tk, cut) - onset_truth)
+    )
+
+    assert abs(separate[0]) < 0.5, separate
+    assert abs(separate[1]) < 2.0, separate
+    assert abs(pooled_onset_bias) > 2 * abs(separate[0]) or abs(pooled_onset_bias) > 1.0
+
+
 def test_load_zarr_time_decodes_the_int64_view_the_packer_writes():
     """Regression test for a real failure on the cluster.
 
@@ -289,6 +365,32 @@ def test_increment_locality_is_flat_for_a_uniform_increment():
     values, _ = sweep.increment_locality(uniform, background, distance, valid, edges)
     finite = values[np.isfinite(values)]
     assert np.allclose(finite, 2.0, atol=1e-5)
+
+
+@needs_sweep
+def test_fitted_sigma_floor_looks_up_the_measured_intensity_bin():
+    """Regression test for the imerg_qm_loyo.json fit (2021 holdout).
+
+    Real fitted sd is ~1.1-1.2 across intensity bins, over 3x the config's
+    guessed sigma_obs=0.35. bias_correct variants must use the measured value,
+    not silently fall back to the guess, for any bin with enough samples.
+    """
+    bins = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 1e9]
+    sigma = [1.170, 1.162, 1.163, 1.188, float("nan"), float("nan")]
+    values = np.array([0.05, 0.5, 3.0, 7.0, 30.0, 80.0], np.float32)
+    out = sweep.fitted_sigma_floor(values, bins, sigma, fallback=0.35)
+    assert out[0] == out[1] == np.float32(1.170)      # both in [0, 1)
+    assert out[2] == np.float32(1.162)                # [1, 5)
+    assert out[3] == np.float32(1.163)                # [5, 10)
+    assert out[4] == 0.35 and out[5] == 0.35          # undersampled bins: fall back
+    assert np.all(out[:4] > 3.0 * 0.35), "measured sd must dominate the old guess"
+
+
+@needs_sweep
+def test_fitted_sigma_floor_passes_through_without_a_fit():
+    values = np.array([1.0, 2.0], np.float32)
+    assert sweep.fitted_sigma_floor(values, None, None, fallback=0.35) == 0.35
+    assert sweep.fitted_sigma_floor(values, [], [], fallback=0.35) == 0.35
 
 
 @needs_sweep

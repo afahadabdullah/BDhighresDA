@@ -74,6 +74,50 @@ at both.
 
 ---
 
+## 2b. Matching the months across years
+
+The first leave-one-year-out fit degraded 2024 (bias −0.545 → −1.101) while
+improving 2021 and 2023. The cause is a stratification mismatch, not the
+correction itself: the season bins are `MAM = (3,4,5)` and `JJAS = (6,7,8,9)`,
+so **May and June fall in different bins**. 2021–23 run May–September, 2024 runs
+May–June. The JJAS map applied to 2024's June was therefore fitted almost
+entirely on July–August peak-monsoon intensities.
+
+Two knobs now fix this, and a synthetic reproduction confirms the mechanism.
+With a deliberately month-dependent bias, the 2024 residual bias is:
+
+| Configuration | 2024 residual bias | May | June |
+|---|--:|--:|--:|
+| season bins, full spans (original) | +0.077 | −0.004 | **+0.161** |
+| season bins, `--months 5 6` | +0.003 | — | — |
+| `--season-mode month --months 5 6` | +0.003 | −0.004 | −0.002 |
+
+The per-stratum breakdown localises the error exactly where predicted: May is
+already clean, June carries all of it.
+
+```bash
+python scripts/27_fit_imerg_bias_correction.py --imerg <the four .nc> \
+    --zarr data/processed/bd_wide_cpc.zarr --stats data/processed/stats_cpc.json \
+    --grid bd --pool 5 --fit-error-model \
+    --months 5 6 --season-mode month \
+    --out data/processed/imerg_qm_loyo_mayjun.npz
+```
+
+**An important negative result, worth knowing before over-tuning this.** A
+*monotone* bias is recovered by per-cell quantile mapping regardless of how
+months are pooled — pooling changes the density of quantile knots, not the shape
+of the recovered transfer function. Stratification only matters when the bias
+*relationship itself* differs between months, which is physically plausible here
+(warm-rain onset versus deep monsoon convection are different retrieval regimes)
+but is not automatic. Read the new per-stratum lines in the fit log: if May and
+June show similar raw-to-corrected behaviour, the stratification is not your
+problem and finer binning will buy nothing.
+
+Note also that **the sweep window is unaffected either way.** It runs May 1–5
+2024, entirely inside MAM/M05, whose map was already fitted on May data from the
+other three years. The reported 2024 degradation is a 61-day May+June statistic;
+only the June half was contaminated.
+
 ## 3. The sweep
 
 ```bash

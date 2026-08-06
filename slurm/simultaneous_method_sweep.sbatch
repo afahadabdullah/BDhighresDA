@@ -39,6 +39,25 @@ mkdir -p "$MPLCONFIGDIR" logs
     exit 1
 }
 
+# How to launch each step.
+#
+# On the GH200 nodes `srun --ntasks=1` inside an already-allocated sbatch can
+# fail with "CPU binding outside of job step allocation ... Unable to satisfy
+# cpu bind request": srun tries to bind the step to a CPU mask that does not
+# match what the job was given. Every step here is a single task on a single
+# node, so srun buys nothing -- running the interpreter directly sidesteps the
+# step-launch machinery entirely and is the default.
+#
+# Set SWEEP_USE_SRUN=1 to go back to srun (with binding disabled, which is the
+# other working combination) if a site policy requires steps to be launched
+# through it.
+if [[ "${SWEEP_USE_SRUN:-0}" == "1" ]]; then
+    LAUNCH="srun --ntasks=1 --cpu-bind=none --overlap"
+    export SLURM_CPU_BIND=none
+else
+    LAUNCH=""
+fi
+
 START="${SWEEP_START:-2024-05-01}"
 END="${SWEEP_END:-2024-05-05}"
 GROUP="${SWEEP_GROUP:-core}"
@@ -78,7 +97,7 @@ echo "Holdout fold $((FOLD + 1))/$FOLDS"
 
 # ---------------------------------------------------------------- observations
 if [[ ! -s "$STATIONS_DAILY" ]]; then
-    srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
+    $LAUNCH "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
         --data-dir "$BMD_DATA_DIR" \
         --stations "$BMD_STATIONS" \
         --start "$START" --end "$END" \
@@ -90,7 +109,7 @@ else
 fi
 
 if [[ ! -s "$IMERG_PREPARED" ]]; then
-    srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
+    $LAUNCH "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
         --input "$IMERG_DIR" \
         --source-frequency half-hourly \
         --start "$START" --end "$END" \
@@ -111,7 +130,7 @@ fi
 if [[ ! -s "$IMERG_QM" ]]; then
     if [[ -n "${SWEEP_QM_SOURCES:-}" ]]; then
         # shellcheck disable=SC2086
-        srun --ntasks=1 "$PYTHON_BIN" -u scripts/27_fit_imerg_bias_correction.py \
+        $LAUNCH "$PYTHON_BIN" -u scripts/27_fit_imerg_bias_correction.py \
             --imerg $SWEEP_QM_SOURCES \
             --zarr "${SWEEP_ZARR:-data/processed/bd_wide_cpc.zarr}" \
             --stats "${SWEEP_STATS:-data/processed/stats_cpc.json}" \
@@ -128,7 +147,7 @@ fi
 QM_FLAG=()
 [[ -s "$IMERG_QM" ]] && QM_FLAG=(--imerg-qm "$IMERG_QM")
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/28_simultaneous_method_sweep.py \
+$LAUNCH "$PYTHON_BIN" -u scripts/28_simultaneous_method_sweep.py \
     --config "$CONFIG" \
     --ckpt "$CKPT" \
     --stations "$STATIONS_DAILY" \
@@ -144,7 +163,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/28_simultaneous_method_sweep.py \
     --out "${PREFIX}.npz" \
     --report "${PREFIX}.json"
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/29_summarize_method_sweep.py \
+$LAUNCH "$PYTHON_BIN" -u scripts/29_summarize_method_sweep.py \
     --dump "${PREFIX}.npz" \
     --report "${PREFIX}.json" \
     --baseline "${SWEEP_BASELINE:-gauges_only}" \

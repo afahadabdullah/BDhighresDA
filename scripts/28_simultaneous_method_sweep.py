@@ -292,6 +292,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def fitted_sigma_floor(
+    intensity_mm: np.ndarray,
+    error_bins_mm: list[float] | None,
+    error_sigma_transformed: list[float] | None,
+    fallback: float,
+) -> np.ndarray | float:
+    """Map corrected IMERG intensity to script 27's fitted transformed-space sigma.
+
+    The config's ``sigma_obs: 0.35`` is a guess. Script 27's ``--fit-error-model``
+    measures it instead -- typically ~1.1-1.24 in transformed space here, three
+    times larger -- and METHODOLOGY.md 4.3 says to use the measurement, not the
+    guess. Bins with too few holdout samples are NaN in the fit; those, and any
+    intensity outside the fitted range's extremes, fall back to ``fallback``
+    rather than silently trusting an unmeasured value.
+    """
+    if not error_bins_mm or not error_sigma_transformed:
+        return fallback
+    edges = np.asarray(error_bins_mm, dtype=float)
+    sigma_by_bin = np.asarray(error_sigma_transformed, dtype=float)
+    index = np.clip(np.digitize(np.nan_to_num(intensity_mm, nan=0.0), edges[1:-1]), 0, len(sigma_by_bin) - 1)
+    sigma = sigma_by_bin[index].astype(np.float32)
+    invalid = ~np.isfinite(sigma)
+    sigma[invalid] = fallback
+    return sigma
+
+
 def great_circle_km(lat0: np.ndarray, lon0: np.ndarray, lat1: float, lon1: float) -> np.ndarray:
     """Local-tangent distance, matching the approximation used in ensrf.py."""
     return 111.0 * np.sqrt(
@@ -506,6 +532,17 @@ def main() -> None:
             f"{(corrected_imerg_mm[finite] >= 0.1).mean():.3f}",
             flush=True,
         )
+        if qm_meta.get("error_sigma_transformed"):
+            fitted = [v for v in qm_meta["error_sigma_transformed"] if np.isfinite(v)]
+            config_floor = float(imerg_config["sigma_obs"])
+            print(
+                f"[sweep] fitted IMERG error sd (transformed space, by intensity bin): "
+                f"{[round(v, 2) for v in qm_meta['error_sigma_transformed']]} "
+                f"vs configs/da.yaml sigma_obs={config_floor:g} "
+                f"({np.mean(fitted) / config_floor:.1f}x larger on average). "
+                "bias_correct=True variants use the fitted value, not the config guess.",
+                flush=True,
+            )
 
     valid = dataset.fixed_valid > 0
     slices = dataset.fixed_spatial_slices()
@@ -641,11 +678,20 @@ def main() -> None:
                     satellite_error_mm = satellite_error_mm * np.clip(ratio, 0.25, 4.0)
                 _, keep, inflation = satellite_setup(variant)
                 satellite_observation = transform.forward(satellite_mm).astype(np.float32)
+                if variant.bias_correct and qm_meta:
+                    sigma_floor = fitted_sigma_floor(
+                        satellite_mm,
+                        qm_meta.get("error_bins_mm"),
+                        qm_meta.get("error_sigma_transformed"),
+                        fallback=float(imerg_config["sigma_obs"]),
+                    )
+                else:
+                    sigma_floor = float(imerg_config["sigma_obs"])
                 satellite_variance = transformed_imerg_variance(
                     satellite_mm,
                     satellite_error_mm,
                     transform,
-                    sigma_floor=float(imerg_config["sigma_obs"]),
+                    sigma_floor=sigma_floor,
                     representativeness=float(imerg_config["representativeness"]),
                 )
                 satellite_variance = (
