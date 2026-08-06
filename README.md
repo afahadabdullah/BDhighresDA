@@ -15,6 +15,23 @@ Conditional **rectified-flow** generative prior downscales ERA5 (0.25°) and CPC
 - **Expanded BMD Station Catalogue**: Parsed and integrated 42 BMD weather stations across Bangladesh (including 7 newly inherited stations: *Dimla, Rajarhat, Gopalgonj, Natrakona, Nikli, Tarash, Tetulia*) with high-coverage quality control (`scripts/05_convert_bmd_dir.py`).
 - **5-Fold Rotated Spatial Cross-Validation**: Implemented disjoint spatial holdout evaluation (`slurm/bmd_imerg_rotated_folds_eval.sbatch`) testing 16 ensemble members across 2021–2024 monsoon seasons (37–38 active stations per year, >4,000 withheld station-days).
 - **Automated Multi-Year Pooled Diagnostics**: Developed multi-year pooling script (`scripts/22_summarize_multiyear_bmd_eval.py`) that aggregates CRPS, RMSE, MAE, Bias, Fisher-pooled Correlation, and heavy-rain Brier scores into JSON, Markdown tables, and auto-generated 6-panel summary figures (`bmd_imerg_2021_2024_pooled_summary.png`).
+- **OSSE Validation of the Assimilation**: Ran observing-system simulation experiments (`scripts/10_osse.py`) assimilating pseudo-gauges and nested 0.1° pseudo-satellite footprints drawn from CHIRPS, confirming that score guidance recovers the truth field across the full range of daily rainfall regimes.
+
+### OSSE: where the assimilation changes the field
+
+![OSSE impact maps](docs/figures/osse_perfect_impact.png)
+
+Three days spanning 1.5 to 28.8 mm/day domain mean, 40-station network, 32 assimilated (circles) and 8 withheld (squares). Column F is the one to read — green means the analysis is closer to CHIRPS than the background was.
+
+| Day | Domain mean | Land area improved |
+|---|--:|--:|
+| 2022-07-07 | 1.5 mm/day | **95%** |
+| 2025-07-25 | 11.2 mm/day | **91%** |
+| 2022-07-23 | 28.8 mm/day | **83%** |
+
+Column D shows the background error is broadly positive — the prior rains too readily, most visibly on the near-dry 2022-07-07 case — and column E shows the assimilation removing it. Skill is highest on dry days and degrades with rainfall intensity, as expected when the constraint comes from point gauges.
+
+> These are *perfect-observation* experiments: the pseudo-satellite is noiseless CHIRPS, so the observations and the verification truth are the same field. The 83–95% figures bound what the assimilation machinery can achieve and are not directly comparable to real IMERG + BMD results, where the observations disagree with CHIRPS.
 
 ---
 
