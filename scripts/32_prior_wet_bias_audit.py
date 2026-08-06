@@ -322,6 +322,62 @@ def main() -> None:
                 "the loss weighting; this one needs a retrain."
             )
 
+    # ---------------------------------------------------------------- (4)
+    # Grid-mean bias and station-located bias disagree, so decompose the chain
+    # at the stations themselves. On the grid the prior is +2.29 against CHIRPS
+    # and CHIRPS is +0.26 against the gauges, which predicts about +2.55 against
+    # the gauges -- but the measured station number is +6.40. Something is
+    # location-specific, and only a station-space comparison separates "the model
+    # is worse where the gauges are" from "the reference changes".
+    print("\n[prior] station-space decomposition (ensemble median, withheld stations):")
+    legs = {"background_minus_chirps": [], "chirps_minus_gauge": [], "background_minus_gauge": []}
+    for path in args.dump:
+        archive = np.load(path, allow_pickle=False)
+        need = {"background_at_stations", "chirps_at_stations", "gauge_mm"}
+        if not need.issubset(archive.files):
+            continue
+        keep = (
+            np.asarray(archive["eval_idx"], int)
+            if "eval_idx" in archive.files
+            else slice(None)
+        )
+        bg = np.median(np.asarray(archive["background_at_stations"], float), axis=1)[:, keep]
+        ch = np.asarray(archive["chirps_at_stations"], float)[:, keep]
+        ga = np.asarray(archive["gauge_mm"], float)[:, keep]
+        ok = np.isfinite(bg) & np.isfinite(ch) & np.isfinite(ga)
+        if not ok.any():
+            continue
+        legs["background_minus_chirps"].append((bg - ch)[ok])
+        legs["chirps_minus_gauge"].append((ch - ga)[ok])
+        legs["background_minus_gauge"].append((bg - ga)[ok])
+
+    if any(legs.values()):
+        station_report = {}
+        for name, parts in legs.items():
+            pooled = np.concatenate(parts)
+            station_report[name] = {"n": int(pooled.size), "bias_mm": float(pooled.mean())}
+            print(f"    {name:<28}{pooled.mean():>+9.2f} mm/day   (n={pooled.size})")
+        report["station_decomposition"] = station_report
+
+        at_station = station_report["background_minus_chirps"]["bias_mm"]
+        on_grid = report["background (ensemble median)"]["bias_mm"]
+        print()
+        if abs(at_station - on_grid) > 1.5:
+            print(
+                f"[prior] The prior is {at_station:+.2f} against CHIRPS AT STATIONS but "
+                f"{on_grid:+.2f} on the full grid. The wet bias is concentrated where the "
+                "gauges are, not spread over the domain. BMD stations sit in the plains "
+                "and away from the Meghalaya barrier, so check whether the model is "
+                "over-raining the low-lying interior specifically -- a domain-mean "
+                "diagnostic will keep hiding this."
+            )
+        else:
+            print(
+                f"[prior] The prior is {at_station:+.2f} against CHIRPS at stations versus "
+                f"{on_grid:+.2f} on the grid -- consistent. The wet bias is uniform, so "
+                "the station-located number is not a sampling artefact."
+            )
+
     if args.out_json:
         Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out_json).write_text(json.dumps(report, indent=2))
