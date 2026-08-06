@@ -14,18 +14,44 @@ Ordered by what would change the conclusion, not by effort.
 | IMERG only | 8.041 | 22.26 | **+9.88** | 19.95 | 0.593 |
 | Simultaneous | 6.097 | 17.27 | +1.58 | 17.20 | 0.686 |
 
-Three facts drive everything below.
+**The bias column above is not a like-for-like comparison and must not be used
+to rank the arms.** `scripts/31_jensen_bias_audit.py`, on the same 19,485
+station-days, decomposes it into the ensemble median plus the Jensen gap that
+comes from averaging members in mm space after inverting a convex transform:
 
-1. **The background is wet by +10.3 mm/day** — 62% of its MAE and 20% of its
-   MSE is a pure offset. Most of the headline "35% CRPS improvement" is the DA
-   cleaning up after the prior, not the DA extracting information.
-2. **IMERG removes 4% of that bias.** Gauges remove 106%. With the bias taken
-   out, IMERG-only improves random error by 2.7% against 13% for gauges. As a
-   standalone product the satellite arm is doing almost nothing.
-3. **Fusion buys +2.6% CRPS and costs +7% MAE and 2.4× absolute bias.** The one
-   clean, monotone IMERG win is correlation (0.666 → 0.686, and simultaneous >
-   gauges-only in all four years independently). That is the honest framing:
-   *the satellite constrains pattern, not amplitude.*
+| | mean bias | **median bias** | Jensen gap | gap as % of mean |
+|---|--:|--:|--:|--:|
+| Background | +10.30 | **+6.40** | +3.89 | 38% |
+| IMERG only | +9.88 | **+3.29** | +6.59 | 67% |
+| Gauges only | −0.65 | **−2.68** | +2.03 | −312% |
+| Simultaneous | +1.58 | **−1.43** | +3.01 | 190% |
+
+The gap is 2–6.6 mm/day and **differs by arm**, because each arm has a different
+ensemble spread. Ratios of mean biases therefore measure the spread difference
+as much as the skill difference. Three claims in the current draft do not
+survive the correction:
+
+1. ~~IMERG removes 4% of the bias.~~ **It removes 49%** (+6.40 → +3.29 on
+   medians). The 4% was one Jensen-inflated number divided by another.
+2. ~~Gauges remove 106%.~~ **They overshoot to −2.68 mm/day**, a real dry bias
+   masked by +2.03 of inflation pulling the mean back to −0.65.
+3. ~~Fusion costs 2.4× absolute bias.~~ **Simultaneous is the best arm on the
+   spread-independent metric**, |−1.43| against |−2.68| for gauges-only.
+
+Ranked by |median bias|: simultaneous 1.43 < gauges 2.68 < IMERG 3.29 <
+background 6.40. The mean-based ordering inverted the top two.
+
+What still stands after the correction:
+
+1. **The prior is genuinely wet by +6.40 mm/day at the median.** This is not an
+   averaging artefact — it survives the median, and CHIRPS itself is only +0.26
+   against the same gauges (§2a). The prior does not reproduce its own training
+   target. This is now the single largest open problem.
+2. **CRPS is unaffected.** It is a functional of the whole ensemble, not of the
+   mean, so the CRPS column and the 35% figure stand as computed.
+3. **The one clean, monotone IMERG win remains correlation** (0.666 → 0.686,
+   simultaneous > gauges-only in all four years independently) — and it is now
+   joined by median bias, where fusion also wins.
 
 The four candidate causes, all of which the sweep separates:
 
