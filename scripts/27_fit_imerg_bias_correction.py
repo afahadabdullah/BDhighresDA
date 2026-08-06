@@ -254,12 +254,32 @@ def load_imerg_files(paths: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return time, precipitation, lat.astype(np.float32), lon.astype(np.float32)
 
 
+def load_zarr_time(store) -> np.ndarray:
+    """Decode the packed Zarr's time axis to ``datetime64[D]``.
+
+    ``scripts/04_regrid_and_pack.py`` writes ``time`` as
+    ``days.values.astype("datetime64[ns]").view("i8")`` -- i.e. the array on
+    disk is a plain int64 VIEW of nanoseconds-since-epoch, not a day-count.
+    ``bdhires.data.zarr_dataset.PrecipDataset`` reads it back with
+    ``np.asarray(z["time"][:], dtype="datetime64[ns]")``, which reverses that
+    view. Casting straight to ``datetime64[D]`` instead -- skipping the
+    ``datetime64[ns]`` step -- reinterprets the raw nanosecond integers as
+    day-counts and silently produces dates thousands of years off, which is
+    why a lookup against real 2021-2024 dates finds nothing. Match the
+    production loader exactly.
+    """
+    raw = np.asarray(store["time"][:])
+    if np.issubdtype(raw.dtype, np.datetime64):
+        return raw.astype("datetime64[D]")
+    return raw.astype("datetime64[ns]").astype("datetime64[D]")
+
+
 def load_chirps_on_imerg_lattice(
     zarr_path: str, grid_name: str, factor: int, wanted: np.ndarray
 ) -> np.ndarray:
     """CHIRPS from the Zarr target, cropped to ``grid`` and block-averaged to 0.1 deg."""
     store = zarr.open(zarr_path, mode="r")
-    time = np.asarray(store["time"][:]).astype("datetime64[D]")
+    time = load_zarr_time(store)
     grid = get_grid(grid_name)
     row0, col0 = crop_offsets(WIDE, grid)
     rows = slice(row0, row0 + grid.nlat)

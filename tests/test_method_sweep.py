@@ -108,6 +108,40 @@ def test_pooled_slice_stays_inside_the_array():
     assert qm.pooled_slice(5, 5, 10) == slice(3, 8)
 
 
+def test_load_zarr_time_decodes_the_int64_view_the_packer_writes():
+    """Regression test for a real failure on the cluster.
+
+    scripts/04_regrid_and_pack.py writes ``time`` as
+    ``datetime64[ns]).view("i8")`` -- a plain int64 array on disk, not a
+    datetime64 array. Casting that straight to ``datetime64[D]`` (skipping the
+    ``datetime64[ns]`` step) reinterprets nanosecond counts as day counts and
+    produces dates thousands of years off, which silently failed every date
+    lookup against real 2021-2024 requests. ``load_zarr_time`` must match
+    ``bdhires.data.zarr_dataset.PrecipDataset``'s decoding exactly.
+    """
+
+    class _FakeStore(dict):
+        pass
+
+    dates = np.array(["2021-05-01", "2021-05-02", "2024-06-30"], dtype="datetime64[ns]")
+    raw_i8_store = _FakeStore(time=dates.view("i8"))
+    decoded = qm.load_zarr_time(raw_i8_store)
+    assert decoded.dtype == np.dtype("datetime64[D]")
+    assert list(decoded) == list(dates.astype("datetime64[D]"))
+
+    # A store that already holds a real datetime64 array must also work.
+    datetime_store = _FakeStore(time=dates)
+    assert list(qm.load_zarr_time(datetime_store)) == list(dates.astype("datetime64[D]"))
+
+
+def test_naive_astype_D_would_have_produced_the_original_bug():
+    """Documents the exact failure mode the fix replaces."""
+    dates = np.array(["2021-05-01"], dtype="datetime64[ns]")
+    raw = dates.view("i8")
+    wrong = raw.astype("datetime64[D]")
+    assert wrong[0] != dates.astype("datetime64[D]")[0]
+
+
 # ------------------------------------------------------------------ CRPS split
 
 
