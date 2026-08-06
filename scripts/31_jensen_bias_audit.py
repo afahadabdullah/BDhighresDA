@@ -101,9 +101,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dump",
+        nargs="*",
         default=None,
-        help="optional sweep .npz with per-variant station ensembles, to measure "
-        "the mean-versus-median gap directly instead of inferring it",
+        help="one or more per-fold eval .npz files (e.g. "
+        "data/processed/bmd_imerg_eval_*/fold*.npz). Station ensembles are "
+        "(time, members, stations); results are pooled across every file given, "
+        "so pass all folds and all years to reproduce the headline numbers.",
+    )
+    parser.add_argument(
+        "--all-stations",
+        action="store_true",
+        help="score on every station instead of only the withheld eval_idx ones. "
+        "The reported scores use withheld stations, so leave this off to compare "
+        "like for like.",
     )
     parser.add_argument("--out-json", default=None)
     return parser.parse_args()
@@ -146,22 +156,93 @@ def round_trip_error(transform: PrecipTransform, values: np.ndarray) -> dict:
     }
 
 
-def gap_from_ensemble(ensemble_mm: np.ndarray, observed_mm: np.ndarray) -> dict:
-    """Mean-versus-median bias for a real ensemble. ``ensemble_mm`` is (M, N)."""
+# Station-ensemble arrays written by the BMD evaluation, mapped to the arm names
+# used in the results table. Each is (time, members, stations) in mm/day.
+ENSEMBLE_KEYS = {
+    "background_at_stations": "background",
+    "gauge_analysis_at_stations": "gauges_only",
+    "imerg_analysis_at_stations": "imerg_only",
+    "combined_analysis_at_stations": "simultaneous",
+    "analysis_at_stations": "analysis",
+}
+TRUTH_KEYS = ("gauge_mm", "station_obs", "observations", "truth", "gauges")
+
+
+def gap_from_ensemble(
+    ensemble_mm: np.ndarray, observed_mm: np.ndarray, transform: PrecipTransform
+) -> dict:
+    """Mean-versus-median bias for a real ensemble.
+
+    ``ensemble_mm`` is (members, N) in mm/day, ``observed_mm`` is (N,).
+
+    Also returns the ensemble spread measured in UN-NORMALISED log space, which
+    is the quantity the analytic prediction is expressed in. If the Jensen story
+    holds, that number should land near ``spread_explaining_bias`` for the
+    background arm -- an independent check rather than a restatement.
+    """
     finite = np.isfinite(observed_mm)
     if not finite.any():
         return {}
     members = np.asarray(ensemble_mm, float)[:, finite]
     truth = np.asarray(observed_mm, float)[finite]
+    good = np.isfinite(members).all(axis=0)
+    members, truth = members[:, good], truth[good]
+    if not truth.size:
+        return {}
+
     mean_field = members.mean(axis=0)
     median_field = np.median(members, axis=0)
+    # z = log1p(p/eps); forward() also subtracts mu and divides by sd, so undo that
+    z = np.asarray(transform.forward(members), float) * transform.sd + transform.mu
     return {
-        "n": int(finite.sum()),
+        "n": int(truth.size),
         "mean_bias_mm": float(np.mean(mean_field - truth)),
         "median_bias_mm": float(np.mean(median_field - truth)),
         "jensen_gap_mm": float(np.mean(mean_field - median_field)),
         "mean_spread_mm": float(np.mean(members.std(axis=0))),
+        "sigma_z": float(np.mean(z.std(axis=0))),
     }
+
+
+def collect_station_ensembles(
+    paths: list[str], use_all_stations: bool
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Pool (members, N) ensembles and the matching gauge vector across dumps."""
+    stacked: dict[str, list[np.ndarray]] = {}
+    truth_parts: list[np.ndarray] = []
+    for path in paths:
+        archive = np.load(path, allow_pickle=False)
+        truth_key = next((k for k in TRUTH_KEYS if k in archive.files), None)
+        if truth_key is None:
+            print(f"[jensen] {path}: no gauge array, skipping", flush=True)
+            continue
+        truth = np.asarray(archive[truth_key], float)  # (T, S)
+
+        if not use_all_stations and "eval_idx" in archive.files:
+            keep = np.asarray(archive["eval_idx"], int)
+        else:
+            keep = np.arange(truth.shape[1])
+
+        present = [k for k in ENSEMBLE_KEYS if k in archive.files]
+        if not present:
+            print(f"[jensen] {path}: no station ensembles, skipping", flush=True)
+            continue
+        truth_parts.append(truth[:, keep].reshape(-1))
+        for key in present:
+            block = np.asarray(archive[key], float)  # (T, M, S)
+            if block.ndim != 3:
+                continue
+            block = block[:, :, keep]
+            # (T, M, S) -> (M, T*S) so members stay on axis 0
+            stacked.setdefault(ENSEMBLE_KEYS[key], []).append(
+                block.transpose(1, 0, 2).reshape(block.shape[1], -1)
+            )
+    if not truth_parts:
+        return {}, np.array([])
+    return (
+        {name: np.concatenate(parts, axis=1) for name, parts in stacked.items()},
+        np.concatenate(truth_parts),
+    )
 
 
 def main() -> None:
@@ -233,63 +314,78 @@ def main() -> None:
 
     # ---------------------------------------------------------------- dump
     if args.dump:
-        archive = np.load(args.dump, allow_pickle=False)
-        keys = [k for k in archive.files if k.endswith("_ensemble")]
-        truth_key = next(
-            (k for k in ("station_obs", "observations", "truth", "gauges") if k in archive.files),
-            None,
-        )
-        if not keys or truth_key is None:
+        ensembles, observed = collect_station_ensembles(list(args.dump), args.all_stations)
+        if not ensembles:
             print(
-                f"\n[jensen] {args.dump} has no *_ensemble / observation arrays "
-                f"(found {archive.files[:8]}...). Skipping the measured comparison.",
+                f"\n[jensen] none of the {len(args.dump)} dump(s) held station "
+                f"ensembles. Expected any of {sorted(ENSEMBLE_KEYS)} plus a gauge "
+                f"array from {TRUTH_KEYS}.",
                 flush=True,
             )
         else:
-            observed = np.asarray(archive[truth_key], float).ravel()
-            print(f"\n[jensen] measured from {args.dump}:")
+            scope = "all stations" if args.all_stations else "withheld stations only"
             print(
-                f"    {'variant':<28}{'mean bias':>11}{'median bias':>13}"
-                f"{'Jensen gap':>12}{'spread':>9}"
+                f"\n[jensen] measured from {len(args.dump)} dump(s), {scope}, "
+                f"{int(np.isfinite(observed).sum())} station-days:"
+            )
+            print(
+                f"    {'arm':<16}{'mean bias':>11}{'median bias':>13}{'Jensen gap':>12}"
+                f"{'sigma_z':>9}{'predicted mean':>16}"
             )
             measured = {}
-            for key in sorted(keys):
-                name = key[: -len("_ensemble")]
-                members = np.asarray(archive[key], float)
-                members = members.reshape(members.shape[0], -1)
-                if members.shape[1] != observed.size:
-                    continue
-                entry = gap_from_ensemble(members, observed)
+            for name in sorted(ensembles, key=lambda k: -ensembles[k].shape[1]):
+                entry = gap_from_ensemble(ensembles[name], observed, transform)
                 if not entry:
                     continue
+                # What the closed form says this arm's mean bias should be, given
+                # its own measured spread and its own median. Independent check.
+                predicted = (
+                    implied_mean(
+                        float(np.nanmean(observed)) + entry["median_bias_mm"],
+                        entry["sigma_z"],
+                        eps,
+                    )
+                    - float(np.nanmean(observed))
+                )
+                entry["predicted_mean_bias_mm"] = predicted
                 measured[name] = entry
                 print(
-                    f"    {name:<28}{entry['mean_bias_mm']:>+11.2f}"
-                    f"{entry['median_bias_mm']:>+13.2f}"
-                    f"{entry['jensen_gap_mm']:>+12.2f}{entry['mean_spread_mm']:>9.2f}"
+                    f"    {name:<16}{entry['mean_bias_mm']:>+11.2f}"
+                    f"{entry['median_bias_mm']:>+13.2f}{entry['jensen_gap_mm']:>+12.2f}"
+                    f"{entry['sigma_z']:>9.2f}{predicted:>+16.2f}"
                 )
             report["measured"] = measured
+
             if measured:
-                spread_of_median = float(
-                    np.std([e["median_bias_mm"] for e in measured.values()])
-                )
-                spread_of_mean = float(np.std([e["mean_bias_mm"] for e in measured.values()]))
+                med = [e["median_bias_mm"] for e in measured.values()]
+                mn = [e["mean_bias_mm"] for e in measured.values()]
+                range_median = float(np.max(med) - np.min(med))
+                range_mean = float(np.max(mn) - np.min(mn))
+                report["range_median_bias_mm"] = range_median
+                report["range_mean_bias_mm"] = range_mean
                 print()
-                if spread_of_median < 0.5 * spread_of_mean:
+                print(
+                    f"[jensen] spread of mean bias across arms:   {range_mean:.2f} mm/day"
+                )
+                print(
+                    f"[jensen] spread of median bias across arms: {range_median:.2f} mm/day"
+                )
+                print()
+                if range_median < 0.4 * range_mean:
                     print(
-                        "[jensen] VERDICT: median bias is far more consistent across arms "
-                        f"(sd {spread_of_median:.2f}) than mean bias (sd {spread_of_mean:.2f}). "
-                        "The spread between arms is largely a Jensen artefact of averaging "
-                        "in mm space, not a difference in physical skill. Report the median "
-                        "field, or average in transformed space and invert once."
+                        "[jensen] VERDICT: the arms nearly agree on the median and disagree "
+                        "wildly on the mean. Most of the reported bias -- and most of the "
+                        "apparent difference BETWEEN arms -- is the convex inverse transform "
+                        "acting on different ensemble spreads, not physical skill. Fix by "
+                        "reporting the median field, or by averaging in transformed space "
+                        "and inverting once. CRPS is unaffected; the bias column is not."
                     )
                 else:
                     print(
-                        "[jensen] VERDICT: median bias varies about as much as mean bias "
-                        f"(sd {spread_of_median:.2f} versus {spread_of_mean:.2f}). The "
-                        "differences between arms are NOT explained by the averaging "
-                        "convention, so the wet bias is in the prior itself and a retrain "
-                        "is on the table."
+                        "[jensen] VERDICT: median bias varies nearly as much as mean bias, "
+                        "so the averaging convention is NOT the main story. The wet bias "
+                        "lives in the prior and a retrain is on the table. Check the "
+                        "residual-to-CPC floor and the wet-day oversampling first."
                     )
 
     if args.out_json:
