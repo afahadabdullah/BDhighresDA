@@ -57,7 +57,7 @@ def main() -> None:
             print(f"Warning: summary file not found, skipping: {filepath}")
             continue
         data = json.loads(path.read_text())
-        years = data["scope"]["years"]
+        years = sorted(list(set(int(d.split("-")[0]) for d in data["observation_dates"])))
         if len(years) == 1:
             label = str(years[0])
         else:
@@ -68,18 +68,18 @@ def main() -> None:
     if not runs:
         raise ValueError("No valid summary JSON files provided.")
 
-    total_station_days = sum(run["data"]["scope"]["total_withheld_station_days"] for run in runs)
-    weights = np.array([run["data"]["scope"]["total_withheld_station_days"] for run in runs], dtype=float)
+    total_station_days = sum(run["data"]["station_days"] for run in runs)
+    weights = np.array([run["data"]["station_days"] for run in runs], dtype=float)
 
     pooled_results = {}
     for method in METHODS:
-        crps_list = np.array([run["data"]["methods"][method]["crps_mm"] for run in runs], dtype=float)
-        rmse_list = np.array([run["data"]["methods"][method]["rmse_mm"] for run in runs], dtype=float)
-        mae_list = np.array([run["data"]["methods"][method]["mae_mm"] for run in runs], dtype=float)
-        bias_list = np.array([run["data"]["methods"][method]["bias_mm"] for run in runs], dtype=float)
+        crps_list = np.array([run["data"]["aggregate_metrics"][method]["crps_mm"] for run in runs], dtype=float)
+        rmse_list = np.array([run["data"]["aggregate_metrics"][method]["rmse_mm"] for run in runs], dtype=float)
+        mae_list = np.array([run["data"]["aggregate_metrics"][method]["mae_mm"] for run in runs], dtype=float)
+        bias_list = np.array([run["data"]["aggregate_metrics"][method]["bias_mm"] for run in runs], dtype=float)
 
         corrs = np.clip(
-            np.array([run["data"]["methods"][method]["correlation_fisher_pooled"] for run in runs], dtype=float),
+            np.array([run["data"]["aggregate_metrics"][method]["correlation_fisher_pooled"] for run in runs], dtype=float),
             -0.999999, 0.999999
         )
         fisher_z = np.arctanh(corrs)
@@ -89,7 +89,7 @@ def main() -> None:
         brier_scores = {}
         for thresh in ("1", "10", "25", "50"):
             b_list = np.array(
-                [run["data"]["methods"][method]["brier_score"].get(thresh, np.nan) for run in runs],
+                [run["data"]["aggregate_metrics"][method]["brier_score"].get(thresh, np.nan) for run in runs],
                 dtype=float
             )
             brier_scores[thresh] = weighted_mean(b_list, weights)
@@ -105,7 +105,7 @@ def main() -> None:
 
     summary_payload = {
         "runs": [r["path"] for r in runs],
-        "years": sorted(list(set(y for r in runs for y in r["data"]["scope"]["years"]))),
+        "years": sorted(list(set(int(d.split("-")[0]) for r in runs for d in r["data"]["observation_dates"]))),
         "total_station_days": total_station_days,
         "pooled_methods": pooled_results,
     }
@@ -192,10 +192,10 @@ def main() -> None:
     axes[1, 0].grid(alpha=0.2)
 
     # Panel E: Simultaneous DA CRPS Skill Gain (%) vs Benchmarks
-    bg_crps = np.array([run["data"]["methods"]["Background"]["crps_mm"] for run in runs] + [pooled_results["Background"]["crps_mm"]])
-    sim_crps = np.array([run["data"]["methods"]["Simultaneous"]["crps_mm"] for run in runs] + [pooled_results["Simultaneous"]["crps_mm"]])
-    gauges_crps = np.array([run["data"]["methods"]["Gauges only"]["crps_mm"] for run in runs] + [pooled_results["Gauges only"]["crps_mm"]])
-    imerg_crps = np.array([run["data"]["methods"]["IMERG only"]["crps_mm"] for run in runs] + [pooled_results["IMERG only"]["crps_mm"]])
+    bg_crps = np.array([run["data"]["aggregate_metrics"]["Background"]["crps_mm"] for run in runs] + [pooled_results["Background"]["crps_mm"]])
+    sim_crps = np.array([run["data"]["aggregate_metrics"]["Simultaneous"]["crps_mm"] for run in runs] + [pooled_results["Simultaneous"]["crps_mm"]])
+    gauges_crps = np.array([run["data"]["aggregate_metrics"]["Gauges only"]["crps_mm"] for run in runs] + [pooled_results["Gauges only"]["crps_mm"]])
+    imerg_crps = np.array([run["data"]["aggregate_metrics"]["IMERG only"]["crps_mm"] for run in runs] + [pooled_results["IMERG only"]["crps_mm"]])
 
     gain_vs_bg = (1.0 - sim_crps / bg_crps) * 100.0
     gain_vs_gauges = (1.0 - sim_crps / gauges_crps) * 100.0
@@ -212,7 +212,7 @@ def main() -> None:
     axes[1, 1].grid(alpha=0.2)
 
     # Panel F: Withheld Station-Days per Year
-    st_days = [run["data"]["scope"]["total_withheld_station_days"] for run in runs] + [total_station_days]
+    st_days = [run["data"]["station_days"] for run in runs] + [total_station_days]
     bars = axes[1, 2].bar(x, st_days, color="#264653")
     axes[1, 2].set_xticks(x, categories)
     axes[1, 2].set_ylabel("Withheld Station-Days")
