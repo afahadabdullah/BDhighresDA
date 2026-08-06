@@ -76,6 +76,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid", default="bd")
     parser.add_argument("--wet-threshold", type=float, default=1.0)
     parser.add_argument(
+        "--max-lag",
+        type=int,
+        default=2,
+        help="scan product-versus-gauge agreement at day lags -MAX_LAG..+MAX_LAG. "
+        "The gauge timestamp is the only unambiguous one, so the lag that "
+        "maximises correlation reveals each product's true day convention.",
+    )
+    parser.add_argument(
         "--intensity-bins",
         nargs="+",
         type=float,
@@ -257,6 +265,80 @@ def main() -> None:
         if not available.all():
             print(f"[audit] IMERG missing for {int((~available).sum())} day(s)", flush=True)
 
+    # ------------------------------------------------------------- lag scan
+    #
+    # Do the products and the gauges actually refer to the same 24 hours?
+    #
+    # IMERG is built on the BMD window: day D is [D-1 03:00 UTC, D 03:00 UTC],
+    # so it is ~87% calendar day D-1. CHIRPS daily is 00-00 UTC, i.e. calendar
+    # day D. Those two conventions differ by roughly a day, and nothing in the
+    # packing code shifts CHIRPS to compensate. If that is a real misalignment
+    # it inflates every paired statistic -- including the fitted sigma_obs,
+    # which would then be measuring day-to-day rainfall variability rather than
+    # retrieval error.
+    #
+    # A mean bias is nearly blind to a one-day shift because the climatological
+    # mean barely changes overnight. Correlation is not. So scan the lag and let
+    # the gauges, whose timestamp is unambiguous, arbitrate.
+    lags = list(range(-args.max_lag, args.max_lag + 1))
+    lag_scan: dict[str, dict] = {}
+    for name, values in products.items():
+        by_lag = {}
+        for lag in lags:
+            # lag > 0 compares product day D+lag against gauge day D
+            shifted = np.full_like(values, np.nan)
+            if lag == 0:
+                shifted = values
+            elif lag > 0:
+                shifted[:-lag] = values[lag:]
+            else:
+                shifted[-lag:] = values[:lag]
+            ok = np.isfinite(shifted) & np.isfinite(gauges)
+            if ok.sum() < 30:
+                continue
+            a, b = shifted[ok], gauges[ok]
+            by_lag[lag] = {
+                "n": int(ok.sum()),
+                "corr": float(np.corrcoef(a, b)[0, 1]),
+                "bias_mm": float(np.mean(a - b)),
+                "rmse_mm": float(np.sqrt(np.mean((a - b) ** 2))),
+            }
+        if by_lag:
+            best = max(by_lag, key=lambda k: by_lag[k]["corr"])
+            lag_scan[name] = {"by_lag": by_lag, "best_lag": best}
+
+    if lag_scan:
+        print("\n[audit] lag scan against gauges (correlation; best lag starred)", flush=True)
+        header = "  " + "product".ljust(30) + "".join(f"{l:>+9d}" for l in lags)
+        print(header, flush=True)
+        for name, entry in lag_scan.items():
+            cells = ""
+            for lag in lags:
+                if lag in entry["by_lag"]:
+                    star = "*" if lag == entry["best_lag"] else " "
+                    cells += f"{entry['by_lag'][lag]['corr']:>8.3f}{star}"
+                else:
+                    cells += f"{'-':>9}"
+            print("  " + name.ljust(30) + cells, flush=True)
+        misaligned = {n: e["best_lag"] for n, e in lag_scan.items() if e["best_lag"] != 0}
+        if misaligned:
+            print(
+                "\n[audit] WARNING: best lag is nonzero for "
+                + ", ".join(f"{n} ({l:+d} d)" for n, l in misaligned.items())
+                + ". These products are compared to the gauges on the wrong day. "
+                "Every paired statistic downstream -- correlation, RMSE and the "
+                "fitted sigma_obs from script 27 -- is inflated until this is "
+                "fixed, because the residual then contains a full day of rainfall "
+                "variability on top of the actual error.",
+                flush=True,
+            )
+        else:
+            print(
+                "\n[audit] all products peak at lag 0: the day labelling is "
+                "consistent with the gauges and the paired statistics are sound.",
+                flush=True,
+            )
+
     overall = {name: score(values, gauges, args.wet_threshold) for name, values in products.items()}
 
     edges = np.asarray(args.intensity_bins, float)
@@ -321,6 +403,7 @@ def main() -> None:
             )
 
     report = {
+        "lag_scan": lag_scan,
         "scope": {
             "start": str(dates[0]), "end": str(dates[-1]), "n_days": len(dates),
             "n_stations": len(meta),
