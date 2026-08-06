@@ -68,6 +68,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dump", nargs="+", required=True, help="per-fold eval .npz files")
     parser.add_argument("--wet-threshold", type=float, default=1.0, help="mm/day")
     parser.add_argument(
+        "--background-lag",
+        type=int,
+        default=None,
+        help="compare background day i against CHIRPS day i+LAG. The dumps carry "
+        "BOTH 'time' and 'background_time'; with BACKGROUND_DAY_OFFSET=-1 those "
+        "differ, so indexing the two arrays positionally compares fields a day "
+        "apart and destroys the residual correlation. Default: take the offset "
+        "from the stored time axes, or fall back to the lag that maximises "
+        "pattern correlation.",
+    )
+    parser.add_argument(
         "--max-days",
         type=int,
         default=400,
@@ -127,6 +138,37 @@ def main() -> None:
         base = base.copy()
         base[:, ~valid] = np.nan
 
+        # Align the background to CHIRPS before anything else.
+        #
+        # The dump stores 'time' (the CHIRPS/analysis day) and 'background_time'
+        # separately, because BACKGROUND_DAY_OFFSET shifts the conditioning.
+        # Indexing both positionally compares fields from different days, which
+        # collapses the residual correlation to near zero and makes a perfectly
+        # good network look as though it learned nothing. Trust the stored axes.
+        lag = args.background_lag
+        if lag is None and {"time", "background_time"}.issubset(archive.files):
+            t_main = np.asarray(archive["time"]).astype("datetime64[ns]").astype("datetime64[D]")
+            t_bg = (
+                np.asarray(archive["background_time"])
+                .astype("datetime64[ns]")
+                .astype("datetime64[D]")
+            )
+            offsets = (t_bg - t_main).astype("timedelta64[D]").astype(int)
+            if len(set(offsets.tolist())) == 1:
+                lag = int(offsets[0])
+        if lag is None:
+            lag = 0
+        if lag:
+            # background[i] describes the day CHIRPS calls i+lag
+            if lag > 0:
+                median_field = median_field[:-lag]
+                chirps, base = chirps[lag:], base[lag:]
+            else:
+                median_field = median_field[-lag:]
+                chirps, base = chirps[:lag], base[:lag]
+        if path == args.dump[0]:
+            print(f"[prior] background-to-CHIRPS lag: {lag:+d} day(s)")
+
         take = min(len(chirps), max(args.max_days - days, 0))
         if take <= 0:
             break
@@ -144,6 +186,38 @@ def main() -> None:
     print(f"[prior] pooled {len(background)} days on the {background.shape[1]}x{background.shape[2]} grid")
 
     report: dict = {"n_days": int(len(background))}
+
+    # Independent check that the alignment above is right. Pattern correlation
+    # against CHIRPS should peak at 0 once aligned; if it peaks elsewhere the
+    # residual diagnostics below are measuring a day of weather, not model error.
+    print("\n[prior] background-versus-CHIRPS pattern correlation by residual lag:")
+    lag_corr = {}
+    for probe in (-2, -1, 0, 1, 2):
+        if probe > 0:
+            a, b = background[:-probe], chirps[probe:]
+        elif probe < 0:
+            a, b = background[-probe:], chirps[:probe]
+        else:
+            a, b = background, chirps
+        ok = np.isfinite(a) & np.isfinite(b)
+        if ok.sum() < 1000:
+            continue
+        lag_corr[probe] = float(np.corrcoef(a[ok], b[ok])[0, 1])
+    best = max(lag_corr, key=lag_corr.get) if lag_corr else 0
+    print(
+        "    "
+        + "  ".join(
+            f"{probe:+d}: {value:.3f}{'*' if probe == best else ''}"
+            for probe, value in sorted(lag_corr.items())
+        )
+    )
+    report["residual_lag_correlation"] = lag_corr
+    if best != 0:
+        print(
+            f"[prior] WARNING: correlation still peaks at {best:+d}, so the fields are "
+            "NOT aligned. Re-run with --background-lag adjusted; everything below is "
+            "unreliable until this reads 0."
+        )
 
     # ---------------------------------------------------------------- (1)
     print("\n[prior] on the model grid, against CHIRPS:")
