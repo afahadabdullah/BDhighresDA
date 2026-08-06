@@ -200,6 +200,11 @@ def gap_from_ensemble(
         "median_bias_mm": float(np.mean(median_field - truth)),
         "jensen_gap_mm": float(np.mean(mean_field - median_field)),
         "mean_spread_mm": float(np.mean(members.std(axis=0))),
+        # Diagnostic only. Do NOT feed this to inflation_factor(): real
+        # ensembles have an atom at zero (dry members sit at z=0), so this
+        # spread reflects dry/wet bimodality rather than log-normal width, and
+        # the closed form overpredicts the mean by an order of magnitude. The
+        # measured jensen_gap_mm above is the number to trust.
         "sigma_z": float(np.mean(z.std(axis=0))),
     }
 
@@ -330,31 +335,47 @@ def main() -> None:
             )
             print(
                 f"    {'arm':<16}{'mean bias':>11}{'median bias':>13}{'Jensen gap':>12}"
-                f"{'sigma_z':>9}{'predicted mean':>16}"
+                f"{'% of mean':>11}{'vs bg (med)':>13}"
             )
             measured = {}
             for name in sorted(ensembles, key=lambda k: -ensembles[k].shape[1]):
                 entry = gap_from_ensemble(ensembles[name], observed, transform)
-                if not entry:
-                    continue
-                # What the closed form says this arm's mean bias should be, given
-                # its own measured spread and its own median. Independent check.
-                predicted = (
-                    implied_mean(
-                        float(np.nanmean(observed)) + entry["median_bias_mm"],
-                        entry["sigma_z"],
-                        eps,
-                    )
-                    - float(np.nanmean(observed))
+                if entry:
+                    measured[name] = entry
+
+            # Reductions are quoted against the background MEDIAN, because the
+            # background mean carries its own Jensen inflation and dividing one
+            # inflated number by another does not measure how much bias an arm
+            # removed. This is why "IMERG removes 4%" was misleading.
+            bg = measured.get("background", {}).get("median_bias_mm")
+            for name, entry in measured.items():
+                share = (
+                    100.0 * entry["jensen_gap_mm"] / entry["mean_bias_mm"]
+                    if abs(entry["mean_bias_mm"]) > 1e-9
+                    else float("nan")
                 )
-                entry["predicted_mean_bias_mm"] = predicted
-                measured[name] = entry
+                entry["jensen_share_of_mean_pct"] = share
+                if bg and abs(bg) > 1e-9 and name != "background":
+                    entry["median_bias_reduction_pct"] = 100.0 * (1.0 - entry["median_bias_mm"] / bg)
                 print(
                     f"    {name:<16}{entry['mean_bias_mm']:>+11.2f}"
                     f"{entry['median_bias_mm']:>+13.2f}{entry['jensen_gap_mm']:>+12.2f}"
-                    f"{entry['sigma_z']:>9.2f}{predicted:>+16.2f}"
+                    f"{share:>10.0f}%"
+                    + (
+                        f"{entry['median_bias_reduction_pct']:>12.0f}%"
+                        if "median_bias_reduction_pct" in entry
+                        else f"{'--':>13}"
+                    )
                 )
             report["measured"] = measured
+
+            ranked = sorted(measured.items(), key=lambda kv: abs(kv[1]["median_bias_mm"]))
+            print("\n[jensen] ranked by |median bias| -- the spread-independent comparison:")
+            for position, (name, entry) in enumerate(ranked, start=1):
+                print(
+                    f"    {position}. {name:<16}{entry['median_bias_mm']:>+8.2f} mm/day"
+                    f"   (mean-based ranking put it at {entry['mean_bias_mm']:+.2f})"
+                )
 
             if measured:
                 med = [e["median_bias_mm"] for e in measured.values()]
