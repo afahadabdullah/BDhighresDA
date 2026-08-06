@@ -123,6 +123,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid", default="bd")
     parser.add_argument("--factor", type=int, default=2, help="0.05 -> 0.1 degree block factor")
     parser.add_argument(
+        "--chirps-day-offset",
+        type=int,
+        default=0,
+        help="pair IMERG day D with CHIRPS day D+OFFSET. IMERG here is the BMD "
+        "03-03 UTC window (~87%% calendar day D-1) while CHIRPS daily is 00-00 UTC "
+        "(calendar day D), so label-to-label pairing compares different days and "
+        "inflates the fitted sigma_obs. Verify with "
+        "scripts/30_observation_space_audit.py --max-lag 2; for this archive it "
+        "indicates -1. Default 0 preserves earlier runs.",
+    )
+    parser.add_argument(
         "--months",
         nargs="+",
         type=int,
@@ -338,9 +349,29 @@ def load_zarr_time(store) -> np.ndarray:
 
 
 def load_chirps_on_imerg_lattice(
-    zarr_path: str, grid_name: str, factor: int, wanted: np.ndarray
+    zarr_path: str, grid_name: str, factor: int, wanted: np.ndarray, day_offset: int = 0
 ) -> np.ndarray:
-    """CHIRPS from the Zarr target, cropped to ``grid`` and block-averaged to 0.1 deg."""
+    """CHIRPS from the Zarr target, cropped to ``grid`` and block-averaged to 0.1 deg.
+
+    ``day_offset`` shifts which CHIRPS day is paired with each IMERG day, and it
+    matters more than it looks. The two products do not use the same convention:
+
+    * prepared IMERG day D is the BMD window ``[D-1 03:00 UTC, D 03:00 UTC]``,
+      so ~87% of it is calendar day D-1;
+    * CHIRPS daily is 00-00 UTC, i.e. calendar day D.
+
+    Pairing them label-to-label therefore compares two different days. A mean
+    bias barely notices -- the climatological mean hardly changes overnight --
+    but every PAIRED statistic does, and the residual sd written by
+    ``--fit-error-model`` is a paired statistic. Fitted that way it measures a
+    day of rainfall variability rather than IMERG's retrieval error, and the
+    resulting ``sigma_obs`` is far too large.
+
+    ``scripts/30_observation_space_audit.py --max-lag 2`` measures the right
+    value against the gauges, whose timestamp is unambiguous. For this archive
+    it reports CHIRPS peaking at lag -1 against BMD while IMERG peaks at 0,
+    which means ``--chirps-day-offset -1``.
+    """
     store = zarr.open(zarr_path, mode="r")
     time = load_zarr_time(store)
     grid = get_grid(grid_name)
@@ -348,6 +379,7 @@ def load_chirps_on_imerg_lattice(
     rows = slice(row0, row0 + grid.nlat)
     cols = slice(col0, col0 + grid.nlon)
 
+    wanted = np.asarray(wanted).astype("datetime64[D]") + np.timedelta64(int(day_offset), "D")
     lookup = {value: index for index, value in enumerate(time)}
     missing = [str(d) for d in wanted if d not in lookup]
     if missing:
@@ -393,7 +425,20 @@ def main() -> None:
             flush=True,
         )
 
-    chirps = load_chirps_on_imerg_lattice(args.zarr, args.grid, args.factor, time)
+    chirps = load_chirps_on_imerg_lattice(
+        args.zarr, args.grid, args.factor, time, args.chirps_day_offset
+    )
+    if args.chirps_day_offset == 0:
+        print(
+            "[fit] NOTE: --chirps-day-offset 0. IMERG uses the BMD 03-03 UTC window "
+            "and CHIRPS uses 00-00 UTC, so these are probably a day apart. Run "
+            "scripts/30_observation_space_audit.py --max-lag 2 to confirm; if it "
+            "reports CHIRPS at lag -1 and IMERG at 0, refit with "
+            "--chirps-day-offset -1 or the fitted sigma will be far too large.",
+            flush=True,
+        )
+    else:
+        print(f"[fit] pairing IMERG day D with CHIRPS day D{args.chirps_day_offset:+d}", flush=True)
     if chirps.shape != imerg.shape:
         raise ValueError(f"shape mismatch: IMERG {imerg.shape} versus CHIRPS {chirps.shape}")
 
@@ -428,6 +473,7 @@ def main() -> None:
         "stratify_mode": np.asarray(args.season_mode, dtype="U8"),
         "months": np.asarray(sorted(args.months) if args.months else [], dtype=np.int32),
         "frequency_only": np.asarray(bool(args.frequency_only)),
+        "chirps_day_offset": np.int32(args.chirps_day_offset),
     }
     report: dict = {
         "source_files": list(args.imerg),
@@ -437,6 +483,7 @@ def main() -> None:
         "n_quantiles": args.n_quantiles,
         "wet_threshold": args.wet_threshold,
         "season_mode": args.season_mode,
+        "chirps_day_offset": args.chirps_day_offset,
         "frequency_only": args.frequency_only,
         "months": sorted(args.months) if args.months else None,
         "holdouts": {},
