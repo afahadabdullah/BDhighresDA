@@ -107,7 +107,7 @@ def main() -> None:
         "runs": [r["path"] for r in runs],
         "years": sorted(list(set(int(d.split("-")[0]) for r in runs for d in r["data"]["observation_dates"]))),
         "total_station_days": total_station_days,
-        "pooled_methods": pooled_results,
+        "pooled_aggregate_metrics": pooled_results,
     }
 
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +148,7 @@ def main() -> None:
 
     # Panel A: CRPS by Year & Pooled
     for idx, method in enumerate(METHODS):
-        vals = [run["data"]["methods"][method]["crps_mm"] for run in runs] + [pooled_results[method]["crps_mm"]]
+        vals = [run["data"]["aggregate_metrics"][method]["crps_mm"] for run in runs] + [pooled_results[method]["crps_mm"]]
         axes[0, 0].bar(x + (idx - 1.5) * width, vals, width, color=METHOD_COLOURS[method], label=method)
     axes[0, 0].set_xticks(x, categories)
     axes[0, 0].set_ylabel("CRPS (mm day$^{-1}$)")
@@ -171,7 +171,7 @@ def main() -> None:
 
     # Panel C: Correlation by Year & Pooled
     for idx, method in enumerate(METHODS):
-        vals = [run["data"]["methods"][method]["correlation_fisher_pooled"] for run in runs] + [pooled_results[method]["correlation"]]
+        vals = [run["data"]["aggregate_metrics"][method]["correlation_fisher_pooled"] for run in runs] + [pooled_results[method]["correlation"]]
         axes[0, 2].plot(x, vals, marker="o", lw=2, color=METHOD_COLOURS[method], label=method)
     axes[0, 2].set_xticks(x, categories)
     axes[0, 2].set_ylabel("Fisher-Pooled Correlation")
