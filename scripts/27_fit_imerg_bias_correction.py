@@ -155,6 +155,16 @@ def parse_args() -> argparse.Namespace:
         default=300,
         help="below this many pooled samples the map for that cell/season is identity",
     )
+    parser.add_argument(
+        "--frequency-only",
+        action="store_true",
+        help="apply the drizzle/frequency adaptation but leave amplitudes alone. "
+        "Use when the interannual sd of the IMERG bias is comparable to or larger "
+        "than its mean, which makes the leave-one-year-out amplitude map "
+        "noise-dominated: it removes the OTHER years' mean bias, which is not the "
+        "held-out year's bias. The frequency correction does not have this problem "
+        "because IMERG's light-rain over-detection is a stable retrieval property.",
+    )
     parser.add_argument("--fit-error-model", action="store_true")
     parser.add_argument(
         "--error-bins",
@@ -417,6 +427,7 @@ def main() -> None:
         "season_order": np.asarray(strata, dtype="U4"),
         "stratify_mode": np.asarray(args.season_mode, dtype="U8"),
         "months": np.asarray(sorted(args.months) if args.months else [], dtype=np.int32),
+        "frequency_only": np.asarray(bool(args.frequency_only)),
     }
     report: dict = {
         "source_files": list(args.imerg),
@@ -426,6 +437,7 @@ def main() -> None:
         "n_quantiles": args.n_quantiles,
         "wet_threshold": args.wet_threshold,
         "season_mode": args.season_mode,
+        "frequency_only": args.frequency_only,
         "months": sorted(args.months) if args.months else None,
         "holdouts": {},
     }
@@ -474,7 +486,11 @@ def main() -> None:
                             quantiles, np.linspace(0, 1, len(tk)), tk
                         ).astype(np.float32)
                     source_knots[season_index, :, i, j] = sk
-                    target_knots[season_index, :, i, j] = tk
+                    # --frequency-only keeps the drizzle cut but makes the
+                    # amplitude map the identity. With few fit years the
+                    # amplitude correction is noise-dominated (see the header),
+                    # while the frequency correction generalises well.
+                    target_knots[season_index, :, i, j] = sk if args.frequency_only else tk
                     cuts[season_index, i, j] = cut
                     fitted[season_index, i, j] = True
             print(
@@ -595,6 +611,44 @@ def main() -> None:
                 print(f"[fit] holdout {holdout} sigma by intensity: {readable}", flush=True)
 
         report["holdouts"][str(holdout)] = diagnostics
+
+    # Is the leave-one-year-out amplitude map even estimable?
+    #
+    # The map applied to year Y is built from the OTHER years, so it is only
+    # useful if the bias is persistent across years. If the interannual spread is
+    # comparable to the mean, the LOYO estimate is noise: it removes a bias the
+    # held-out year does not have, and single-year bias gets WORSE. Say so
+    # explicitly rather than leaving it to be noticed in the per-year table.
+    raw_by_year = [
+        entry["raw_bias_mm"]
+        for entry in report["holdouts"].values()
+        if np.isfinite(entry.get("raw_bias_mm", np.nan))
+    ]
+    if len(raw_by_year) >= 3:
+        mean_bias = float(np.mean(raw_by_year))
+        sd_bias = float(np.std(raw_by_year, ddof=1))
+        stderr = sd_bias / np.sqrt(max(len(raw_by_year) - 1, 1))
+        report["persistence"] = {
+            "mean_raw_bias_mm": mean_bias,
+            "interannual_sd_mm": sd_bias,
+            "loyo_standard_error_mm": stderr,
+            "amplitude_map_estimable": bool(abs(mean_bias) > stderr),
+        }
+        print(
+            f"\n[fit] persistence: mean raw bias {mean_bias:+.3f} mm/day, "
+            f"interannual sd {sd_bias:.3f}, leave-one-out standard error "
+            f"{stderr:.3f} mm/day",
+            flush=True,
+        )
+        if abs(mean_bias) <= stderr and not args.frequency_only:
+            print(
+                "[fit] WARNING: the persistent bias is smaller than the error on "
+                "estimating it from the other years, so the amplitude map is "
+                "noise-dominated and will worsen single-year bias more often than "
+                "it helps. Prefer --frequency-only, which corrects the stable "
+                "light-rain over-detection and leaves amplitudes untouched.",
+                flush=True,
+            )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
