@@ -1,2 +1,11 @@
-from .flow import EMA, RectifiedFlow, flow_matching_loss, select_weights  # noqa: F401
+from .flow import (  # noqa: F401
+    EMA,
+    RectifiedFlow,
+    VelocityOnly,
+    apply_dry_mask,
+    flow_matching_loss,
+    predict_dry_logit,
+    select_weights,
+    split_prediction,
+)
 from .unet import UNet  # noqa: F401

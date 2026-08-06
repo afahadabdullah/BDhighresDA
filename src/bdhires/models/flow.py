@@ -38,6 +38,7 @@ Manshausen et al. train separately -- for pure "DA without a background" runs.
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 class RectifiedFlow:
@@ -103,6 +104,106 @@ class RectifiedFlow:
         return t, 1.0 - t
 
 
+def apply_dry_mask(
+    field_t: torch.Tensor,
+    dry_logit: torch.Tensor,
+    dry_value: float,
+    mode: str = "threshold",
+    threshold: float = 0.5,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Impose the atom at zero rainfall on a field in TRANSFORMED space.
+
+    Rectified flow models a continuous density. Daily rainfall is not
+    continuous: CHIRPS is exactly zero over roughly half the domain, and no
+    amount of training makes a smooth density put finite mass on a single
+    point. The consequence measured on the v1 prior was a wet-day frequency of
+    0.649 against a target of 0.459, biased worst in dry regions -- which is
+    where the BMD gauges are, so it showed up as +5.88 mm/day at stations
+    against +2.65 domain-wide.
+
+    The hurdle head predicts P(dry) directly and this applies it, which is the
+    only part of the design that can represent the atom exactly.
+
+    ``mode``:
+      ``"threshold"``  dry where P(dry) > ``threshold``. Deterministic given the
+                       member; ensemble spread survives because each member
+                       follows its own trajectory and so gets its own P(dry).
+                       Spatially coherent, which matters for a rainfall field.
+      ``"sample"``     Bernoulli draw. Correct marginal wet fraction by
+                       construction, but speckles the wet/dry boundary.
+
+    ``dry_value`` must be ``transform.forward(0.0)`` -- in transformed space
+    zero rainfall is not zero, it is ``-mu/sd``.
+    """
+    probability = torch.sigmoid(dry_logit)
+    if mode == "sample":
+        noise = torch.rand(
+            probability.shape, device=probability.device,
+            dtype=probability.dtype, generator=generator,
+        )
+        is_dry = noise < probability
+    elif mode == "threshold":
+        is_dry = probability > threshold
+    else:
+        raise ValueError(f"unknown dry mask mode {mode!r}")
+    return torch.where(is_dry, torch.full_like(field_t, dry_value), field_t)
+
+
+class VelocityOnly(torch.nn.Module):
+    """Present a 2-channel hurdle network through the 1-channel interface.
+
+    ``sampler.assimilate`` and ``guidance.guidance_grad`` both call
+    ``model(x, t, cond)`` and treat the result as the velocity. Rather than
+    thread a channel index through both, wrap the network once at the call
+    site: the flow machinery is then completely unaware the hurdle head exists.
+
+    The dry logit is NOT cached from these calls on purpose. With
+    classifier-free guidance the last evaluation is the *unconditional* branch,
+    so a cache would silently hand back the wrong logit. Read it explicitly
+    with :func:`predict_dry_logit` once sampling has finished.
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x, t, cond=None):
+        out = self.model(x, t, cond)
+        return out[:, :1] if out.shape[1] > 1 else out
+
+
+@torch.no_grad()
+def predict_dry_logit(model, x1: torch.Tensor, cond, t_eval: float = 0.99) -> torch.Tensor:
+    """Dry-probability logit for a finished sample.
+
+    Evaluated at ``t_eval`` close to 1, where ``x_t`` is within a percent of the
+    clean field, so the classifier is used in the regime it is most accurate in.
+    ``x1`` is passed directly rather than re-noised: at t = 0.99 the noise term
+    contributes 1% and adding it would only make the mask stochastic for no
+    modelling gain.
+    """
+    batch = x1.shape[0]
+    tb = torch.full((batch,), float(t_eval), device=x1.device, dtype=x1.dtype)
+    out = model(x1, tb, cond)
+    if out.shape[1] < 2:
+        raise ValueError(
+            "model has no hurdle head; train with train.hurdle.enabled to use it"
+        )
+    return out[:, 1:2]
+
+
+def split_prediction(pred: torch.Tensor, hurdle: bool) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Separate the flow velocity from the hurdle logit in the model output."""
+    if not hurdle:
+        return pred, None
+    if pred.shape[1] < 2:
+        raise ValueError(
+            f"hurdle head requires out_channels >= 2, model returned {pred.shape[1]}"
+        )
+    return pred[:, :1], pred[:, 1:2]
+
+
 def flow_matching_loss(
     model,
     x1: torch.Tensor,
@@ -113,12 +214,29 @@ def flow_matching_loss(
     logit_normal_t: bool = True,
     clean_loss_fn=None,
     return_components: bool = False,
+    dry_target: torch.Tensor | None = None,
+    hurdle_weight: float = 1.0,
+    dry_weight: float = 1.0,
 ):
     """Conditional flow-matching loss with optional conditioning dropout.
 
     ``mask``: 1 where the target is valid (CHIRPS is land-only -- ocean cells
     must be excluded from the loss or the model wastes capacity learning the
     fill value and the DA guidance leaks over the Bay of Bengal).
+
+    ``dry_target``: 1 where the CLEAN field is dry, same shape as ``x1``.
+    Supplying it switches on the hurdle head, which must then be present as a
+    second model output channel. The head is trained at every ``t``: near
+    ``t=1`` the input is almost clean and the classification is easy, near
+    ``t=0`` it is nearly pure noise and the head can only fall back on the
+    conditioning. That is the same difficulty gradient x1-prediction already
+    has, and it is what makes the head usable at the end of sampling.
+
+    ``dry_weight``: multiplier on dry cells in the flow MSE. The v1 failure was
+    concentrated in the dry regime -- an unweighted mean over a field that is
+    half dry still lets the wet half dominate the gradient, because wet cells
+    carry far larger residuals. Values above 1 buy dry-end accuracy at some
+    cost to the extreme tail, so this is a knob, not a default.
     """
     b = x1.shape[0]
     t = flow.sample_t(b, x1.device, logit_normal=logit_normal_t)
@@ -128,13 +246,22 @@ def flow_matching_loss(
         keep = (torch.rand(b, 1, 1, 1, device=x1.device) > cond_dropout).float()
         cond = cond * keep
 
-    pred = model(x_t, t, cond)
+    raw = model(x_t, t, cond)
+    pred, dry_logit = split_prediction(raw, dry_target is not None)
+
     err = (pred - target) ** 2
-    if mask is not None:
-        m = mask.expand_as(err)
-        flow_loss = (err * m).sum() / m.sum().clamp_min(1.0)
-    else:
-        flow_loss = err.mean()
+    weights = torch.ones_like(err) if mask is None else mask.expand_as(err).clone().float()
+    if dry_target is not None and dry_weight != 1.0:
+        weights = weights * (1.0 + (dry_weight - 1.0) * dry_target.expand_as(err))
+    flow_loss = (err * weights).sum() / weights.sum().clamp_min(1.0)
+
+    hurdle_loss = pred.new_zeros(())
+    if dry_target is not None:
+        elementwise = F.binary_cross_entropy_with_logits(
+            dry_logit, dry_target.to(dry_logit.dtype), reduction="none"
+        )
+        m = torch.ones_like(elementwise) if mask is None else mask.expand_as(elementwise).float()
+        hurdle_loss = hurdle_weight * (elementwise * m).sum() / m.sum().clamp_min(1.0)
 
     auxiliary_loss = pred.new_zeros(())
     if clean_loss_fn is not None:
@@ -142,9 +269,10 @@ def flow_matching_loss(
         auxiliary_loss = clean_loss_fn(clean)
         if auxiliary_loss.ndim:
             raise ValueError("clean_loss_fn must return a scalar")
-    total = flow_loss + auxiliary_loss
+
+    total = flow_loss + auxiliary_loss + hurdle_loss
     if return_components:
-        return total, flow_loss, auxiliary_loss
+        return total, flow_loss, auxiliary_loss, hurdle_loss
     return total
 
 

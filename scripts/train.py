@@ -59,6 +59,29 @@ def save_checkpoint(state: dict, path: Path) -> None:
     partial.replace(path)
 
 
+def resolve_residual(cfg: dict, stats: dict) -> ResidualSpec:
+    """ResidualSpec from the stats file, with a config-level override.
+
+    ``data.residual_override: none`` forces the ABSOLUTE parameterisation --
+    the network predicts T(CHIRPS) rather than T(CHIRPS) - T(base).
+
+    Why that matters here. In residual mode, emitting dry rainfall requires the
+    network to output exactly -(T(base) + T(0)), a value that moves per pixel
+    with the base. CPC is wet over 84% of the domain once 0.5 degree cells are
+    smeared to 0.05 degrees, so the dry target is almost never near zero and the
+    network -- which shrinks toward its conditional mean -- consistently
+    undershoots. Measured on v1: predicted residual -0.71 where the truth was
+    -2.59. In absolute mode "dry" is the single fixed value T(0), shared by
+    ~54% of training pixels, which is a mode a flow model can actually learn.
+    No information is lost: cpc_precip stays in cond_channels either way.
+    """
+    spec = ResidualSpec.from_stats(stats)
+    override = str(cfg.get("data", {}).get("residual_override", "")).strip().lower()
+    if override in {"none", "off", "absolute", "false"}:
+        return ResidualSpec(enabled=False)
+    return spec
+
+
 def build_dataset(cfg: dict, split: str) -> PrecipDataset:
     stats = json.loads(Path(cfg["data"]["stats"]).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
@@ -84,7 +107,7 @@ def build_dataset(cfg: dict, split: str) -> PrecipDataset:
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
-        residual=ResidualSpec.from_stats(stats),
+        residual=resolve_residual(cfg, stats),
         climatology=load_climatology(cfg["data"]["stats"], stats),
     )
 
@@ -264,7 +287,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
         cond_std=np.asarray(stats["cond_std"], np.float32),
         cond_transform=CondTransform.from_stats(stats),
-        residual=ResidualSpec.from_stats(stats),
+        residual=resolve_residual(cfg, stats),
         climatology=load_climatology(cfg["data"]["stats"], stats),
     )
     return ValidationMonitor(
@@ -292,6 +315,9 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         cond_mean=dataset.cond_mean,
         cond_std=dataset.cond_std,
         extent=(grid.lon_min, grid.lon_max, grid.lat_min, grid.lat_max),
+        hurdle=bool((cfg["train"].get("hurdle") or {}).get("enabled", False)),
+        dry_mask_mode=str((cfg["train"].get("hurdle") or {}).get("mask_mode", "threshold")),
+        dry_threshold=float((cfg["train"].get("hurdle") or {}).get("mask_threshold", 0.5)),
     )
 
 
@@ -322,10 +348,14 @@ def main():
     )
     val_dl = DataLoader(val_ds, batch_size=cfg["train"]["batch_size"], num_workers=2)
 
+    hurdle_cfg = cfg["train"].get("hurdle") or {}
+    hurdle_enabled = bool(hurdle_cfg.get("enabled", False))
+    dry_threshold_mm = float(hurdle_cfg.get("wet_threshold_mm", 0.1))
+    # Channel 0 is the flow velocity; channel 1 is the dry-probability logit.
     model = UNet(
         in_channels=1,
         cond_channels=train_ds.total_cond_channels,
-        out_channels=1,
+        out_channels=2 if hurdle_enabled else 1,
         image_size=cfg["data"]["crop"],
         **cfg["model"],
     ).to(device)
@@ -435,7 +465,7 @@ def main():
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
         net.train()
-        run_fm, run_coarse, batches = 0.0, 0.0, 0
+        run_fm, run_coarse, run_hurdle, batches = 0.0, 0.0, 0.0, 0
         if reporter is not None:
             reporter.begin_epoch(epoch)
         for i, batch in enumerate(dl):
@@ -447,14 +477,24 @@ def main():
             clean_loss_fn = build_coarse_clean_loss(
                 cfg, train_ds, batch, device
             )
+            # Dry mask from RAW mm, not from transformed space: the threshold is
+            # a physical statement about the rain gauge, not about the network.
+            dry_target = None
+            if hurdle_enabled:
+                dry_target = (
+                    batch["target_mm"].to(device, non_blocking=True) < dry_threshold_mm
+                ).float()
 
             with torch.autocast("cuda", dtype=dtype, enabled=device.type == "cuda"):
-                loss, fm_loss, coarse_loss = flow_matching_loss(
+                loss, fm_loss, coarse_loss, hurdle_loss = flow_matching_loss(
                     net, x1, cond, flow, mask=mask,
                     cond_dropout=cfg["train"]["cond_dropout"],
                     logit_normal_t=cfg["train"].get("logit_normal_t", True),
                     clean_loss_fn=clean_loss_fn,
                     return_components=True,
+                    dry_target=dry_target,
+                    hurdle_weight=float(hurdle_cfg.get("weight", 1.0)),
+                    dry_weight=float(cfg["train"].get("dry_weight", 1.0)),
                 )
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -466,6 +506,7 @@ def main():
                 ema.update(model)
             run_fm += fm_loss.item()
             run_coarse += coarse_loss.item()
+            run_hurdle += hurdle_loss.item()
             batches += 1
             step += 1
             if reporter is not None:
@@ -480,6 +521,7 @@ def main():
             components = (
                 f"FM {run_fm / max(1, batches):.4f}  "
                 f"coarse {run_coarse / max(1, batches):.4f}"
+                + (f"  hurdle {run_hurdle / max(1, batches):.4f}" if hurdle_enabled else "")
             )
             if peak:
                 components += f"  {peak}"

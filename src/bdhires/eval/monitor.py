@@ -101,7 +101,16 @@ class ValidationMonitor:
         cond_mean: np.ndarray | None = None,
         cond_std: np.ndarray | None = None,
         extent: "tuple[float, float, float, float] | None" = None,
+        hurdle: bool = False,
+        dry_mask_mode: str = "threshold",
+        dry_threshold: float = 0.5,
     ):
+        # Hurdle settings. dry_value is the TRANSFORMED value of zero rainfall,
+        # which is -mu/sd rather than 0.
+        self.hurdle = bool(hurdle)
+        self.dry_mask_mode = dry_mask_mode
+        self.dry_threshold = float(dry_threshold)
+        self.dry_value = float(np.asarray(transform.forward(np.float32(0.0))))
         self.extent = extent      # (lon_min, lon_max, lat_min, lat_max) for axes
         # Set from the `ema` argument on every run, so the figures always
         # state which weights produced them rather than assuming EMA.
@@ -261,7 +270,7 @@ class ValidationMonitor:
         import torch
 
         from ..da.sampler import SamplerConfig, sample
-        from ..models.flow import RectifiedFlow
+        from ..models.flow import RectifiedFlow, VelocityOnly, apply_dry_mask, predict_dry_logit
 
         started = time.time()
         self.weights_label = (
@@ -300,10 +309,13 @@ class ValidationMonitor:
             for case in self.cases:
                 item = self.ds[self._position_of(case.index)]
                 base = item["base"][None].to(self.device)
+                case_cond = item["cond"][None].to(self.device)
                 with torch.no_grad():
+                    # VelocityOnly hides the hurdle channel from the sampler; it
+                    # is a no-op for single-output models.
                     generated = sample(
-                        model,
-                        item["cond"][None].to(self.device),
+                        VelocityOnly(model),
+                        case_cond,
                         shape,
                         self.device,
                         cfg=scfg,
@@ -311,6 +323,17 @@ class ValidationMonitor:
                         mask=mask,
                         to_precip=lambda x, b=base: residual.decode(x, b),
                     )
+                    # Impose the atom at zero. Without this the model can only
+                    # approach dry asymptotically and the wet-day frequency runs
+                    # high -- 0.649 against 0.459 on the v1 prior.
+                    if self.hurdle:
+                        generated = apply_dry_mask(
+                            generated,
+                            predict_dry_logit(model, generated, case_cond),
+                            dry_value=self.dry_value,
+                            mode=self.dry_mask_mode,
+                            threshold=self.dry_threshold,
+                        )
                 # The sampler returns the network's own variable; decode it into
                 # transformed-precipitation space before inverting to mm.
                 members = self.transform.inverse(
@@ -442,7 +465,16 @@ class ValidationMonitor:
         )
         low = np.quantile(members[:, keep], 0.05, axis=0)
         high = np.quantile(members[:, keep], 0.95, axis=0)
+        # Wet-day frequency is tracked because its ABSENCE is why a 19-point
+        # wet-frequency error survived 150 epochs of v1 unnoticed: CRPS and the
+        # q50/q99 quantiles are all but blind to rain-no-rain miscounting.
+        wet_threshold = 1.0
         return {
+            "wet_fraction_pred": float((mean[keep] >= wet_threshold).mean()),
+            "wet_fraction_obs": float((observed >= wet_threshold).mean()),
+            "wet_fraction_error": float(
+                (mean[keep] >= wet_threshold).mean() - (observed >= wet_threshold).mean()
+            ),
             "crps_mm": float(crps_ensemble(members[:, keep], observed)),
             "rmse_mm": float(np.sqrt(np.mean(difference**2))),
             "mae_mm": float(np.mean(np.abs(difference))),

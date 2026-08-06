@@ -1,0 +1,128 @@
+# ABLATION B: absolute target, no hurdle head.
+#
+# Isolates the target parameterisation.  Architecturally identical to v1, so
+# any wet-frequency improvement here is attributable to dropping the residual
+# and nothing else.  Also the cheapest run of the three -- single output
+# channel, no BCE term.
+#
+# WHAT THIS FAMILY FIXES
+# ----------------------
+# The v1 prior (runs/prior_h100_cpc) rains far too often: wet-day frequency
+# 0.649 against CHIRPS's 0.459, measured on 400 days.  Because raining too
+# often costs most where true rainfall is lowest, and BMD gauges sit in the dry
+# half of the domain (CHIRPS ~6.7 mm/day at stations against 12.3 domain-wide),
+# it surfaced as +5.88 mm/day at stations versus +2.65 on the grid -- and then
+# as the +10.30 mm/day "background bias" in the DA table, once the convex
+# inverse transform added a further Jensen inflation on the ensemble mean.
+#
+# Two causes, both addressed here:
+#
+#   1. Rectified flow is a CONTINUOUS density and CHIRPS has ~54% of its mass
+#      at exactly 0 mm.  No continuous model can place finite mass on a point,
+#      so dry cells decode to small positive rain.  Fixed by the hurdle head:
+#      a second output channel predicting P(dry), applied as a mask at
+#      sampling.  This is the only change that can represent the atom exactly.
+#
+#   2. The residual target T(CHIRPS) - T(CPC) makes "dry" a MOVING target.
+#      CPC is wet over 84% of the domain once 0.5 deg cells are smeared to
+#      0.05 deg, so emitting dry needs a large negative residual that the
+#      network -- which shrinks toward its conditional mean -- undershoots
+#      (predicted -0.71 where the truth was -2.59).  Fixed by predicting the
+#      absolute field; CPC stays in cond_channels so no information is lost.
+#
+# Kept from v1 deliberately: the log1p transform.  In log1p(p/0.1) the
+# 0 -> 0.1 mm gap is ~10% of the transform's range; under sqrt it is ~3%.
+# log1p resolves the dry end about 3x better, so v2's move to sqrt would have
+# worked against the very thing that is broken.  sqrt helps the extreme tail;
+# that is a separate trade and should not be bundled into this experiment.
+#
+# Validation now tracks wet_fraction_error every pass.  Its absence is why a
+# 19-point wet-frequency error survived 150 epochs of v1 unnoticed -- CRPS and
+# the q50/q99 quantiles are nearly blind to rain-no-rain miscounting.
+#
+# Differences from v3: no hurdle head, dry_weight 1.0 (off).
+
+data:
+  zarr: data/processed/bd_wide_cpc.zarr
+  stats: data/processed/stats_cpc.json
+  crop: 128
+  seasonal_encoding: true
+  min_valid_fraction: 0.3
+  monitor_grid: bd
+  residual_override: none
+  precip_cond_index: 0
+  precip_coverage_cond_index: 1
+  precip_baseline_label: CPC input
+  precip_baseline_channel: cpc_precip
+  precip_baseline_coverage_channel: cpc_valid
+  cond_channels:
+    - cpc_precip
+    - cpc_valid
+    - era5_tcwv
+    - era5_cape
+    - era5_u10
+    - era5_v10
+    - era5_msl
+  years:
+    train: [1981, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 32]
+  dropout: 0.2
+  num_heads: 4
+
+train:
+  out_dir: runs/prior_h100_cpc_v3_absolute
+  epochs: 150
+  batch_size: 32
+  lr: 1.5e-4
+  weight_decay: 0.01
+  warmup_steps: 2000
+  grad_clip: 1.0
+  use_ema: true
+  ema_decay: 0.9995
+  # Hurdle head: channel 0 is the flow velocity, channel 1 is the
+  # dry-probability logit.  mask_mode 'threshold' keeps the mask
+  # spatially coherent while ensemble spread survives, because each
+  # member follows its own trajectory and so gets its own P(dry).
+  hurdle:
+    enabled: false
+    weight: 1.0
+    wet_threshold_mm: 0.1
+    mask_mode: threshold
+    mask_threshold: 0.5
+  # Multiplier on dry cells in the flow MSE.  1.0 disables it.  Above 1
+  # buys dry-end accuracy at some cost to the extreme tail.
+  dry_weight: 1.0
+  # Raised from v1's 0.0.  Two reasons, and neither is the wet-bias fix:
+  # (a) it is a genuine regulariser on a model with ~13.9k daily fields;
+  # (b) METHODOLOGY 3.3's unconditional-prior ablation REQUIRES it -- with
+  #     cond_dropout 0.0 the v1 checkpoints cannot produce p(x1) at all, so
+  #     that claim is currently unsupportable.  Set identically across all
+  #     three runs so it never confounds the A/B/C comparison.
+  cond_dropout: 0.1
+  logit_normal_t: true
+  num_workers: 8
+  seed: 0
+  log_every: 50
+  ckpt_every: 5
+  keep_every: 10
+  early_stop_patience: 0
+
+validation:
+  enabled: true
+  start_epoch: 10
+  every: 5
+  members: 8
+  n_steps: 30
+  cfg_scale: 1.0
+  month: 7
+  # Spread across the distribution, not just the wet end, so the
+  # dry-frequency fix is visible in validation.
+  quantiles: [0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+  save_maps: true
