@@ -204,6 +204,18 @@ def score_arm(
         "spread_skill_ratio": float(calibration.get("ratio", np.nan)),
         "wet_fraction_pred": float(np.mean(mean >= WET_THRESHOLD_MM)),
         "wet_fraction_obs": float(np.mean(truth >= WET_THRESHOLD_MM)),
+        # On a short dry window the MEDIAN is decided by dry-dry pairs that agree
+        # exactly, so it rewards anything able to output a hard zero and says
+        # little about skill where rain actually fell.
+        "wet_median_ae_mm": (
+            float(np.median(np.abs(difference[truth >= WET_THRESHOLD_MM])))
+            if np.any(truth >= WET_THRESHOLD_MM) else float("nan")
+        ),
+        "wet_mae_mm": (
+            float(np.mean(np.abs(difference[truth >= WET_THRESHOLD_MM])))
+            if np.any(truth >= WET_THRESHOLD_MM) else float("nan")
+        ),
+        "n_wet": int(np.sum(truth >= WET_THRESHOLD_MM)),
     }
 
 
@@ -213,6 +225,8 @@ def score_product(product_mm: np.ndarray, truth_mm: np.ndarray) -> dict:
     if ok.sum() < 2:
         return {"n": int(ok.sum())}
     difference = product_mm[ok] - truth_mm[ok]
+    truth = truth_mm[ok]
+    wet = truth >= WET_THRESHOLD_MM
     return {
         "n": int(ok.sum()),
         "bias_mm": float(np.mean(difference)),
@@ -220,6 +234,17 @@ def score_product(product_mm: np.ndarray, truth_mm: np.ndarray) -> dict:
         "mae_mm": float(np.mean(np.abs(difference))),
         "median_ae_mm": float(np.median(np.abs(difference))),
         "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+        # A deterministic product can output an exact zero and score 0.00 median
+        # against a dry gauge; an ensemble mean essentially never can. Comparing
+        # the two on median alone is not a fair fight, so the wet subset and the
+        # mean are carried alongside.
+        "wet_median_ae_mm": (
+            float(np.median(np.abs(difference[wet]))) if wet.any() else float("nan")
+        ),
+        "wet_mae_mm": (
+            float(np.mean(np.abs(difference[wet]))) if wet.any() else float("nan")
+        ),
+        "n_wet": int(wet.sum()),
     }
 
 
@@ -518,33 +543,69 @@ def plot_rank_histograms(results: dict, dumps: dict, out_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def report_duplicate_runs(results: dict) -> list[list[str]]:
+    """Flag runs whose withheld scores are identical to the last digit.
+
+    Two configurations cannot agree exactly by chance.  When they do, the run
+    did not happen: the usual cause is a wrapper that reuses ``${PREFIX}.npz``
+    when the file already exists, so a config change silently replays the old
+    dump.  This caught ``measured_R`` replaying ``s1r1`` -- a config edit that
+    appeared to run for an hour and changed nothing.
+    """
+    signature = {}
+    for name, block in results.items():
+        key = json.dumps(block["withheld"], sort_keys=True, default=float)
+        signature.setdefault(key, []).append(name)
+    groups = [names for names in signature.values() if len(names) > 1]
+    if groups:
+        print()
+        print("[DUPLICATE] runs with IDENTICAL withheld scores -- these did not")
+        print("    actually run as separate configurations. Check for a cached NPZ")
+        print("    being reused by the submission wrapper:")
+        for names in groups:
+            print("      " + "  ==  ".join(names))
+    return groups
+
+
 def print_tables(results: dict) -> None:
     print()
     print("[withheld] GAUGE IS TRUTH. Scored on withheld stations only.")
-    print(f"    {'run':28s} {'arm':10s} {'n':>4s} {'medbias':>8s} {'medMAE':>7s} "
-          f"{'CRPS':>7s} {'CRPS_pt':>8s} {'spread':>7s} {'sprd/skl':>8s}")
+    print("    medMAE over a short dry window is decided by dry-dry pairs that agree")
+    print("    exactly; wetMAE (gauge >= 1 mm) is the number that reflects skill.")
+    print(f"    {'run':28s} {'arm':10s} {'n':>4s} {'nwet':>4s} {'medbias':>8s} "
+          f"{'medMAE':>7s} {'meanMAE':>8s} {'wetMAE':>7s} {'CRPS':>7s} "
+          f"{'CRPS_pt':>8s} {'sprd/skl':>8s}")
     for name, block in results.items():
         for arm, s in block["withheld"].items():
             if not s.get("n"):
                 continue
-            print(f"    {name:28s} {arm:10s} {s['n']:>4d} "
+            print(f"    {name:28s} {arm:10s} {s['n']:>4d} {s.get('n_wet', 0):>4d} "
                   f"{s['median_bias_mm']:>+8.2f} {s['median_ae_mm']:>7.2f} "
+                  f"{s['mae_mm']:>8.2f} {s.get('wet_mae_mm', float('nan')):>7.2f} "
                   f"{s['crps']:>7.3f} {s['crps_point_scale']:>8.3f} "
-                  f"{s['spread_mm']:>7.2f} {s['spread_skill_ratio']:>8.2f}")
+                  f"{s['spread_skill_ratio']:>8.2f}")
 
     print()
-    print("[products] the same withheld gauges, raw inputs with no assimilation:")
-    print(f"    {'run':28s} {'product':14s} {'n':>5s} {'medbias':>8s} {'medMAE':>7s}")
+    print("[products] same withheld gauges, raw inputs, no assimilation.")
+    print("    A deterministic product can emit an exact zero and score 0.00 median")
+    print("    against a dry gauge; an ensemble mean essentially never can, so read")
+    print("    meanMAE/wetMAE when comparing these against the arms above.")
+    print(f"    {'run':28s} {'product':14s} {'n':>4s} {'medbias':>8s} {'medMAE':>7s} "
+          f"{'meanMAE':>8s} {'wetMAE':>7s}")
     for name, block in results.items():
         for product, s in block.get("products", {}).items():
             if not s.get("n"):
                 continue
-            print(f"    {name:28s} {product:14s} {s['n']:>5d} "
-                  f"{s['median_bias_mm']:>+8.2f} {s['median_ae_mm']:>7.2f}")
+            print(f"    {name:28s} {product:14s} {s['n']:>4d} "
+                  f"{s['median_bias_mm']:>+8.2f} {s['median_ae_mm']:>7.2f} "
+                  f"{s['mae_mm']:>8.2f} {s.get('wet_mae_mm', float('nan')):>7.2f}")
 
     print()
     print("[innovation] consistency at ASSIMILATED gauges, transformed units.")
-    print("    ratio = var(O-B) / (background spread + R); 1.0 means consistent.")
+    print("    NOTE: var(O-B) uses only the BACKGROUND, which is the same checkpoint,")
+    print("    days and fold for every run here -- so the ratio is a property of the")
+    print("    background and is IDENTICAL across configurations by construction. It")
+    print("    diagnoses the prior, not the assimilation settings.")
     print(f"    {'run':28s} {'var(O-B)':>9s} {'spread':>8s} {'R':>7s} "
           f"{'expected':>9s} {'ratio':>7s}  verdict")
     for name, block in results.items():
@@ -553,11 +614,36 @@ def print_tables(results: dict) -> None:
             continue
         ratio = i["consistency_ratio"]
         verdict = ("R and/or spread TOO SMALL" if ratio > 1.5 else
-                   "over-dispersed / obs under-used" if ratio < 0.67 else
+                   "OVER-DISPERSED: prior spread too large" if ratio < 0.67 else
                    "consistent")
         print(f"    {name:28s} {i['innovation_var']:>9.3f} "
               f"{i['background_spread_var']:>8.3f} {i['R_total']:>7.3f} "
               f"{i['expected_var']:>9.3f} {ratio:>7.2f}  {verdict}")
+
+    print()
+    print("[Desroziers] <(O-A)(O-B)> estimates R and DOES depend on the run.")
+    print("    This is the run-dependent R diagnostic. If the estimate is far BELOW")
+    print("    the assumed R, the analysis is fitting the assimilated gauges harder")
+    print("    than the stated observation error permits -- i.e. the effective R the")
+    print("    guidance applies is smaller than the R in the config.")
+    print(f"    {'run':28s} {'R assumed':>10s} {'R gauges':>9s} {'R combined':>11s} "
+          f"{'ratio':>7s}  verdict")
+    for name, block in results.items():
+        i = block.get("innovation", {})
+        if not i.get("n"):
+            continue
+        estimates = [i.get(f"desroziers_R_{a}") for a in ("gauges", "combined")]
+        best = next((e for e in reversed(estimates) if e is not None), None)
+        if best is None:
+            continue
+        ratio = best / i["R_total"] if i["R_total"] else float("nan")
+        verdict = ("analysis OVERFITS the gauges" if ratio < 0.5 else
+                   "analysis under-uses the gauges" if ratio > 2.0 else
+                   "consistent with the stated R")
+        print(f"    {name:28s} {i['R_total']:>10.3f} "
+              f"{estimates[0] if estimates[0] is not None else float('nan'):>9.3f} "
+              f"{estimates[1] if estimates[1] is not None else float('nan'):>11.3f} "
+              f"{ratio:>7.2f}  {verdict}")
 
     print()
     print("[overfit] assimilated minus withheld median MAE (large = fitting the")
@@ -662,6 +748,7 @@ def main() -> None:
         raise SystemExit("no dumps could be read")
 
     print_tables(results)
+    report_duplicate_runs(results)
     plot_innovation(results, out_dir / "innovation_consistency.png")
     plot_arm_comparison(results, out_dir / "arm_comparison.png")
     plot_rank_histograms(results, dumps, out_dir / "rank_histograms.png")
