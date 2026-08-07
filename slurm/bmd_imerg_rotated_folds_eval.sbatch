@@ -10,6 +10,20 @@
 #SBATCH --array=0-4%2
 #SBATCH --output=logs/%x-%A_%a.out
 
+# Launcher. On this cluster `srun` inside an allocation fails on the GH200 GPU
+# nodes with "CPU binding outside of job step allocation, allocated CPUs are:
+# 0x..FF / Unable to satisfy cpu bind request": from SLURM 22.05 the step no
+# longer inherits --cpus-per-task from the batch script, so its default binding
+# asks for more than the 8 CPUs the job holds. All five folds of the first
+# IMERG submission died this way before running a single day.
+#
+# slurm/cpc_satellite_may2024.sbatch runs Python directly and works, so that is
+# the default here too. Set BDHIRES_LAUNCH="run_step --cpu-bind=none" to
+# restore a step launcher if a future site needs one.
+read -r -a LAUNCH <<< "${BDHIRES_LAUNCH:-}"
+run_step() { "${LAUNCH[@]+"${LAUNCH[@]}"}" "$@"; }
+
+
 set -euo pipefail
 
 FOLD="${SLURM_ARRAY_TASK_ID:?This job must run as the configured five-fold array}"
@@ -62,7 +76,7 @@ mkdir -p "$ROOT" logs
 ENV_PREFIX="/home/afahad/nb/project/BDDA/envs/bdda-gh200"
 PYTHON_BIN="${PYTHON_BIN:-$ENV_PREFIX/bin/python}"
 if [[ ! -s "$BMD_DAILY" ]]; then
-    srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
+    run_step "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
         --data-dir "${BMD_DATA_DIR:-data/stations/data_2020_2025}" \
         --stations "${BMD_STATIONS}" \
         --start "$BMD_START" \

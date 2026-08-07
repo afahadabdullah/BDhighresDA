@@ -9,6 +9,20 @@
 #SBATCH --time=18:00:00
 #SBATCH --output=logs/%x-%j.out
 
+# Launcher. On this cluster `srun` inside an allocation fails on the GH200 GPU
+# nodes with "CPU binding outside of job step allocation, allocated CPUs are:
+# 0x..FF / Unable to satisfy cpu bind request": from SLURM 22.05 the step no
+# longer inherits --cpus-per-task from the batch script, so its default binding
+# asks for more than the 8 CPUs the job holds. All five folds of the first
+# IMERG submission died this way before running a single day.
+#
+# slurm/cpc_satellite_may2024.sbatch runs Python directly and works, so that is
+# the default here too. Set BDHIRES_LAUNCH="run_step --cpu-bind=none" to
+# restore a step launcher if a future site needs one.
+read -r -a LAUNCH <<< "${BDHIRES_LAUNCH:-}"
+run_step() { "${LAUNCH[@]+"${LAUNCH[@]}"}" "$@"; }
+
+
 # Configurable bounded real-observation experiment: exact 03:00-03:00 UTC BMD
 # reporting windows, background, gauges-only, correlation-controlled
 # IMERG-only, and stabilized simultaneous DA. BMD stations remain withheld
@@ -106,7 +120,7 @@ echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
 if [[ "${BMD_REUSE_CONVERTED:-0}" == "1" || ( "$RAINFALL" == "$DAILY" && -s "$DAILY" ) ]]; then
     echo "Reusing prepared canonical station observations: $DAILY"
 else
-    srun --ntasks=1 "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
+    run_step "$PYTHON_BIN" -u scripts/05_convert_bmd_legacy.py \
         --rainfall "$RAINFALL" \
         --stations "$STATIONS" \
         --start "$START" \
@@ -124,7 +138,7 @@ else
     if [[ "${IMERG_ALLOW_MISSING:-0}" == "1" ]]; then
         EXTRA_FLAGS+=("--allow-missing")
     fi
-    srun --ntasks=1 "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
+    run_step "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
         --input "$IMERG_DIR" \
         --source-frequency "$IMERG_SOURCE_FREQUENCY" \
         --start "$START" \
@@ -137,7 +151,7 @@ else
 fi
 
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
+run_step "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --config "$CONFIG" \
     --ckpt "$CKPT" \
     --stations "$DAILY" \
@@ -155,7 +169,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --out "$DUMP" \
     --report "$REPORT"
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
+run_step "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --dump "$DUMP" \
     --report "$REPORT" \
     --out-diagnostics "$DIAGNOSTICS" \
