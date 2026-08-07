@@ -195,8 +195,22 @@ def load_gridded_products(
     import zarr
 
     store = zarr.open(zarr_path, mode="r")
-    times = np.asarray(store["time"][:]).astype("datetime64[D]")
+    # The store holds int64 NANOSECONDS since epoch (scripts/04_regrid_and_pack.py
+    # writes `.astype("datetime64[ns]").view("i8")`), so it must be decoded as ns
+    # before being truncated to days. Going straight to datetime64[D] reads those
+    # nanosecond counts as day counts and lands about 2.5 million years in the
+    # future, which matches nothing and silently yields an empty product.
+    times = np.asarray(store["time"][:]).astype("datetime64[ns]").astype("datetime64[D]")
     index_of = {np.datetime64(t, "D"): i for i, t in enumerate(times)}
+    if len(times):
+        span = (times.min(), times.max())
+        if not (np.datetime64("1900-01-01") < span[0] < np.datetime64("2100-01-01")):
+            raise SystemExit(
+                f"{zarr_path} decoded to an implausible time range {span[0]}..{span[1]}. "
+                "The store's time units are not what this reader assumes."
+            )
+        print(f"[products] store covers {span[0]} .. {span[1]} "
+              f"({len(times)} days)", flush=True)
 
     cond_names = list(store.attrs.get("cond_channels", []))
     cpc_index = cond_names.index("cpc_precip") if "cpc_precip" in cond_names else None
@@ -233,6 +247,21 @@ def load_gridded_products(
             f"[products] {label}: {found}/{len(dates)} days at day offset {offset:+d}",
             flush=True,
         )
+        if not found:
+            overlap_start = max(np.datetime64(dates[0], "D"), times.min())
+            overlap_end = min(np.datetime64(dates[-1], "D"), times.max())
+            raise SystemExit(
+                f"[products] {label}: matched 0 of {len(dates)} requested days.\n"
+                f"  store covers      {times.min()} .. {times.max()}\n"
+                f"  request covers    {np.datetime64(dates[0], 'D')} .. "
+                f"{np.datetime64(dates[-1], 'D')} (shifted {offset:+d} day)\n"
+                + (
+                    f"  the two overlap {overlap_start}..{overlap_end}, so this is a "
+                    "decoding or alignment bug, not a coverage gap."
+                    if overlap_start <= overlap_end
+                    else "  the two do not overlap at all: adjust --start/--end."
+                )
+            )
         out[label] = {
             "grid": stack,
             "at_stations": bilinear_sample(stack, grid, meta["lat"], meta["lon"]),
@@ -944,6 +973,15 @@ def main() -> None:
                   "are NOT directly comparable across rows; pass --common-sample "
                   "to restrict every product to the shared days.")
     if args.common_sample and shared is not None:
+        if not shared.any():
+            raise SystemExit(
+                "[budget] --common-sample leaves 0 days: the products do not share "
+                "a single day.\n  per-product day counts: "
+                + ", ".join(f"{n}={c}" for n, c in day_counts.items())
+                + "\n  A product at 0 days means it failed to load, not that it is "
+                "genuinely absent. Rerun without --common-sample to see each "
+                "product's own coverage."
+            )
         print(f"[budget] --common-sample: restricting all products to "
               f"{int(shared.sum())} shared day(s)", flush=True)
         gauge = np.where(shared[:, None], gauge, np.nan)

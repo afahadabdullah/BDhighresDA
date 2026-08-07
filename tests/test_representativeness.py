@@ -235,3 +235,26 @@ def test_empirical_variogram_rejects_a_bad_shape():
 def test_fit_needs_enough_usable_bins():
     with pytest.raises(ValueError, match="at least 3"):
         fit_variogram(np.array([10.0, 20.0]), np.array([1.0, 2.0]))
+
+
+def test_zarr_time_axis_must_be_decoded_as_nanoseconds():
+    """Regression: the store keeps int64 NANOSECONDS, not days.
+
+    ``scripts/04_regrid_and_pack.py`` writes the time axis as
+    ``.astype("datetime64[ns]").view("i8")``.  Truncating those integers
+    straight to ``datetime64[D]`` reads a nanosecond count as a day count and
+    lands ~2.5 million years in the future, which matches no requested date and
+    yields a silently empty product rather than an error.
+    """
+    days = np.arange(
+        np.datetime64("2021-05-01"), np.datetime64("2021-05-10")
+    ).astype("datetime64[ns]")
+    stored = days.view("i8")          # exactly what the packer writes
+
+    wrong = np.asarray(stored).astype("datetime64[D]")
+    right = np.asarray(stored).astype("datetime64[ns]").astype("datetime64[D]")
+
+    assert right[0] == np.datetime64("2021-05-01")
+    assert right[-1] == np.datetime64("2021-05-09")
+    assert wrong[0] != np.datetime64("2021-05-01")
+    assert wrong[0] > np.datetime64("2100-01-01")
