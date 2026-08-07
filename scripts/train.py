@@ -394,6 +394,7 @@ def main():
     step, start_epoch = 0, 0
     best_val_loss = float("inf")
     best_crps = float("inf")
+    best_wet_error = float("inf")
     # Evaluations since the sampled CRPS last improved.  The v3 run peaked around
     # epoch 80-125 and then degraded for 50 epochs; nothing stopped it.
     stale_evaluations = 0
@@ -543,10 +544,24 @@ def main():
             # continuity but is too noisy to choose a checkpoint with
             # (docs/DIAGNOSIS_epoch119.md item 4).
             crps = None
+            wet_error = None
             if monitor is not None and monitor.should_run(epoch):
                 summary = monitor.run(model, ema, epoch, step)
                 if summary is not None:
                     crps = summary["mean_crps_mm"]
+                    # Wet-frequency error is the property the prior redesign
+                    # exists to fix, and CRPS is nearly blind to it: in the v3
+                    # ablation the full-redesign arm reached +0.002 at epoch 39
+                    # and drifted to +0.226 by 149 while CRPS kept IMPROVING.
+                    # Selecting on CRPS alone would discard the checkpoint that
+                    # met the target. Tracked separately so it cannot happen.
+                    errors = [
+                        c["wet_fraction_error"] for c in summary["cases"]
+                        if c.get("wet_fraction_error") is not None
+                    ]
+                    wet_error = (
+                        abs(sum(errors) / len(errors)) if errors else None
+                    )
                     print(
                         f"    sampled validation ({summary['seconds']}s):  "
                         f"mean CRPS {crps:.3f} mm",
@@ -563,6 +578,9 @@ def main():
                             f"cov90 {case['interval_90_coverage'] * 100:5.1f}%",
                             flush=True,
                         )
+                    if wet_error is not None:
+                        print(f"      wet-fraction |error| {wet_error:.3f} "
+                              f"(target <= 0.05)", flush=True)
             label = "val_ema" if ema is not None else "val"
             print(f"    {label} (flow-matching loss) {val:.4f}", flush=True)
 
@@ -617,6 +635,17 @@ def main():
                 )
                 print(
                     f"saved new best checkpoint: {out_dir / 'best.pt'} ({criterion})",
+                    flush=True,
+                )
+            # A SECOND selection, on the metric the redesign targets. best.pt
+            # remains CRPS-selected so nothing downstream changes; best_wet.pt
+            # is the checkpoint to reach for when wet frequency is what matters.
+            if wet_error is not None and wet_error < best_wet_error:
+                best_wet_error = wet_error
+                save_checkpoint(state, out_dir / "best_wet.pt")
+                print(
+                    f"saved new best WET-FRACTION checkpoint: "
+                    f"{out_dir / 'best_wet.pt'} (|error|={wet_error:.4f})",
                     flush=True,
                 )
             save_checkpoint(state, out_dir / "last.pt")

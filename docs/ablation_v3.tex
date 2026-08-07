@@ -1,0 +1,229 @@
+% ---------------------------------------------------------------------------
+% Ablation of the v3 prior redesign.
+%
+% DRAFTING NOTE: this is deliberately long. Every number is recorded here with
+% the epoch it was measured at so the section can be cut down later without
+% having to re-derive anything. Source data:
+%   runs/prior_h100_cpc_v3/validation/history.jsonl           (A1)
+%   runs/prior_h100_cpc_v3_hurdle/validation/history.jsonl    (A2)
+%   runs/prior_h100_cpc_v3_absolute/validation/history.jsonl  (A3)
+% ---------------------------------------------------------------------------
+
+\section{Ablation: components of the prior redesign}
+\label{sec:ablation-v3}
+
+\subsection{Motivation}
+
+The baseline prior (hereafter V1) reproduces daily rainfall amount acceptably but
+rains far too often. Over 400 evaluation days it produces measurable rainfall on
+$64.9\%$ of land cells against CHIRPS's $45.9\%$, a wet-frequency error of
+$+0.19$. The error is concentrated where it matters most for assimilation:
+because the BMD gauge network sits in the drier half of the domain (CHIRPS
+averages $6.7$~mm~day$^{-1}$ at station locations against $12.3$~mm~day$^{-1}$
+domain-wide), the resulting bias is $+5.88$~mm~day$^{-1}$ at stations against
+$+2.65$~mm~day$^{-1}$ on the grid. A background that rains everywhere lightly
+biases every increment the analysis subsequently makes.
+
+Two mechanisms were hypothesised, and the ablation is designed to separate them.
+
+\begin{enumerate}
+  \item \textbf{Continuous density.} Rectified flow models a continuous
+    density, whereas daily rainfall has an atom at exactly zero carrying
+    ${\sim}54\%$ of its mass. A continuous model can only approach dry
+    asymptotically, so dry cells decode to small positive rainfall. The proposed
+    remedy is a \emph{hurdle head}: a second output channel predicting
+    $P(\text{dry})$, trained with binary cross-entropy and imposed as a mask
+    after sampling.
+  \item \textbf{Moving target.} V1 predicts the residual
+    $T(\mathrm{CHIRPS}) - T(\mathrm{CPC})$. Because the CPC base is wet over
+    $84\%$ of the domain, ``dry'' is not a fixed value in residual space but a
+    quantity that varies with the base. The proposed remedy is to predict the
+    \emph{absolute} transformed field.
+\end{enumerate}
+
+\subsection{Design}
+
+Three configurations were trained for 150 epochs each, identical in
+architecture ($51.8$M parameters), optimiser, schedule, data
+(\texttt{bd\_wide\_cpc.zarr}) and normalisation statistics
+(\texttt{stats\_cpc.json}). They differ only as shown in
+Table~\ref{tab:ablation-design}.
+
+\begin{table}[htbp]
+\centering
+\caption{Ablation design. Each arm differs from the full redesign (A1) in
+exactly one respect, so the contribution of each component is identifiable.}
+\label{tab:ablation-design}
+\begin{tabular}{llccc}
+\hline
+Arm & Description & Target & Hurdle head & \texttt{dry\_weight} \\
+\hline
+A1 & full redesign        & absolute & yes & 2.0 \\
+A2 & hurdle head only     & residual & yes & 1.0 \\
+A3 & absolute target only & absolute & no  & 1.0 \\
+V1 & baseline             & residual & no  & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+The \texttt{dry\_weight} parameter upweights dry cells in the flow-matching
+loss. It is set to $2.0$ only in A1, on the reasoning that an unweighted mean
+over a field that is half dry still lets the wet half dominate the gradient,
+since wet cells carry much larger residuals. As Section~\ref{sec:abl-findings}
+shows, this parameter turns out to matter more than the hurdle head itself, and
+the fact that it is confounded with the target change in A1 is a limitation of
+this design.
+
+\paragraph{Validation protocol.} Every five epochs, an eight-member ensemble is
+drawn with EMA weights over 30 sampler steps at classifier-free guidance weight
+$w=1$, on six held-out July days selected to span the domain-mean rainfall
+distribution: 2019-07-20 (q05), 2020-07-17 (q25), 2020-07-31 (q50), 2020-07-10
+(q75), 2019-07-26 (q95) and 2020-07-11 (q99). Wet-day frequency is evaluated at
+a $1$~mm~day$^{-1}$ threshold. Observed wet fraction on these six days is
+$0.696$; note this is a monsoon subset and is therefore much wetter than the
+annual figure of $0.459$ against which V1's $+0.19$ error was originally
+quoted. Errors, not absolute frequencies, are the comparable quantity.
+
+\subsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Ablation results at the best-CRPS epoch and at epoch 149. Wet-fraction
+error is predicted minus observed ($0.696$ on the validation days); zero is the
+target. Spatial correlation and bias are against CHIRPS, which is the training
+target and therefore the appropriate reference during training. Bias in
+mm~day$^{-1}$.}
+\label{tab:ablation-results}
+\begin{tabular}{llrrrrrr}
+\hline
+Arm & Epoch & CRPS & Wet frac. & Wet err. & Corr. & Bias & Spread \\
+\hline
+A1 & 24 (first)  & 19.08 & 0.629 & $-0.067$ & 0.075 & $-19.44$ & 4.53 \\
+A1 & 39          & ---   & 0.698 & $+0.002$ & ---   & ---      & ---  \\
+A1 & 134 (best)  & 14.49 & 0.920 & $+0.224$ & 0.140 & $-12.04$ & 14.35 \\
+A1 & 149 (final) & 14.56 & 0.922 & $+0.226$ & 0.132 & $-12.24$ & 14.05 \\
+\hline
+A2 & 24 (first)  & 10.63 & 0.997 & $+0.301$ & 0.325 & $-1.44$  & 14.89 \\
+A2 & 74 (best)   & 10.40 & 0.995 & $+0.299$ & 0.301 & $+5.69$  & 21.06 \\
+A2 & 149 (final) & 10.97 & 0.994 & $+0.298$ & 0.286 & $+8.82$  & 23.35 \\
+\hline
+A3 & 9 (first)   & 18.96 & 0.994 & $+0.299$ & 0.174 & $-18.43$ & 2.24 \\
+A3 & 144 (best)  & 13.37 & 0.965 & $+0.270$ & 0.119 & $-10.29$ & 14.63 \\
+A3 & 149 (final) & 13.41 & 0.966 & $+0.270$ & 0.125 & $-10.49$ & 14.29 \\
+\hline
+V1 & ---         & ---   & ---   & $+0.19$  & ---   & $+2.65$  & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Findings}
+\label{sec:abl-findings}
+
+\paragraph{F1. No arm satisfies the wet-frequency criterion at convergence, and
+all three are worse than the baseline.} The promotion criterion was a
+wet-frequency error within $\pm 0.05$. At epoch 149 the errors are $+0.226$
+(A1), $+0.298$ (A2) and $+0.270$ (A3), against V1's $+0.19$. Taken at face
+value, the redesign not only failed to fix the defect it targeted but made it
+worse. A2 and A3 rain on more than $96\%$ of cells.
+
+\paragraph{F2. The target is nonetheless reachable: A1 attained a wet-frequency
+error of $+0.002$ at epoch 39, and further training destroyed it.} This is the
+central result. A1 is the only arm combining the hurdle head with
+$\texttt{dry\_weight}=2.0$, and it is the only arm that was ever dry: it begins
+at $0.629$ (error $-0.067$), passes through $0.698$ (error $+0.002$) at epoch
+39, and then drifts monotonically to $0.922$. The mechanism therefore works. The
+failure at epoch 149 is a failure of the training trajectory, not of the
+proposed remedy, and the promotion criterion as written --- evaluated only at
+the final or best-CRPS checkpoint --- would have discarded a configuration that
+met the target perfectly a quarter of the way through training.
+
+\paragraph{F3. Ensemble spread grows monotonically with training in every arm,
+and is the proximate cause of the drift.} Spread against epoch correlates at
+$r = +0.99$ (A1), $+0.96$ (A2) and $+0.99$ (A3); no arm plateaus within 150
+epochs. In A1, the only arm with room to move on wet fraction, spread and wet
+fraction correlate at $r = +0.96$. The interpretation is mechanical: as the
+predictive distribution broadens, more cells and members cross the
+$1$~mm~day$^{-1}$ threshold, so the measured wet fraction rises even where the
+central estimate does not. A2 and A3 are saturated near $0.99$ from their first
+validation and so show no such correlation; there is no headroom for one.
+
+Growing spread is not an artefact of the metric. It is corroborated
+independently by the assimilation diagnostics, where the background is
+over-dispersed relative to its own innovations: the consistency ratio
+$\mathrm{var}(O-B) / (\sigma_b^2 + R)$ is $0.62$, with background spread
+variance $0.741$ against an innovation variance of $0.572$.
+
+\paragraph{F4. The absolute target costs spatial skill.} Both absolute-target
+arms converge to spatial correlations of $0.13$ (A1) and $0.13$ (A3), while the
+residual arm A2 holds $0.29$. Since A3 has no hurdle head and A1 does, and the
+two are indistinguishable on this measure, the degradation is attributable to
+the target parameterisation rather than to the hurdle head. The residual
+formulation supplies the CPC spatial structure to the model directly; CPC
+remains a conditioning channel under the absolute parameterisation, but the
+network does not learn to exploit it to the same degree. On the evidence here,
+$T(\mathrm{CHIRPS}) - T(\mathrm{CPC})$ should be retained.
+
+\paragraph{F5. The hurdle head alone is insufficient; the dry weighting does the
+work.} A2 carries the hurdle head at $\texttt{dry\_weight}=1.0$ and sits at
+$0.997$ wet fraction from its first validation --- indistinguishable from A3,
+which has no hurdle head at all. Only A1, which combines the head with
+$\texttt{dry\_weight}=2.0$, produces a dry prior. The head supplies the
+mechanism for representing the atom at zero, but without upweighting the dry
+cells in the flow loss the gradient signal is too weak for it to be used.
+
+\paragraph{F6. A confound is present in all three arms.} All three v3
+configurations set $\texttt{cond\_dropout}=0.1$, whereas V1 used $0.0$. This was
+introduced to enable a later unconditional-prior ablation and is unrelated to
+the wet-bias hypothesis. Training with the conditioning dropped on $10\%$ of
+batches teaches the model an unconditional branch; the validation samples are
+drawn at $w=1$, i.e.\ with no classifier-free guidance applied to recover the
+conditional sharpness. The consequence is that a partially unconditional --- and
+therefore broader --- predictive distribution is being sampled. This is the only
+change common to all three arms and absent from the baseline, and it is
+consistent with all three symptoms in F3: growing spread, inflated wet fraction,
+and depressed spatial correlation. It is a plausible but \emph{not yet tested}
+explanation, and until it is tested the comparison of any v3 arm against V1
+confounds the redesign with this change.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+  \item \textbf{The confound in F6 is not controlled.} No arm was trained with
+    $\texttt{cond\_dropout}=0.0$, so the redesign cannot be cleanly separated
+    from that change. This is the principal weakness of the experiment.
+  \item \textbf{A1 varies two factors.} The full redesign changes both the
+    target parameterisation and \texttt{dry\_weight} relative to A2, so the
+    $+0.002$ result at epoch 39 cannot be attributed to the dry weighting alone
+    without a fourth arm.
+  \item \textbf{Six validation days.} The wet fraction is computed on six July
+    days chosen to span the rainfall distribution. This is adequate for
+    detecting an effect of the magnitude reported but not for fine comparison
+    between arms.
+  \item \textbf{Two arms were restarted.} A1 and A2 were cancelled at epoch 20
+    and resumed from checkpoint after two defects were repaired in the
+    validation path (the conditioning was not broadcast over the ensemble in the
+    dry-logit evaluation, and the flow loss did not split the two-channel output
+    when no dry target was supplied, so the reported validation loss was
+    meaningless for hurdle models). Training itself was unaffected; their
+    histories therefore begin at epoch 24 rather than 9.
+  \item \textbf{Validation is referenced to CHIRPS.} This is appropriate here,
+    since CHIRPS is the training target, but it is not a measure of skill
+    against ground truth; the gauge-referenced evaluation is reported
+    separately.
+\end{enumerate}
+
+\subsection{Implications}
+
+The ablation supports a specific next configuration rather than a further sweep.
+The residual target should be retained (F4), the hurdle head should be kept but
+paired with $\texttt{dry\_weight}=2.0$ (F5), and $\texttt{cond\_dropout}$ should
+be returned to $0.0$ to remove the confound (F6). Because the wet-frequency
+target is achieved transiently and then lost as spread grows (F2, F3), model
+selection should additionally track wet-frequency error rather than CRPS alone;
+on this evidence CRPS continues to improve while the property of interest
+degrades, so a CRPS-selected checkpoint is not the right one.
+
+A cheap test of F6 is available before committing further training: resampling
+an existing checkpoint at $w=2$ rather than $w=1$ should sharpen the predictive
+distribution if the diffuseness originates in the unconditional branch, and
+should leave it unchanged otherwise.
