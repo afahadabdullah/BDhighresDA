@@ -39,6 +39,7 @@ from bdhires.da import (  # noqa: E402
     build_R,
     perturb_observations,
 )
+from bdhires.da.observation import normalized_coords  # noqa: E402
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
@@ -214,11 +215,78 @@ def transformed_imerg_variance(
     return sigma.astype(np.float32) ** 2 + np.float32(representativeness**2)
 
 
+def coarse_footprint_grid(grid, factor: int):
+    """The footprint grid a satellite operator with ``factor`` implies.
+
+    ``nlon // factor`` is a floor, so a factor that does not divide the domain
+    CROPS it: at factor 10 the 128-cell 0.05 deg grid becomes 12 footprints of
+    0.5 deg covering 6.0 of the 6.4 degrees, and the missing 0.4 comes off the
+    north and east edges.
+    """
+    return Grid(
+        "imerg_bd",
+        grid.lon_min,
+        grid.lat_min,
+        grid.nlon // factor,
+        grid.nlat // factor,
+        grid.res * factor,
+    )
+
+
+def check_stations_inside_coarse_grid(grid, factor: int, stations) -> None:
+    """Abort early if the footprint factor crops the domain away from a gauge.
+
+    Factor 8 keeps all 128 cells and every BMD station; factor 10 drops the
+    domain top from 26.7N to 26.3N and loses Tetulia at 26.583N.  Half a
+    footprint of tolerance covers the cell-centre inset, which is a coordinate
+    convention, but cannot cover a station the crop has genuinely excluded --
+    and should not, because the observations really do not cover it.
+    """
+    coarse = coarse_footprint_grid(grid, factor)
+    covered = (
+        grid.nlon % factor == 0 and grid.nlat % factor == 0
+    )
+    try:
+        normalized_coords(
+            coarse, np.asarray(stations.lat), np.asarray(stations.lon),
+            tolerance_cells=0.5,
+        )
+    except ValueError as error:
+        raise SystemExit(
+            f"[imerg] factor {factor} gives a {coarse.nlat}x{coarse.nlon} "
+            f"footprint grid at {coarse.res} deg spanning "
+            f"{coarse.lat_min}-{coarse.lat_max}N, {coarse.lon_min}-{coarse.lon_max}E"
+            + ("" if covered else
+               f" -- {factor} does not divide {grid.nlat}, so the domain is CROPPED")
+            + f".\n{error}\n"
+            "Use a factor that divides the grid exactly (8 gives 16x16 at 0.4 deg "
+            "and keeps the full domain) or drop the affected stations explicitly."
+        ) from error
+    if not covered:
+        print(
+            f"[imerg] NOTE: factor {factor} crops the domain to "
+            f"{coarse.lat_max:.2f}N/{coarse.lon_max:.2f}E; all stations still fit.",
+            flush=True,
+        )
+
+
 def sample_at_stations(field_mm: np.ndarray, grid, lat, lon) -> np.ndarray:
-    """Bilinearly sample physical rainfall arrays ending in ``(H, W)``."""
+    """Bilinearly sample physical rainfall arrays ending in ``(H, W)``.
+
+    Half a cell of tolerance is allowed, which only ever matters on COARSE
+    grids.  A satellite footprint grid spans the same domain as the fine grid,
+    but its outer cell CENTRES are inset by half a footprint, so a station
+    inside the domain can be outside the centre box: at 0.4 deg footprints,
+    Tetulia (26.583N) is 0.5 footprints beyond the last centre.  Clamping to the
+    nearest footprint is the correct read of a box average and is what the
+    border padding does regardless.  This is a diagnostic sampler -- the
+    assimilation operator keeps the strict check.
+    """
     shape = field_mm.shape[:-2]
     flat = np.asarray(field_mm, dtype=np.float32).reshape(-1, grid.nlat, grid.nlon)
-    operator = BilinearObsOperator(grid, np.asarray(lat), np.asarray(lon))
+    operator = BilinearObsOperator(
+        grid, np.asarray(lat), np.asarray(lon), tolerance_cells=0.5
+    )
     tensor = torch.from_numpy(np.nan_to_num(flat, nan=0.0))[:, None]
     sampled = operator(tensor)[:, 0].numpy()
     return sampled.reshape(*shape, len(lat))
@@ -440,6 +508,11 @@ def main() -> None:
             "[imerg] WARNING: no fitted bias correction in this bounded process run",
             flush=True,
         )
+        # Fail here, not 40 GPU-minutes later. The satellite footprints are
+        # sampled at station locations only at the very END, for diagnostics, so
+        # a factor that crops the domain away from a northern gauge used to
+        # abort the run after the assimilation had already completed every day.
+        check_stations_inside_coarse_grid(grid, imerg_factor, stations)
 
     valid = dataset.fixed_valid > 0
     slices = dataset.fixed_spatial_slices()
@@ -711,14 +784,7 @@ def main() -> None:
     condition_at_stations = sample_at_stations(condition, grid, stations.lat, stations.lon)
     imerg_at_stations = None
     if imerg is not None:
-        imerg_grid = Grid(
-            "imerg_bd",
-            grid.lon_min,
-            grid.lat_min,
-            grid.nlon // imerg_factor,
-            grid.nlat // imerg_factor,
-            grid.res * imerg_factor,
-        )
+        imerg_grid = coarse_footprint_grid(grid, imerg_factor)
         imerg_at_stations = sample_at_stations(
             imerg["precipitation"], imerg_grid, stations.lat, stations.lon
         )

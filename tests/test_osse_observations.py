@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from bdhires.da import PhysicalBilinearObsOperator, PhysicalBlockAverageObsOperator
+import pytest
+
+from bdhires.da import (
+    BilinearObsOperator,
+    PhysicalBilinearObsOperator,
+    PhysicalBlockAverageObsOperator,
+)
 from bdhires.grids import Grid
 from bdhires.transforms import PrecipTransform
 
@@ -70,3 +76,57 @@ def test_bilinear_station_zeros_masked_ocean_before_coastal_interpolation():
     expected = transform.forward(torch.tensor(4.0))
 
     assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_coarse_footprint_grid_admits_a_station_inside_the_domain():
+    """A station can sit inside the domain but outside the box of cell centres.
+
+    The 0.4 deg CPC footprint grid spans exactly the same box as the 0.05 deg
+    fine grid it was averaged from (top edge 26.7N), but its outermost centres
+    are inset by half a footprint, putting the last one at 26.5N.  Tetulia at
+    26.583N is therefore 0.21 footprints past the last centre while still being
+    0.12 deg inside the domain.  Rejecting it would discard a real gauge for a
+    coordinate-convention reason; the correct read of a box average there is the
+    nearest footprint, which is what clamping gives.
+    """
+    coarse = Grid("cpc_bd", lon_min=87.6, lat_min=20.3, nlon=16, nlat=16, res=0.4)
+    lat = np.array([26.58333])
+    lon = np.array([88.55])
+
+    with pytest.raises(ValueError, match="fall outside grid"):
+        BilinearObsOperator(coarse, lat, lon)
+
+    operator = BilinearObsOperator(coarse, lat, lon, tolerance_cells=0.5)
+    field = torch.arange(16 * 16, dtype=torch.float32).reshape(1, 1, 16, 16)
+    sampled = operator(field)
+
+    assert torch.isfinite(sampled).all()
+    # Clamped to the northern edge row, so it reads the last row of footprints.
+    assert sampled[0, 0, 0] >= field[0, 0, -1].min()
+
+
+def test_station_genuinely_outside_the_domain_still_raises():
+    """Tolerance must not turn a mislocated station into a silent edge read."""
+    coarse = Grid("cpc_bd", lon_min=87.6, lat_min=20.3, nlon=16, nlat=16, res=0.4)
+
+    with pytest.raises(ValueError, match="fall outside grid"):
+        BilinearObsOperator(
+            coarse, np.array([31.0]), np.array([88.55]), tolerance_cells=0.5
+        )
+
+
+def test_fine_grid_keeps_a_strict_check_by_default():
+    """0.5 cells on the 0.05 deg grid is 2.7 km -- harmless, but not the default.
+
+    Gauge assimilation runs on the fine grid, where a station outside the domain
+    is a data error worth failing loudly on rather than clamping to a coast.
+    """
+    fine = Grid("bd", lon_min=87.6, lat_min=20.3, nlon=128, nlat=128, res=0.05)
+
+    with pytest.raises(ValueError, match="fall outside grid"):
+        BilinearObsOperator(fine, np.array([26.69]), np.array([88.55]))
+
+    operator = BilinearObsOperator(
+        fine, np.array([26.69]), np.array([88.55]), tolerance_cells=0.5
+    )
+    assert operator.n_stations == 1

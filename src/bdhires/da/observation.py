@@ -46,31 +46,62 @@ class StationSet:
         )
 
 
-def normalized_coords(grid: Grid, lat: np.ndarray, lon: np.ndarray) -> torch.Tensor:
+def normalized_coords(
+    grid: Grid,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    tolerance_cells: float = 0.0,
+) -> torch.Tensor:
     """Map lat/lon to ``grid_sample`` coordinates in [-1, 1].
 
     Uses ``align_corners=True`` semantics: -1 maps to the centre of the first
     cell and +1 to the centre of the last cell.  Latitude is ASCENDING in our
     arrays (row 0 = south), so no flip is required.
+
+    ``tolerance_cells`` allows stations to sit slightly outside the box of cell
+    CENTRES and be clamped to the edge instead of raising.  The distinction
+    matters on coarse grids: a footprint grid covers the same domain as the fine
+    grid it was averaged from, but its outermost cell centres are inset by half
+    a footprint, so a station inside the domain can still be outside the centre
+    box -- Tetulia at 26.583N is 0.5 footprints north of the last 0.4 deg centre.
+    Clamping is what ``grid_sample(padding_mode="border")`` would do anyway and
+    is the right answer there: use the nearest footprint.  The default of 0.0
+    keeps the strict check for gauge assimilation on the fine grid, where a
+    station outside the domain is a data error worth failing on.
     """
     glat, glon = grid.lat, grid.lon
     x = 2.0 * (lon - glon[0]) / (glon[-1] - glon[0]) - 1.0
     y = 2.0 * (lat - glat[0]) / (glat[-1] - glat[0]) - 1.0
-    out_of_domain = (np.abs(x) > 1.0) | (np.abs(y) > 1.0)
+    # A cell is 2/(n-1) wide in normalised units under align_corners=True.
+    slack_x = 2.0 * tolerance_cells / max(len(glon) - 1, 1)
+    slack_y = 2.0 * tolerance_cells / max(len(glat) - 1, 1)
+    out_of_domain = (np.abs(x) > 1.0 + slack_x) | (np.abs(y) > 1.0 + slack_y)
     if out_of_domain.any():
         raise ValueError(
-            f"{out_of_domain.sum()} station(s) fall outside grid {grid.name}: "
+            f"{out_of_domain.sum()} station(s) fall outside grid {grid.name} "
+            f"by more than {tolerance_cells} cell(s): "
             f"{list(zip(np.asarray(lat)[out_of_domain], np.asarray(lon)[out_of_domain]))}"
         )
+    if tolerance_cells > 0.0:
+        x = np.clip(x, -1.0, 1.0)
+        y = np.clip(y, -1.0, 1.0)
     return torch.tensor(np.stack([x, y], axis=-1), dtype=torch.float32)
 
 
 class BilinearObsOperator(torch.nn.Module):
     """H: (B, C, H, W) state -> (B, C, S) station-space values."""
 
-    def __init__(self, grid: Grid, lat: np.ndarray, lon: np.ndarray):
+    def __init__(
+        self,
+        grid: Grid,
+        lat: np.ndarray,
+        lon: np.ndarray,
+        tolerance_cells: float = 0.0,
+    ):
         super().__init__()
-        coords = normalized_coords(grid, np.asarray(lat), np.asarray(lon))
+        coords = normalized_coords(
+            grid, np.asarray(lat), np.asarray(lon), tolerance_cells=tolerance_cells
+        )
         # grid_sample wants (B, H_out, W_out, 2); we use H_out = 1, W_out = S
         self.register_buffer("coords", coords.view(1, 1, -1, 2))
         self.n_stations = coords.shape[0]

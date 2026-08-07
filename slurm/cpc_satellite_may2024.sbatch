@@ -56,7 +56,13 @@ END="${CPC_END:-2024-05-05}"
 MEMBERS="${CPC_MEMBERS:-30}"
 FOLDS="${CPC_FOLDS:-5}"
 FOLD="${CPC_FOLD:-0}"
-FACTOR="${CPC_FACTOR:-10}"
+# 8, NOT 10. 128 / 8 = 16 exactly, so the footprint grid covers the whole domain
+# (top edge 26.7N) and every BMD station is inside it. Factor 10 crops 128 -> 120
+# cells, dropping the domain top to 26.3N, which puts Tetulia (26.583N) genuinely
+# outside -- no coordinate tolerance can or should rescue that. The cost is 0.4 deg
+# footprints instead of 0.5, which is still far coarser than IMERG's 0.1/0.3 and
+# so still answers the footprint-scale question.
+FACTOR="${CPC_FACTOR:-8}"
 DAY_SHIFT="${CPC_DAY_SHIFT:--1}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da_cpc_satellite.yaml}"

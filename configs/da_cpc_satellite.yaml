@@ -22,11 +22,14 @@ observations:
     representativeness: 0.25    # point-vs-5km-cell mismatch; usually dominant
   imerg:
     enabled: true
-    # CPC pseudo-satellite: 0.5 deg footprints (factor 10 on the 0.05 deg grid).
-    # 128 is not divisible by 10, so scripts/34 crops to 120 cells / 12 footprints
-    # and the operator's crop handles the ragged edge. This factor MUST match the
-    # one script 34 was run with or H and the observations describe different boxes.
-    factor: 10
+    # CPC pseudo-satellite: 0.4 deg footprints (factor 8 on the 0.05 deg grid).
+    # MUST match the factor script 34 was run with, or H and the observations
+    # describe different boxes.
+    # 8, not 10: 128 / 8 = 16 exactly, so the footprint grid covers the full
+    # domain (top edge 26.7N). Factor 10 crops to 120 cells and drops the top to
+    # 26.3N, putting Tetulia (26.583N) outside the grid entirely -- the run then
+    # dies in the diagnostic sampler after the assimilation has already finished.
+    factor: 8
     # CPC's MAE against BMD gauges is 7.66 mm/day (43,781 station-days) versus
     # IMERG's 5.09, so it is the WORSE point estimate despite a higher pattern
     # correlation (0.756 at lag -1, helped by 0.5 deg smoothing). sigma_obs is
