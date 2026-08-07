@@ -164,6 +164,30 @@ def paired_bootstrap(a_members, a_truth, b_members, b_truth,
     }
 
 
+def unique_labels(paths: list[Path]) -> dict:
+    """Map each path to a label that is unique ACROSS DIRECTORIES.
+
+    Keying by ``path.stem`` alone silently loses data: every configuration's
+    output directory contains a file called ``..._fold0.npz``, so globbing over
+    several configurations collapses them into one entry and the last read wins.
+    That happened -- a four-configuration screen reported four entries named
+    fold0..fold3, which were folds of whichever configuration happened to be
+    read last, and the comparison that was wanted never took place.
+
+    The parent directory name is prefixed only where stems actually collide, so
+    single-directory use keeps its short labels.
+    """
+    stems = [p.stem for p in paths]
+    clashing = {s for s in stems if stems.count(s) > 1}
+    labels = {}
+    for path in paths:
+        if path.stem in clashing:
+            labels[path] = f"{path.parent.name}/{path.stem}"
+        else:
+            labels[path] = path.stem
+    return labels
+
+
 # --------------------------------------------------------------------------
 
 
@@ -233,16 +257,17 @@ def main() -> None:
         raise SystemExit(f"no NPZ dumps matched {args.dumps}")
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
+    labels = unique_labels(paths)
     loaded, curves = {}, {}
     for path in paths:
         members, truth = load_pairs(path, args.arm)
         if members is None or truth is None or truth.size < 10:
             print(f"[skip] {path.name}: no usable arm {args.arm!r}")
             continue
-        loaded[path.stem] = (members, truth)
-        curves[path.stem] = crps_vs_members(
+        loaded[labels[path]] = (members, truth)
+        curves[labels[path]] = crps_vs_members(
             members, truth, args.sizes, args.n_draws, args.seed)
-        print(f"[run] {path.stem}: {members.shape[0]} members, "
+        print(f"[run] {labels[path]}: {members.shape[0]} members, "
               f"{truth.size} withheld station-days")
 
     if not curves:

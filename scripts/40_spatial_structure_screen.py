@@ -191,6 +191,30 @@ def envelope_verdict(value: float, product_values: list[float]) -> str:
     return f"inside (products {low:.3g}-{high:.3g})"
 
 
+def unique_labels(paths: list[Path]) -> dict:
+    """Map each path to a label that is unique ACROSS DIRECTORIES.
+
+    Keying by ``path.stem`` alone silently loses data: every configuration's
+    output directory contains a file called ``..._fold0.npz``, so globbing over
+    several configurations collapses them into one entry and the last read wins.
+    That happened -- a four-configuration screen reported four entries named
+    fold0..fold3, which were folds of whichever configuration happened to be
+    read last, and the comparison that was wanted never took place.
+
+    The parent directory name is prefixed only where stems actually collide, so
+    single-directory use keeps its short labels.
+    """
+    stems = [p.stem for p in paths]
+    clashing = {s for s in stems if stems.count(s) > 1}
+    labels = {}
+    for path in paths:
+        if path.stem in clashing:
+            labels[path] = f"{path.parent.name}/{path.stem}"
+        else:
+            labels[path] = path.stem
+    return labels
+
+
 # --------------------------------------------------------------------------
 
 
@@ -295,6 +319,7 @@ def main() -> None:
         raise SystemExit(f"no NPZ dumps matched {args.dumps}")
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
+    labels = unique_labels(paths)
     runs = {}
     for path in paths:
         block = load_fields(path, args.arm)
@@ -306,10 +331,10 @@ def main() -> None:
         pattern = {p: pattern_correlation(block["fields"]["analysis"],
                                           block["fields"][p], valid)
                    for p in PRODUCTS if p in block["fields"]}
-        runs[block["name"]] = {"stats": stats, "pattern": pattern,
+        runs[labels[path]] = {"stats": stats, "pattern": pattern,
                                "spectra": spectra(block["fields"], valid),
                                "n_days": len(block["time"])}
-        print(f"[run] {block['name']}: {len(block['time'])} day(s), "
+        print(f"[run] {labels[path]}: {len(block['time'])} day(s), "
               f"products {sorted(p for p in PRODUCTS if p in block['fields'])}")
 
     if not runs:

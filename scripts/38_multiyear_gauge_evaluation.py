@@ -496,6 +496,18 @@ def main() -> None:
     if not paths:
         raise SystemExit(f"no NPZ dumps matched {args.dumps}")
     print(f"[setup] {len(paths)} dump(s)")
+    # Pooling FOLDS is the point; pooling CONFIGURATIONS is not. Every
+    # configuration writes to its own directory, so more than one parent
+    # directory means the glob is probably averaging arms that should be
+    # compared instead -- and the pooled row would be a mean over settings.
+    parents = sorted({p.parent.name for p in paths})
+    if len(parents) > 1:
+        print(f"[setup] WARNING: dumps span {len(parents)} directories: "
+              + ", ".join(parents))
+        print("    If these are different CONFIGURATIONS, this run pools them "
+              "into one\n    average rather than comparing them. Use "
+              "scripts/41 for a comparison,\n    or narrow the glob to a single "
+              "directory.")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
