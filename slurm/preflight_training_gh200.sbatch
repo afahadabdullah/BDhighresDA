@@ -53,7 +53,7 @@ MISSING=()
       config sharing them. Generate it with:
         python scripts/06_plot_normalization.py \\
             --zarr $ZARR_STORE --stats $STATS_FILE \\
-            --out-json $NORM_REPORT --out-figure ${NORM_REPORT%.json}.png")
+            --report $NORM_REPORT --out ${NORM_REPORT%.json}.png")
 
 [[ ${#MISSING[@]} -eq 0 ]] || {
     echo "ERROR: preflight cannot run. Missing:"

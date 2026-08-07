@@ -240,10 +240,17 @@ def main() -> None:
         drop_last=True,
     )
 
+    hurdle_cfg = config["train"].get("hurdle") or {}
+    hurdle_enabled = bool(hurdle_cfg.get("enabled", False))
+    dry_threshold_mm = float(hurdle_cfg.get("wet_threshold_mm", 0.1))
     model = UNet(
         in_channels=1,
         cond_channels=train_dataset.total_cond_channels,
-        out_channels=1,
+        # 2 channels when the hurdle head is on: velocity plus the dry logit.
+        # Hardcoding 1 here meant the preflight silently built a DIFFERENT model
+        # from the one training would build, so it could not have caught a
+        # hurdle-specific failure -- which is most of what it exists to check.
+        out_channels=2 if hurdle_enabled else 1,
         image_size=crop,
         **config["model"],
     ).to(device)
@@ -279,6 +286,7 @@ def main() -> None:
     losses = []
     flow_losses = []
     coarse_losses = []
+    hurdle_losses = []
     gradient_norms = []
     model.train()
     iterator = iter(train_loader)
@@ -296,8 +304,15 @@ def main() -> None:
         clean_loss_fn = build_coarse_clean_loss(
             config, train_dataset, batch, device
         )
+        # Dry mask from RAW mm, matching scripts/train.py: the threshold is a
+        # physical statement about the gauge, not about the network.
+        dry_target = None
+        if hurdle_enabled:
+            dry_target = (
+                batch["target_mm"].to(device, non_blocking=True) < dry_threshold_mm
+            ).float()
         with torch.autocast("cuda", dtype=dtype):
-            loss, flow_loss, coarse_loss = flow_matching_loss(
+            loss, flow_loss, coarse_loss, hurdle_loss = flow_matching_loss(
                 model,
                 x1,
                 condition,
@@ -307,6 +322,9 @@ def main() -> None:
                 logit_normal_t=config["train"].get("logit_normal_t", True),
                 clean_loss_fn=clean_loss_fn,
                 return_components=True,
+                dry_target=dry_target,
+                hurdle_weight=float(hurdle_cfg.get("weight", 1.0)),
+                dry_weight=float(config["train"].get("dry_weight", 1.0)),
             )
         require_finite("training loss", loss)
         optimizer.zero_grad(set_to_none=True)
@@ -324,10 +342,12 @@ def main() -> None:
         losses.append(float(loss.item()))
         flow_losses.append(float(flow_loss.item()))
         coarse_losses.append(float(coarse_loss.item()))
+        hurdle_losses.append(float(hurdle_loss.item()))
         gradient_norms.append(float(gradient_norm.item()))
         print(
             f"preflight step {step}/{args.steps}: loss={losses[-1]:.6f} "
-            f"(FM={flow_losses[-1]:.6f}, coarse={coarse_losses[-1]:.6f}), "
+            f"(FM={flow_losses[-1]:.6f}, coarse={coarse_losses[-1]:.6f}, "
+            f"hurdle={hurdle_losses[-1]:.6f}), "
             f"gradient_norm={gradient_norms[-1]:.6f}",
             flush=True,
         )
@@ -395,6 +415,11 @@ def main() -> None:
         "training_losses": losses,
         "flow_matching_losses": flow_losses,
         "coarse_consistency_losses": coarse_losses,
+        # The check the runbook asks for: a hurdle arm whose hurdle loss is 0.0
+        # is not training the dry head, and would spend 150 epochs proving
+        # nothing. Recorded so that is visible without reading the log.
+        "hurdle_losses": hurdle_losses,
+        "hurdle_enabled": hurdle_enabled,
         "gradient_norms": gradient_norms,
         "validation_loss": float(validation_loss.item()),
         "peak_memory_allocated_gib": round(peak_allocated, 3),
