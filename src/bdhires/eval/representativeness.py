@@ -364,3 +364,134 @@ def aggregation_decomposition(
         "model_is_valid": not (systematic_negative or random_negative),
         "n_windows": int(ok.sum()),
     }
+
+
+def infer_observation_sigma(
+    product_transformed: np.ndarray,
+    gauge_transformed: np.ndarray,
+    sigma_rep: float,
+) -> dict:
+    """Split product-minus-gauge scatter into representativeness and product error.
+
+    A gauge and a gridded product disagree for two independent reasons, and R
+    should only carry the second:
+
+        var[product - gauge] = sigma_rep^2 + sigma_obs^2
+
+    ``sigma_rep`` comes from the variogram and describes the point-vs-footprint
+    mismatch; whatever is left is the product's own error, which is what
+    ``observations.*.sigma_obs`` is supposed to be.  Configs currently assume
+    0.10 for gauges and 0.35-0.60 for satellites with nothing behind them.
+
+    Everything is in TRANSFORMED units, because that is where ``build_R``
+    operates.  Computing in mm and converting afterwards is wrong under a log
+    transform: the mapping is nonlinear, so a symmetric mm interval is not a
+    symmetric interval in model space.
+
+    A negative inferred variance means ``sigma_rep`` exceeds the total observed
+    scatter, i.e. the variogram over-estimates the point-to-cell term (or the
+    product is genuinely closer to the gauge than the network's own spatial
+    structure implies).  It is reported rather than clipped silently, because it
+    invalidates the split rather than merely making it small.
+    """
+    difference = np.asarray(product_transformed, float) - np.asarray(
+        gauge_transformed, float
+    )
+    ok = np.isfinite(difference)
+    if ok.sum() < 2:
+        return {"n": int(ok.sum())}
+    difference = difference[ok]
+    total_variance = float(np.var(difference, ddof=1))
+    residual = total_variance - sigma_rep**2
+    return {
+        "n": int(ok.sum()),
+        "mean_difference": float(np.mean(difference)),
+        "total_sigma": float(np.sqrt(total_variance)),
+        "sigma_rep": float(sigma_rep),
+        "sigma_obs": float(np.sqrt(residual)) if residual > 0 else float("nan"),
+        "representativeness_share": (
+            float(sigma_rep**2 / total_variance) if total_variance > 0 else float("nan")
+        ),
+        "split_is_valid": bool(residual > 0),
+    }
+
+
+def fit_intensity_error_model(
+    gauge_mm: np.ndarray,
+    product_transformed: np.ndarray,
+    gauge_transformed: np.ndarray,
+    eps: float = 0.1,
+    n_bins: int = 12,
+    min_per_bin: int = 50,
+) -> dict:
+    """Fit ``sigma(P) = floor + slope * log1p(P / eps)`` from gauge-product pairs.
+
+    This is the measured form of the heuristic in
+    ``bdhires.da.observation.imerg_error_variance``, whose ``sigma_floor=0.30``
+    and ``sigma_slope=0.15`` are stated in the source as "a deliberately simple
+    heuristic -- replace it with an empirical error model".  This is that
+    replacement.
+
+    Binning is by GAUGE intensity, not product intensity, so the model can be
+    evaluated at assimilation time from the observation without circularity.
+    Within each bin the spread of ``product - gauge`` in transformed units is the
+    quantity R needs.  Bins thinner than ``min_per_bin`` are dropped rather than
+    fitted through.
+
+    Note this spread still contains representativeness; subtract it in quadrature
+    with ``infer_observation_sigma`` if a pure product error is wanted.  For
+    setting R the combined value is usually the right one, since both terms are
+    genuinely present when a gauge is compared to a cell.
+    """
+    gauge_mm = np.asarray(gauge_mm, float)
+    difference = np.asarray(product_transformed, float) - np.asarray(
+        gauge_transformed, float
+    )
+    ok = np.isfinite(gauge_mm) & np.isfinite(difference)
+    if ok.sum() < min_per_bin * 3:
+        return {"n": int(ok.sum()), "fitted": False}
+    gauge_mm, difference = gauge_mm[ok], difference[ok]
+
+    predictor = np.log1p(gauge_mm / eps)
+    edges = np.quantile(predictor, np.linspace(0, 1, n_bins + 1))
+    edges = np.unique(edges)
+    centres, spreads, counts = [], [], []
+    for low, high in zip(edges[:-1], edges[1:]):
+        inside = (predictor >= low) & (predictor < high)
+        if inside.sum() < min_per_bin:
+            continue
+        centres.append(float(np.mean(predictor[inside])))
+        spreads.append(float(np.std(difference[inside], ddof=1)))
+        counts.append(int(inside.sum()))
+    if len(centres) < 3:
+        return {"n": int(ok.sum()), "fitted": False}
+
+    centres = np.array(centres)
+    spreads = np.array(spreads)
+    weights = np.array(counts, float)
+    weights = weights / weights.sum()
+    design = np.stack([np.ones_like(centres), centres], axis=1)
+    weighted = design * weights[:, None]
+    floor, slope = np.linalg.solve(design.T @ weighted, weighted.T @ spreads)
+    predicted = design @ np.array([floor, slope])
+    residual = spreads - predicted
+    denominator = spreads - spreads.mean()
+    return {
+        "n": int(ok.sum()),
+        "fitted": True,
+        "sigma_floor": float(floor),
+        "sigma_slope": float(slope),
+        "max_sigma_observed": float(spreads.max()),
+        "eps": float(eps),
+        "r_squared": (
+            1.0 - float(np.sum(residual**2)) / float(np.sum(denominator**2))
+            if np.any(denominator)
+            else float("nan")
+        ),
+        "bins": {
+            "log1p_gauge_over_eps": centres.tolist(),
+            "gauge_mm": (np.expm1(centres) * eps).tolist(),
+            "sigma": spreads.tolist(),
+            "n": counts,
+        },
+    }

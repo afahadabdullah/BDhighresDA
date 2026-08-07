@@ -14,8 +14,10 @@ from bdhires.eval.representativeness import (
     aggregation_decomposition,
     block_dispersion_variance,
     empirical_variogram,
+    fit_intensity_error_model,
     fit_variogram,
     haversine_km,
+    infer_observation_sigma,
     representativeness_sigma,
 )
 
@@ -258,3 +260,56 @@ def test_zarr_time_axis_must_be_decoded_as_nanoseconds():
     assert right[-1] == np.datetime64("2021-05-09")
     assert wrong[0] != np.datetime64("2021-05-01")
     assert wrong[0] > np.datetime64("2100-01-01")
+
+
+def test_observation_sigma_splits_a_known_variance():
+    """Planted sigma_rep and sigma_obs must come back separated."""
+    rng = np.random.default_rng(21)
+    sigma_rep, sigma_obs = 0.40, 0.30
+    n = 200_000
+    gauge = rng.normal(size=n)
+    product = gauge + rng.normal(0, np.hypot(sigma_rep, sigma_obs), size=n)
+
+    out = infer_observation_sigma(product, gauge, sigma_rep)
+
+    assert out["total_sigma"] == pytest.approx(np.hypot(sigma_rep, sigma_obs), rel=0.02)
+    assert out["sigma_obs"] == pytest.approx(sigma_obs, rel=0.06)
+    assert out["split_is_valid"]
+    assert out["representativeness_share"] == pytest.approx(0.64, rel=0.06)
+
+
+def test_observation_sigma_flags_an_impossible_split():
+    """sigma_rep larger than the whole observed scatter invalidates the split."""
+    rng = np.random.default_rng(23)
+    gauge = rng.normal(size=5000)
+    product = gauge + rng.normal(0, 0.1, size=5000)
+
+    out = infer_observation_sigma(product, gauge, sigma_rep=0.9)
+
+    assert not out["split_is_valid"]
+    assert np.isnan(out["sigma_obs"])
+
+
+def test_intensity_error_model_recovers_a_planted_floor_and_slope():
+    """sigma(P) = 0.25 + 0.12 * log1p(P/eps) must be recovered from pairs."""
+    rng = np.random.default_rng(29)
+    eps, floor, slope = 0.1, 0.25, 0.12
+    gauge_mm = rng.gamma(0.7, 14.0, size=120_000)
+    predictor = np.log1p(gauge_mm / eps)
+    sigma = floor + slope * predictor
+    gauge_t = np.log1p(gauge_mm / eps)
+    product_t = gauge_t + rng.normal(0, sigma)
+
+    out = fit_intensity_error_model(gauge_mm, product_t, gauge_t, eps=eps)
+
+    assert out["fitted"]
+    assert out["sigma_floor"] == pytest.approx(floor, abs=0.04)
+    assert out["sigma_slope"] == pytest.approx(slope, abs=0.02)
+    assert out["r_squared"] > 0.95
+
+
+def test_intensity_error_model_declines_on_too_little_data():
+    out = fit_intensity_error_model(
+        np.arange(10.0), np.arange(10.0), np.arange(10.0)
+    )
+    assert not out["fitted"]

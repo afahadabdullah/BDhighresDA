@@ -70,7 +70,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.eval.representativeness import (  # noqa: E402
     aggregation_decomposition,
     empirical_variogram,
+    fit_intensity_error_model,
     fit_variogram,
+    infer_observation_sigma,
     representativeness_sigma,
 )
 from bdhires.grids import get_grid  # noqa: E402
@@ -79,6 +81,13 @@ from bdhires.transforms import PrecipTransform  # noqa: E402
 WET_THRESHOLD_MM = 1.0
 CATEGORICAL_THRESHOLDS = (1.0, 10.0, 25.0, 50.0)
 AGGREGATION_WINDOWS = (1, 5, 10, 30)
+
+# Native footprint of each product in degrees. Representativeness is set by the
+# resolution the product ACTUALLY has, not by the grid it happens to be stored
+# on: CPC is a 0.5 deg analysis interpolated onto the 0.05 deg grid, so a gauge
+# compared against it carries the point-vs-0.5-deg mismatch even though the
+# array says 0.05. Getting this wrong feeds the wrong sigma_rep into the split.
+NATIVE_DEGREES = {"chirps": 0.05, "cpc": 0.5, "imerg": 0.1}
 
 
 # --------------------------------------------------------------------------
@@ -544,6 +553,106 @@ def run_variogram(
     return out
 
 
+def run_observation_error(
+    products: dict,
+    gauge: np.ndarray,
+    transform: PrecipTransform,
+    variograms: dict,
+    grid,
+) -> dict:
+    """Measure sigma_obs per product in TRANSFORMED units, R's own space.
+
+    Closes the last assumed quantity in R.  The variogram gives sigma_rep; the
+    observed product-minus-gauge scatter gives the total; the product's own error
+    is what remains after subtracting representativeness in quadrature.  Both
+    terms are then known from data rather than half-measured, half-guessed.
+
+    Two things make this easy to get wrong and both are handled here:
+
+    * The split must use each product's NATIVE footprint, not the array it is
+      stored on.  CPC is a 0.5 degree analysis living on a 0.05 degree grid; a
+      gauge compared against it carries the point-vs-0.5-degree mismatch.
+    * Zeros dominate daily rainfall and log1p(0/eps) is a finite, very negative
+      number, so dry-dry pairs contribute a huge spike of exact agreement that
+      shrinks the apparent sigma.  The wet-subset figure is reported alongside
+      the all-days one because R is applied where it matters -- on days with
+      rain -- and the two differ substantially.
+    """
+    fit_block = variograms.get("transformed")
+    if fit_block is None:
+        print("[sigma_obs] no transformed variogram; skipping", flush=True)
+        return {}
+    by_footprint = fit_block["representativeness_sigma_by_footprint"]
+
+    gauge_t = transform.forward(gauge)
+    out = {}
+    print()
+    print("[sigma_obs] measured in TRANSFORMED units (what build_R consumes):")
+    print(f"    {'product':8s} {'native':>7s} {'sigma_rep':>10s} {'total':>8s} "
+          f"{'sigma_obs':>10s} {'rep share':>10s} {'WET total':>10s} {'wet obs':>9s}")
+    for name, block in products.items():
+        native = NATIVE_DEGREES.get(name, grid.res)
+        key = f"{native:.2f}deg"
+        # run_variogram precomputes sigma_rep at the footprint sizes this project
+        # uses; anything else falls back to the analysis cell, which understates
+        # a coarse product rather than inventing a number for it.
+        sigma_rep = float(by_footprint.get(key, fit_block["representativeness_sigma_cell"]))
+        if key not in by_footprint:
+            print(f"    {name:8s} note: no precomputed sigma_rep at {key}; "
+                  "using the analysis-cell value, which UNDERSTATES a coarser product",
+                  flush=True)
+        product_t = transform.forward(block["at_stations"])
+        both = np.isfinite(product_t) & np.isfinite(gauge_t)
+
+        all_days = infer_observation_sigma(
+            product_t[both], gauge_t[both], sigma_rep
+        )
+        wet = both & (gauge >= WET_THRESHOLD_MM)
+        wet_only = infer_observation_sigma(
+            product_t[wet], gauge_t[wet], sigma_rep
+        )
+        intensity = fit_intensity_error_model(
+            gauge[both], product_t[both], gauge_t[both], eps=transform.eps
+        )
+
+        out[name] = {
+            "native_degrees": native,
+            "all_days": all_days,
+            "wet_days_only": wet_only,
+            "intensity_model": intensity,
+        }
+        print(f"    {name:8s} {native:>6.2f}d {sigma_rep:>10.3f} "
+              f"{all_days['total_sigma']:>8.3f} "
+              f"{all_days['sigma_obs']:>10.3f} "
+              f"{all_days['representativeness_share']:>9.0%} "
+              f"{wet_only['total_sigma']:>10.3f} "
+              f"{wet_only['sigma_obs']:>9.3f}")
+        if not all_days["split_is_valid"]:
+            print(f"    {name:8s} WARNING: sigma_rep exceeds the total scatter, so "
+                  "the split is invalid. Either the variogram over-estimates the "
+                  "point-to-cell term or this product is closer to the gauges than "
+                  "the network's own spatial structure allows.")
+        if intensity.get("fitted"):
+            print(f"    {name:8s} intensity model: sigma = {intensity['sigma_floor']:.3f} "
+                  f"+ {intensity['sigma_slope']:.3f} * log1p(P/{intensity['eps']:g})  "
+                  f"R2={intensity['r_squared']:.2f}")
+    print()
+    print("    Use the WET total column to set sigma_obs in the configs.")
+    print("    Not the all-days total: with ~69% of station-days dry, dry-dry pairs")
+    print("    agree EXACTLY and pile up a spike at zero difference that deflates the")
+    print("    pooled spread. R is applied where rain is being assimilated, so the")
+    print("    wet-day spread is the honest input. The intensity model below is better")
+    print("    still, because it lets R shrink on genuinely dry observations instead of")
+    print("    carrying the wet-day value everywhere.")
+    print("    sigma_obs strips representativeness back out; 'total' keeps it, and for")
+    print("    R the total is what you want, since both terms are really present when")
+    print("    a point gauge is compared against a cell.")
+    print("    imerg_error_variance() hardcodes sigma_floor=0.30, sigma_slope=0.15 --")
+    print("    compare against the fitted values above.")
+    return out
+
+
+
 # --------------------------------------------------------------------------
 # plots
 
@@ -996,6 +1105,10 @@ def main() -> None:
     }
     print_budget_table(budget)
 
+    observation_error = run_observation_error(
+        products, gauge, transform, variograms, grid
+    )
+
     # ---------------------------------------------------------------- plots
     plot_variogram(variograms, out_dir / "variogram.png")
     plot_station_timeseries(dates, gauge, products, meta,
@@ -1058,6 +1171,7 @@ def main() -> None:
         },
         "variogram": variograms,
         "budget": budget,
+        "observation_error": observation_error,
         "recommendation": recommendation,
         "note": (
             "Gauge is truth throughout. Products are sampled bilinearly at station "
