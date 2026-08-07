@@ -46,6 +46,21 @@ END="${BMD_END:-2018-05-31}"
 BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:-0}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
+# BMD_SET carries SEMICOLON-separated config overrides through to scripts/15 as
+# --set, so a multi-year run can use the tuned configuration without editing the
+# YAML. Editing it between submissions is how three arms of the 5-day sweep
+# ended up byte-identical to the baseline while appearing to run.
+#
+# Semicolons, not commas: sbatch --export takes a COMMA-separated list, so a
+# comma inside a value silently truncates it into a bogus extra variable.
+SET_ARGS=()
+if [[ -n "${BMD_SET:-}" ]]; then
+    IFS=';' read -ra BMD_SET_PAIRS <<< "$BMD_SET"
+    for pair in "${BMD_SET_PAIRS[@]}"; do
+        SET_ARGS+=(--set "$pair")
+    done
+    echo "Config overrides: $BMD_SET"
+fi
 MEMBERS="${BMD_MEMBERS:-16}"
 WITHHOLD="${BMD_WITHHOLD:-0.2}"
 HOLDOUT_FOLDS="${BMD_HOLDOUT_FOLDS:-1}"
@@ -136,6 +151,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --holdout-fold "$HOLDOUT_FOLD" \
     --imerg-stride "$IMERG_STRIDE" \
     --imerg-r-multiplier "$IMERG_R_MULTIPLIER" \
+    "${SET_ARGS[@]+"${SET_ARGS[@]}"}" \
     --out "$DUMP" \
     --report "$REPORT"
 

@@ -8,6 +8,7 @@ cd "$(cd -- "$SCRIPT_DIR/.." && pwd)"
 mkdir -p logs
 
 BMD_MEMBERS="${BMD_MEMBERS:-16}"
+export BMD_SET BMD_CONFIG BMD_CKPT IMERG_STRIDE IMERG_R_MULTIPLIER
 
 echo "============================================================"
 echo " Submitting Real BMD + IMERG Evaluation Pipeline (2021-2024)"
