@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=06:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/%x-%j.out
 
 # CPC (0.5 deg) as the pseudo-satellite, real BMD gauges, 2024-05-01..05.
@@ -147,17 +147,46 @@ else
 fi
 
 # -------------------------------------------------------------------- arms
+# Arm spec: NAME:STRIDE:RMULT[:key=value,key=value]
+# The optional fourth field is passed to scripts/15 as --set, so an experiment
+# never depends on hand-editing the YAML between submissions. That failure mode
+# already cost three arms: measured_R, T1p0 and s1r1 came back byte-identical
+# because the edits behind them were never made, and each job still ran for an
+# hour and wrote a plausible dump.
 ARMS="${CPC_ARMS:-production:3:1.0 measured:1:1.0}"
 
+# Reuse is a trap when a config changes: the old guard skipped any arm whose NPZ
+# existed, so a re-submitted arm replayed its cached result. Set CPC_FORCE=1 to
+# regenerate, and note the provenance block recorded in every dump now makes a
+# stale reuse visible in scripts/36 rather than silent.
+FORCE="${CPC_FORCE:-0}"
+
 for spec in $ARMS; do
-    IFS=':' read -r NAME STRIDE RMULT <<< "$spec"
+    IFS=':' read -r NAME STRIDE RMULT OVERRIDES <<< "$spec"
     PREFIX="$ROOT/${NAME}_${TAG}"
     echo
     echo "=== arm '$NAME': stride $STRIDE, R multiplier $RMULT ==="
+    if [[ -n "${OVERRIDES:-}" ]]; then
+        echo "    config overrides: $OVERRIDES"
+    fi
 
-    if [[ -s "${PREFIX}.npz" ]]; then
-        echo "Reusing ${PREFIX}.npz"
+    SET_ARGS=()
+    if [[ -n "${OVERRIDES:-}" ]]; then
+        IFS=',' read -ra PAIRS <<< "$OVERRIDES"
+        for pair in "${PAIRS[@]}"; do
+            SET_ARGS+=(--set "$pair")
+        done
+    fi
+
+    if [[ -s "${PREFIX}.npz" && "$FORCE" != "1" ]]; then
+        echo "Reusing ${PREFIX}.npz  (CPC_FORCE=1 to regenerate)"
+        if [[ -n "${OVERRIDES:-}" ]]; then
+            echo "    WARNING: this arm requests config overrides but is being"
+            echo "    REUSED. If the cached dump was written before those overrides"
+            echo "    existed it does NOT reflect them. Re-run with CPC_FORCE=1."
+        fi
     else
+        if [[ "$FORCE" == "1" ]]; then rm -f "${PREFIX}.npz"; fi
         "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
             --config "$CONFIG" \
             --ckpt "$CKPT" \
@@ -169,17 +198,20 @@ for spec in $ARMS; do
             --background-day-offset "$OFFSET" \
             --imerg-stride "$STRIDE" \
             --imerg-r-multiplier "$RMULT" \
+            "${SET_ARGS[@]}" \
             --out "${PREFIX}.npz" \
             --report "${PREFIX}.json"
     fi
-
-    "$PYTHON_BIN" -u scripts/33_plot_real_da_impact.py \
-        --dump "${PREFIX}.npz" \
-        --arm combined \
-        --days 5 \
-        --out-figure "${PREFIX}_impact.png" \
-        --out-json "${PREFIX}_impact.json"
 done
+
+# Gauge-truth evaluation over every arm at once. scripts/33 is deliberately NOT
+# run here: it scores against CHIRPS, which is the weakest of the three products
+# against BMD gauges at daily scale and runs 44 mm/day low above 50 mm/day.
+"$PYTHON_BIN" -u scripts/36_gauge_truth_da_evaluation.py \
+    --dumps "$ROOT"/*.npz \
+    --stats "${BMD_STATS:-data/processed/stats_cpc.json}" \
+    --sigma-rep "${CPC_SIGMA_REP:-0.410}" \
+    --out-dir "$ROOT/gauge_truth_${TAG}"
 
 echo
 echo "Done. Compare against the IMERG run at the same settings:"
