@@ -34,8 +34,13 @@ observations:
     sigma_obs: 0.60
     representativeness: 0.30    # a 0.5 deg box against a 0.05 deg cell is a much
                                 # bigger mismatch than IMERG's 0.1 deg footprint
-    error_corr_cells: 10.0      # CPC is bilinearly spread from 0.5 deg, so its
-                                # error is correlated over at least a footprint
+    # UNITS ARE FOOTPRINTS, not fine 0.05 deg cells. IMERG uses 3.0 at 0.1 deg
+    # footprints, i.e. ~30 km. At 0.5 deg footprints one unit is already 0.5 deg,
+    # so CPC's error correlating over roughly a footprint means 1.0. (An earlier
+    # 10.0 here claimed a 5 degree correlation length -- wider than Bangladesh --
+    # and produced 69.8x R inflation plus an empty smoothing kernel on the 12x12
+    # footprint grid.)
+    error_corr_cells: 1.0
     bias_correction: null
 
 # Two sampler blocks, because the background and the analysis want opposite

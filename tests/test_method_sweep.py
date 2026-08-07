@@ -426,3 +426,46 @@ def test_jensen_estimators_separate_mean_from_median():
     estimators = sweep.jensen_estimators(members, transform)
     assert np.mean(estimators["mean"]) > np.mean(estimators["median"])
     assert np.mean(estimators["transform_mean"]) < np.mean(estimators["mean"])
+
+
+# ------------------------------------------------- correlated obs perturbation
+
+
+def _smooth2d_ref():
+    """Load _smooth2d without importing the torch-heavy DA package."""
+    source = (ROOT / "src/bdhires/da/observation.py").read_text()
+    start = source.index("def _smooth2d")
+    end = source.index("def perturb_observations")
+    namespace = {"np": np}
+    exec(compile(source[start:end], "observation", "exec"), namespace)
+    return namespace["_smooth2d"]
+
+
+def test_smoothing_survives_a_correlation_length_wider_than_the_grid():
+    """A 0.5 deg pseudo-satellite has a 12x12 footprint grid.
+
+    Reflect padding supplies at most len-1 elements per side, so a box wider
+    than the field shrank it on every pass -- 12 -> 4 -> empty -- and
+    perturb_observations then died with 'cannot reshape array of size 0 into
+    shape (30,144)', far from the actual cause.
+    """
+    smooth = _smooth2d_ref()
+    rng = np.random.default_rng(0)
+    for n, ell in ((12, 10.0), (12, 3.0), (8, 50.0), (64, 3.0), (5, 1.0)):
+        block = rng.normal(size=(30, n, n))
+        out = smooth(block, ell)
+        assert out.shape == block.shape, (n, ell, out.shape)
+        assert np.isfinite(out).all(), (n, ell)
+
+
+def test_smoothing_still_correlates_neighbours():
+    """Clamping the width must not turn the blur into a no-op."""
+    smooth = _smooth2d_ref()
+    rng = np.random.default_rng(1)
+    block = rng.normal(size=(64, 12, 12))
+    out = smooth(block, 3.0)
+    def lag1(field):
+        a = field[:, :, :-1].ravel()
+        b = field[:, :, 1:].ravel()
+        return float(np.corrcoef(a, b)[0, 1])
+    assert lag1(out) > lag1(block) + 0.3

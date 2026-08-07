@@ -257,8 +257,19 @@ def _smooth2d(x: np.ndarray, sigma: float) -> np.ndarray:
     (central limit theorem), which is far more accuracy than an ensemble-
     perturbation correlation length needs.  Written by hand so that generating
     the analysis has no SciPy dependency.
+
+    The width is clamped to the grid.  Reflect padding can supply at most
+    ``len - 1`` elements per side, so a box wider than the field shrinks it on
+    every pass -- 12 -> 4 -> empty for a 12x12 footprint grid at sigma = 10 --
+    and the caller then fails with an unreadable reshape error far from the
+    cause.  A correlation length at or beyond the domain size means "fully
+    correlated" anyway, and clamping represents that correctly.
     """
     w = max(1, int(round(sigma * 3)) | 1)          # odd width
+    if x.shape[-1] and x.shape[-2]:
+        limit = min(x.shape[-1], x.shape[-2])
+        if w > limit:
+            w = max(1, limit if limit % 2 else limit - 1)
     if w == 1:
         return x
     pad = w // 2
