@@ -33,15 +33,6 @@ ZARR_STORE="$("$PYTHON_BIN" -c "
 import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))['data']['zarr'])
 " "$PREFLIGHT_CONFIG")"
-
-[[ -f scripts/preflight_training.py &&
-   -f "$PREFLIGHT_CONFIG" &&
-   -d "$ZARR_STORE" &&
-   -f "$NORM_REPORT" ]] || {
-    echo "ERROR: Training code, data, or normalization diagnostics are missing."
-    exit 1
-}
-
 # The statistics file is whatever the config asks for -- do NOT hardcode
 # stats.json here.  The v2 conditioning transform lives in stats_v2.json, and a
 # hardcoded check would happily pass on the stale v1 file while training read
@@ -50,6 +41,26 @@ STATS_FILE="$("$PYTHON_BIN" -c "
 import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))['data']['stats'])
 " "$PREFLIGHT_CONFIG")"
+
+# Name the missing item. The old message listed four possibilities and left the
+# caller to guess, which is a poor trade when each guess costs a queue slot.
+MISSING=()
+[[ -f scripts/preflight_training.py ]] || MISSING+=("scripts/preflight_training.py")
+[[ -f "$PREFLIGHT_CONFIG" ]]          || MISSING+=("config: $PREFLIGHT_CONFIG")
+[[ -d "$ZARR_STORE" ]]                || MISSING+=("zarr store: $ZARR_STORE")
+[[ -f "$NORM_REPORT" ]]               || MISSING+=("normalization report: $NORM_REPORT
+      It depends only on the zarr and the stats, so one report covers every
+      config sharing them. Generate it with:
+        python scripts/06_plot_normalization.py \\
+            --zarr $ZARR_STORE --stats $STATS_FILE \\
+            --out-json $NORM_REPORT --out-figure ${NORM_REPORT%.json}.png")
+
+[[ ${#MISSING[@]} -eq 0 ]] || {
+    echo "ERROR: preflight cannot run. Missing:"
+    for item in "${MISSING[@]}"; do echo "  - $item"; done
+    exit 1
+}
+
 echo "Config: $PREFLIGHT_CONFIG"
 echo "Statistics: $STATS_FILE"
 [[ -f "$STATS_FILE" ]] || {
