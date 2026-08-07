@@ -131,9 +131,34 @@ else
 fi
 
 
-if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" && -s "$IMERG_QC" ]]; then
+# Reuse on the DATA file alone. Requiring the QC sidecar as well meant that
+# pointing IMERG_PREPARED at an existing archive without also setting IMERG_QC
+# sent every task down the regeneration path -- and with a five-fold array times
+# several configurations, twenty tasks then raced to write the same .nc.tmp and
+# died with PermissionError.
+#
+# A missing QC sidecar is worth a warning, not a rebuild: the data file is what
+# the assimilation reads.
+if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" ]]; then
     echo "Reusing validated IMERG preparation: $IMERG_PREPARED"
+    if [[ ! -s "$IMERG_QC" ]]; then
+        echo "    NOTE: no QC sidecar at $IMERG_QC; the data file is reused as-is."
+    fi
 else
+    # Never regenerate a file that lives outside this task's own output root:
+    # concurrent array tasks would race on it. ROOT is exported by
+    # bmd_imerg_rotated_folds_eval.sbatch; when this script is run directly it
+    # is unset, and the guard is then skipped rather than aborting under set -u.
+    case "$IMERG_PREPARED" in
+        "${ROOT:-__none__}"/*) : ;;
+        *) if [[ -z "${ROOT:-}" ]]; then : ; else
+               echo "ERROR: refusing to (re)generate $IMERG_PREPARED, which is"
+               echo "  outside this task's root $ROOT. Concurrent array tasks"
+               echo "  would race to write it. Either set IMERG_REUSE_PREPARED=1"
+               echo "  so it is reused, or point IMERG_PREPARED inside \$ROOT."
+               exit 1
+           fi ;;
+    esac
     EXTRA_FLAGS=()
     if [[ "${IMERG_ALLOW_MISSING:-0}" == "1" ]]; then
         EXTRA_FLAGS+=("--allow-missing")
