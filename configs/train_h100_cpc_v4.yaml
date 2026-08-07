@@ -14,14 +14,16 @@
 #       validation, indistinguishable from the arm with no head at all. Only the
 #       combination produced a dry prior.
 #
-#   F6  cond_dropout 0.1 -> 0.0, matching v1. This was introduced for a later
-#       unconditional-prior ablation and is unrelated to the wet-bias
-#       hypothesis, but it is the ONE change common to all three v3 arms and
-#       absent from the baseline. Training with the conditioning dropped teaches
-#       an unconditional branch, and validation samples at w=1 apply no guidance
-#       to recover the conditional sharpness -- so a partially unconditional and
-#       therefore broader distribution was being sampled. Removing it is the
-#       point of this run.
+#   F6  cond_dropout 0.1 -> 0.0, matching v1. NOTE: F6 was TESTED and REJECTED
+#       as the explanation for the wet-frequency failure. Resampling the A2
+#       checkpoint at w=2 cut ensemble spread by 14% and left the wet-frequency
+#       error at 0.293 against 0.298 -- unchanged -- while degrading CRPS and
+#       correlation. The near-saturated wet fraction is therefore NOT an
+#       artefact of excess spread from the unconditional branch.
+#       The change is kept only to remove a gratuitous difference from the
+#       baseline. It is NOT expected to move the wet frequency, and this run
+#       must not be read as a test of that hypothesis. The active ingredient
+#       here is dry_weight (F5).
 #
 #   F2  the target IS reachable: the v3 full-redesign arm hit a wet-frequency
 #       error of +0.002 at epoch 39 and then drifted to +0.226 as spread grew.

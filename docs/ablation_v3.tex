@@ -171,26 +171,57 @@ $\texttt{dry\_weight}=2.0$, produces a dry prior. The head supplies the
 mechanism for representing the atom at zero, but without upweighting the dry
 cells in the flow loss the gradient signal is too weak for it to be used.
 
-\paragraph{F6. A confound is present in all three arms.} All three v3
-configurations set $\texttt{cond\_dropout}=0.1$, whereas V1 used $0.0$. This was
-introduced to enable a later unconditional-prior ablation and is unrelated to
-the wet-bias hypothesis. Training with the conditioning dropped on $10\%$ of
-batches teaches the model an unconditional branch; the validation samples are
-drawn at $w=1$, i.e.\ with no classifier-free guidance applied to recover the
-conditional sharpness. The consequence is that a partially unconditional --- and
-therefore broader --- predictive distribution is being sampled. This is the only
-change common to all three arms and absent from the baseline, and it is
-consistent with all three symptoms in F3: growing spread, inflated wet fraction,
-and depressed spatial correlation. It is a plausible but \emph{not yet tested}
-explanation, and until it is tested the comparison of any v3 arm against V1
-confounds the redesign with this change.
+\paragraph{F6. A confound is present in all three arms, and it has now been
+tested and rejected as the explanation.} All three v3 configurations set
+$\texttt{cond\_dropout}=0.1$, whereas V1 used $0.0$. This was introduced to
+enable a later unconditional-prior ablation and is unrelated to the wet-bias
+hypothesis. Training with the conditioning dropped on $10\%$ of batches teaches
+the model an unconditional branch, and all validation samples were drawn at
+guidance weight $w=1$, i.e.\ with no classifier-free guidance applied to recover
+the conditional sharpness. Since this is the only change common to all three
+arms and absent from the baseline, it was the leading candidate explanation for
+the excess spread, the inflated wet frequency and the depressed spatial
+correlation.
+
+It was tested directly by resuming the A2 checkpoint and resampling at $w=2$,
+changing nothing else (Table~\ref{tab:cfg-probe}). Guidance reduced ensemble
+spread by $14\%$ but left the wet-frequency error unchanged at $0.293$ against
+$0.298$, and degraded both CRPS and spatial correlation. The hypothesis is
+therefore rejected: the near-saturated wet fraction is not an artefact of
+excess spread, and returning $\texttt{cond\_dropout}$ to $0.0$ should not be
+expected to correct it. A2 is intrinsically wet.
+
+\begin{table}[htbp]
+\centering
+\caption{Guidance probe on the A2 checkpoint. The $w=2$ row is at epoch 155
+because the run must reach a checkpoint boundary to validate; over the preceding
+ten epochs spread drifted by ${\sim}0.05$~mm~day$^{-1}$ per epoch, two orders of
+magnitude below the effect under test.}
+\label{tab:cfg-probe}
+\begin{tabular}{lrrrr}
+\hline
+Guidance & Spread & Wet-frac. error & CRPS & Corr. \\
+\hline
+$w=1$ (epoch 149) & 23.35 & $+0.298$ & 10.97 & 0.286 \\
+$w=2$ (epoch 155) & 19.98 & $\phantom{+}0.293$ & 12.69 & 0.257 \\
+\hline
+\end{tabular}
+\end{table}
+
+This result also sharpens F3. Spread and wet frequency are strongly coupled
+\emph{within} A1 ($r=+0.96$), the one arm with headroom, but the coupling is not
+universal: in A2, which is saturated near $0.99$, a $14\%$ reduction in spread
+moves the wet fraction not at all. Excess spread amplifies the wet bias where
+one is developing; it does not create it.
 
 \subsection{Limitations}
 
 \begin{enumerate}
-  \item \textbf{The confound in F6 is not controlled.} No arm was trained with
-    $\texttt{cond\_dropout}=0.0$, so the redesign cannot be cleanly separated
-    from that change. This is the principal weakness of the experiment.
+  \item \textbf{The confound in F6 is untrained but tested.} No arm was trained
+    with $\texttt{cond\_dropout}=0.0$, so the redesign is not cleanly separated
+    from that change at training time. The sampling-side probe in F6 rejects it
+    as the explanation for the wet-frequency failure, but does not exclude a
+    training-side effect on the learned velocity field itself.
   \item \textbf{A1 varies two factors.} The full redesign changes both the
     target parameterisation and \texttt{dry\_weight} relative to A2, so the
     $+0.002$ result at epoch 39 cannot be attributed to the dry weighting alone
@@ -214,16 +245,24 @@ confounds the redesign with this change.
 
 \subsection{Implications}
 
-The ablation supports a specific next configuration rather than a further sweep.
-The residual target should be retained (F4), the hurdle head should be kept but
-paired with $\texttt{dry\_weight}=2.0$ (F5), and $\texttt{cond\_dropout}$ should
-be returned to $0.0$ to remove the confound (F6). Because the wet-frequency
-target is achieved transiently and then lost as spread grows (F2, F3), model
-selection should additionally track wet-frequency error rather than CRPS alone;
-on this evidence CRPS continues to improve while the property of interest
-degrades, so a CRPS-selected checkpoint is not the right one.
+The ablation supports retaining the residual target (F4) and pairing the hurdle
+head with $\texttt{dry\_weight}=2.0$ (F5), since the head is inert on its own.
+The proposal to return $\texttt{cond\_dropout}$ to $0.0$ was motivated by F6 and
+is no longer supported by it; the change remains worth making to remove a
+gratuitous difference from the baseline, but it should not be expected to move
+the wet frequency, and a run adopting it should not be read as a test of that
+hypothesis.
 
-A cheap test of F6 is available before committing further training: resampling
-an existing checkpoint at $w=2$ rather than $w=1$ should sharpen the predictive
-distribution if the diffuseness originates in the unconditional branch, and
-should leave it unchanged otherwise.
+What remains unexplained is the ensemble spread, which grows monotonically
+throughout training in every arm without plateauing, and which the guidance
+probe shows is not attributable to the unconditional branch. Since it is a
+training-time rather than a sampling-time phenomenon, the remaining candidates
+are the noise schedule, the loss weighting across the $t$ range, and the
+interaction between the hurdle mask and the flow objective. This is the open
+question the next experiment should address.
+
+Because the wet-frequency target is achieved transiently and then lost (F2, F3),
+model selection must track wet-frequency error rather than CRPS alone; the
+training loop now writes a separate wet-frequency-selected checkpoint for this
+reason. On the v3 evidence CRPS continues to improve while the property of
+interest degrades, so a CRPS-selected checkpoint is not the right one.
