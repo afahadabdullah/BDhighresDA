@@ -1,0 +1,121 @@
+# CPC-as-pseudo-satellite DA config. See scripts/34_make_cpc_pseudo_satellite.py
+# for why this is NOT an independent-observation experiment: CPC conditions the
+# prior, and CPC Global Unified is itself built from gauge reports.
+# Inference / data-assimilation configuration.
+#
+# Design in one line: ERA5 is the BACKGROUND (it conditions the generative
+# prior); every measurement of rainfall -- satellite and gauge -- is an
+# OBSERVATION and enters only through the likelihood.  There is no
+# conditioning path for IMERG.  See docs/METHODOLOGY.md Sections 3-4.
+data:
+  zarr: data/processed/bd_wide.zarr
+  stats: data/processed/stats.json
+  grid: bd                      # produce output on the 128x128 Bangladesh grid
+  era5_tp_cond_index: 0
+
+observations:
+  gauges:
+    enabled: true
+    csv: data/stations/bmd_daily.csv
+    min_coverage: 0.5
+    sigma_obs: 0.10             # gauge measurement error, TRANSFORMED units
+    representativeness: 0.25    # point-vs-5km-cell mismatch; usually dominant
+  imerg:
+    enabled: true
+    # CPC pseudo-satellite: 0.5 deg footprints (factor 10 on the 0.05 deg grid).
+    # 128 is not divisible by 10, so scripts/34 crops to 120 cells / 12 footprints
+    # and the operator's crop handles the ragged edge. This factor MUST match the
+    # one script 34 was run with or H and the observations describe different boxes.
+    factor: 10
+    # CPC's MAE against BMD gauges is 7.66 mm/day (43,781 station-days) versus
+    # IMERG's 5.09, so it is the WORSE point estimate despite a higher pattern
+    # correlation (0.756 at lag -1, helped by 0.5 deg smoothing). sigma_obs is
+    # raised accordingly rather than inherited from IMERG's 0.35.
+    sigma_obs: 0.60
+    representativeness: 0.30    # a 0.5 deg box against a 0.05 deg cell is a much
+                                # bigger mismatch than IMERG's 0.1 deg footprint
+    error_corr_cells: 10.0      # CPC is bilinearly spread from 0.5 deg, so its
+                                # error is correlated over at least a footprint
+    bias_correction: null
+
+# Two sampler blocks, because the background and the analysis want opposite
+# things.  `sampler` is the GUIDED analysis: observations are present to pull
+# members back, so prior inflation is safe and useful there.  `background_sampler`
+# is the UNGUIDED first guess, where nothing pulls members back and inflation is
+# pure error -- see docs/DIAGNOSIS_epoch119.md item 2.
+sampler:
+  n_steps: 50
+  heun: true                    # ignored when noise_scale > 0
+  schedule_power: 1.0           # p > 1 back-loads steps into t -> 1, where the
+                                # field is already decided. Keep p <= 1.
+  noise_scale: 0.0              # eta: SDE noise. Has the SAME marginals as the
+                                # ODE by construction -- it is NOT a spread knob.
+                                # Tune it, but do not rely on it for dispersion.
+  cfg_scale: 1.0                # classifier-free guidance weight; see below
+  prior_temperature: 1.25       # T > 1 broadens the prior: the real spread knob.
+                                # Inflating the prior (not the analysis) lets the
+                                # observations pull members back where they exist.
+  temperature_t_start: 0.15
+  n_corrections: 2              # Langevin correctors (SDA Alg. 4)
+  corrector_tau: 0.3
+  t_noise_end: 0.98
+  seed: null
+
+background_sampler:
+  n_steps: 50
+  heun: true
+  schedule_power: 1.0
+  noise_scale: 0.0
+  cfg_scale: 1.0                # MEASURED, not assumed: sweeping w on the v3
+                                # checkpoint moved spatial correlation on the
+                                # 2024-08-17 case 0.731 (w=1.0) -> 0.673 (1.5)
+                                # -> 0.510 (2.0), while bias and spread barely
+                                # moved. CFG sharpens onto the wrong structures
+                                # here. Re-sweep if the model changes.
+  prior_temperature: 1.0        # NO inflation without observations: tempering in
+                                # log space biases the mm-space ensemble mean high
+                                # by Jensen's inequality. T=1.25 was responsible
+                                # for the +6.4 mm bias on a 1.7 mm day.
+  temperature_t_start: 0.15
+  n_corrections: 0              # correctors only earn their cost under guidance
+  corrector_tau: 0.3
+  t_noise_end: 0.98
+  seed: null
+
+guidance:
+  gamma: 1.0e-3                 # Manshausen et al. found 1e-3 > 1e-2 for precip.
+                                # Larger gamma = softer guidance = more spread.
+  scale: 1.0
+  t_start: 0.10
+  t_end: 0.999
+  clip_norm: 200.0              # ~3.5k dense IMERG obs give a much larger gradient
+                                # norm than 35 gauges alone
+  huber_delta: null             # ~3.0 for robustness to gauge/satellite outliers
+
+ensemble:
+  members: 16
+  perturb_observations: true    # one observation draw per member. Assimilating
+                                # identical y into every member is the generative
+                                # analogue of an unperturbed-obs EnKF and is the
+                                # classic cause of under-dispersion.
+  era5_eda: false               # optional future CDS/EDA workflow; unavailable
+                                # from the Earthmover surface downloader
+  inference_dropout: 0.0        # keep U-Net dropout active at sampling time to add
+                                # a crude epistemic component (0 = off)
+
+calibration:
+  obs_sd_for_verification: 0.10 # sigma added to members before rank histograms
+  intensity_bins: [0, 1, 10, 25, 50, 100, 1.0e9]
+  post_hoc_inflation: false     # last resort; always report uninflated too
+
+tuning:
+  gamma: [1.0e-4, 1.0e-3, 1.0e-2]
+  sigma_obs: [0.05, 0.10, 0.20, 0.40]
+  imerg_sigma_obs: [0.20, 0.35, 0.60, 1.00]
+  noise_scale: [0.0, 0.15, 0.30]
+  prior_temperature: [1.0, 1.15, 1.25, 1.5, 2.0]
+  cfg_scale: [1.0, 1.5, 2.0, 3.0]
+
+verification:
+  thresholds: [1, 10, 20, 50, 100]
+  windows: [1, 3, 5, 9, 17, 33]
