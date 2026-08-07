@@ -112,6 +112,16 @@ def load_dump(path: Path) -> dict:
         out[arm] = np.moveaxis(z[key], 1, 0) if key in z else None
     for product, key in PRODUCTS.items():
         out[product] = z[key] if key in z else None
+    # Provenance, written by script 15 from commit "config overrides" onward.
+    # Older dumps have none, which is itself worth reporting: a run whose config
+    # edit never took effect looks exactly like one where it did.
+    out["config_path"] = str(z["config_path"]) if "config_path" in z else None
+    out["config_overrides"] = (
+        [str(x) for x in z["config_overrides"]] if "config_overrides" in z else None
+    )
+    out["config_effective"] = (
+        str(z["config_effective"]) if "config_effective" in z else None
+    )
     return out
 
 
@@ -567,6 +577,30 @@ def report_duplicate_runs(results: dict) -> list[list[str]]:
     return groups
 
 
+def print_provenance(dumps: dict) -> None:
+    """What config each dump actually used, so a no-op run is visible at once.
+
+    Two arms of this project were compared three times before it emerged that
+    the YAML edits behind them had never been made: each job ran, wrote a dump,
+    and produced numbers identical to the baseline. Nothing in the output said
+    so. This table does.
+    """
+    print()
+    print("[provenance] the config each dump ACTUALLY used:")
+    missing = [n for n, d in dumps.items() if d.get("config_effective") is None]
+    for name, dump in dumps.items():
+        overrides = dump.get("config_overrides")
+        if dump.get("config_effective") is None:
+            print(f"    {name:28s} (no provenance -- dump predates --set support)")
+            continue
+        label = "; ".join(overrides) if overrides else "no overrides (config as-is)"
+        print(f"    {name:28s} {dump.get('config_path')}  [{label}]")
+    if missing:
+        print()
+        print(f"    {len(missing)} dump(s) carry no provenance. Regenerate them with a")
+        print("    current script 15 if their configuration matters to a conclusion.")
+
+
 def print_tables(results: dict) -> None:
     print()
     print("[withheld] GAUGE IS TRUTH. Scored on withheld stations only.")
@@ -747,6 +781,7 @@ def main() -> None:
     if not results:
         raise SystemExit("no dumps could be read")
 
+    print_provenance(dumps)
     print_tables(results)
     report_duplicate_runs(results)
     plot_innovation(results, out_dir / "innovation_consistency.png")

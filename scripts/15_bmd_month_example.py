@@ -56,6 +56,17 @@ from bdhires.transforms import (  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/da.yaml")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY.PATH=VALUE",
+        help="override a config value without editing the YAML, e.g. "
+             "--set sampler.prior_temperature=1.0 "
+             "--set observations.gauges.representativeness=0.410 . "
+             "Repeatable. An unknown key is a hard error, so a typo cannot be "
+             "silently ignored. The applied overrides are recorded in the NPZ.",
+    )
     parser.add_argument("--ckpt", default="runs/prior_h100_cpc/best.pt")
     parser.add_argument("--stations", default="data/processed/bmd_daily_may2018.csv")
     parser.add_argument(
@@ -366,6 +377,51 @@ def percent_reduction(background: dict, analysis: dict, metric: str) -> float:
     return float(100.0 * (before - after) / before)
 
 
+
+def apply_config_overrides(config: dict, overrides: list[str] | None) -> list[str]:
+    """Apply ``--set a.b.c=value`` to a loaded config, in place.
+
+    Exists because hand-editing a YAML between submissions is the single easiest
+    way to run an experiment that silently changes nothing.  Three arms of this
+    project were compared before anyone noticed they were byte-identical to the
+    baseline: the config edit had never been made, but each job still ran for an
+    hour and wrote a plausible-looking dump.
+
+    An override that names a key which does not exist RAISES.  A typo like
+    ``sampler.prior_temp=1.0`` must fail loudly rather than being silently
+    ignored, which is exactly how the original problem hid.
+    """
+    applied = []
+    for item in overrides or []:
+        if "=" not in item:
+            raise SystemExit(f"--set expects key.path=value, got {item!r}")
+        path, raw = item.split("=", 1)
+        keys = path.strip().split(".")
+        node = config
+        for key in keys[:-1]:
+            if not isinstance(node, dict) or key not in node:
+                raise SystemExit(
+                    f"--set {path}: no such config key {key!r} "
+                    f"(available here: {sorted(node) if isinstance(node, dict) else type(node)})"
+                )
+            node = node[key]
+        leaf = keys[-1]
+        if not isinstance(node, dict) or leaf not in node:
+            raise SystemExit(
+                f"--set {path}: no such config key {leaf!r} "
+                f"(available here: {sorted(node) if isinstance(node, dict) else type(node)})"
+            )
+        before = node[leaf]
+        try:
+            value = yaml.safe_load(raw)
+        except Exception:                                    # noqa: BLE001
+            value = raw
+        node[leaf] = value
+        applied.append(f"{path}: {before!r} -> {value!r}")
+        print(f"[config] override {path}: {before!r} -> {value!r}", flush=True)
+    return applied
+
+
 def main() -> None:
     args = parse_args()
     if not 0 < args.withhold < 1:
@@ -379,6 +435,7 @@ def main() -> None:
     if args.imerg_r_multiplier <= 0:
         raise ValueError("--imerg-r-multiplier must be positive")
     config = yaml.safe_load(Path(args.config).read_text())
+    config_overrides = apply_config_overrides(config, args.set)
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     training_config = checkpoint["cfg"]
     training_data = training_config["data"]
@@ -1078,6 +1135,20 @@ def main() -> None:
         ),
         # Fixed-width Unicode keeps the NPZ non-pickled and safely loadable
         # with allow_pickle=False.
+        # Provenance: without this, a run whose config edit never took effect is
+        # indistinguishable from one where it did, and the only clue is that two
+        # arms score identically. Recorded as fixed-width Unicode to keep the NPZ
+        # loadable with allow_pickle=False.
+        config_path=np.asarray(str(args.config)),
+        config_overrides=np.asarray(config_overrides, dtype="U200"),
+        config_effective=np.asarray(json.dumps({
+            "gauges": config["observations"]["gauges"],
+            "imerg": config["observations"]["imerg"],
+            "sampler_prior_temperature": config["sampler"]["prior_temperature"],
+            "guidance": config["guidance"],
+            "imerg_stride": args.imerg_stride,
+            "imerg_r_multiplier": args.imerg_r_multiplier,
+        }, sort_keys=True, default=str)),
         station_id=np.asarray(stations.ids).astype(str),
         station_name=np.asarray(station_names).astype(str),
         station_lat=stations.lat,
