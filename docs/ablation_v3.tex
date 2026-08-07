@@ -43,7 +43,7 @@ Two mechanisms were hypothesised, and the ablation is designed to separate them.
 
 \subsection{Design}
 
-Three configurations were trained for 150 epochs each, identical in
+Four configurations were trained for 150 epochs each, identical in
 architecture ($51.8$M parameters), optimiser, schedule, data
 (\texttt{bd\_wide\_cpc.zarr}) and normalisation statistics
 (\texttt{stats\_cpc.json}). They differ only as shown in
@@ -61,6 +61,7 @@ Arm & Description & Target & Hurdle head & \texttt{dry\_weight} \\
 A1 & full redesign        & absolute & yes & 2.0 \\
 A2 & hurdle head only     & residual & yes & 1.0 \\
 A3 & absolute target only & absolute & no  & 1.0 \\
+A4 & residual + full loss & residual & yes & 2.0 \\   % cond_dropout 0.0
 V1 & baseline             & residual & no  & --- \\
 \hline
 \end{tabular}
@@ -111,20 +112,59 @@ A3 & 9 (first)   & 18.96 & 0.994 & $+0.299$ & 0.174 & $-18.43$ & 2.24 \\
 A3 & 144 (best)  & 13.37 & 0.965 & $+0.270$ & 0.119 & $-10.29$ & 14.63 \\
 A3 & 149 (final) & 13.41 & 0.966 & $+0.270$ & 0.125 & $-10.49$ & 14.29 \\
 \hline
+A4 & 9 (first)   & 14.90 & 0.892 & $+0.196$ & 0.404 & $-13.69$ & 5.35 \\
+A4 & 39 (best)   & 9.38  & 0.967 & $+0.272$ & 0.349 & $+1.58$  & 20.84 \\
+A4 & 149 (final) & 10.83 & 0.991 & $+0.295$ & 0.293 & $+9.24$  & 27.11 \\
+\hline
 V1 & ---         & ---   & ---   & $+0.19$  & ---   & $+2.65$  & --- \\
 \hline
 \end{tabular}
 \end{table}
 
+A4 was run after the guidance probe of F6 and sets
+$\texttt{cond\_dropout}=0.0$, matching V1; the other three use $0.1$.
+
+\begin{table}[htbp]
+\centering
+\caption{Full validation trajectories, every fifteenth epoch. For each arm:
+CRPS (mm~day$^{-1}$), wet-frequency error, ensemble spread (mm~day$^{-1}$) and
+spatial correlation. A1 and A2 were restarted at epoch 20 and so have no epoch-9
+entry. Recorded in full so the section can be shortened later without returning
+to the source histories.}
+\label{tab:ablation-trajectories}
+\small
+\begin{tabular}{r|rrrr|rrrr|rrrr|rrrr}
+\hline
+ & \multicolumn{4}{c|}{A1 abs+hurdle} & \multicolumn{4}{c|}{A2 res+hurdle}
+ & \multicolumn{4}{c|}{A3 abs only} & \multicolumn{4}{c}{A4 res+full} \\
+Ep & CRPS & werr & sprd & $r$ & CRPS & werr & sprd & $r$ & CRPS & werr & sprd & $r$ & CRPS & werr & sprd & $r$ \\
+\hline
+9 & --- & --- & --- & --- & --- & --- & --- & --- & 19.0 & +0.299 & 2.2 & 0.17 & 14.9 & +0.196 & 5.4 & 0.40 \\
+24 & 19.1 & -0.067 & 4.5 & 0.08 & 10.6 & +0.301 & 14.9 & 0.33 & 16.7 & +0.278 & 5.8 & 0.16 & 10.5 & +0.252 & 15.0 & 0.35 \\
+39 & 18.4 & +0.002 & 6.5 & 0.06 & 10.5 & +0.303 & 18.3 & 0.28 & 16.4 & +0.258 & 7.0 & 0.15 & 9.4 & +0.272 & 20.8 & 0.35 \\
+54 & 17.8 & +0.023 & 8.1 & 0.05 & 10.5 & +0.302 & 19.6 & 0.29 & 15.8 & +0.251 & 7.8 & 0.15 & 9.4 & +0.281 & 21.8 & 0.34 \\
+69 & 16.8 & +0.120 & 8.7 & 0.12 & 10.4 & +0.301 & 20.3 & 0.30 & 15.3 & +0.256 & 8.8 & 0.14 & 9.9 & +0.286 & 23.0 & 0.31 \\
+84 & 16.1 & +0.148 & 9.9 & 0.12 & 10.6 & +0.297 & 21.1 & 0.29 & 14.7 & +0.264 & 10.0 & 0.16 & 10.1 & +0.290 & 24.5 & 0.32 \\
+99 & 15.3 & +0.186 & 11.3 & 0.13 & 10.9 & +0.299 & 22.1 & 0.29 & 14.2 & +0.264 & 11.4 & 0.15 & 10.3 & +0.289 & 25.8 & 0.31 \\
+114 & 14.9 & +0.199 & 13.2 & 0.13 & 11.1 & +0.299 & 22.9 & 0.29 & 13.6 & +0.268 & 13.2 & 0.15 & 10.5 & +0.291 & 26.6 & 0.31 \\
+129 & 14.5 & +0.221 & 14.3 & 0.14 & 11.2 & +0.299 & 23.4 & 0.29 & 13.5 & +0.268 & 14.4 & 0.12 & 10.7 & +0.293 & 26.9 & 0.30 \\
+144 & 14.5 & +0.228 & 14.1 & 0.14 & 11.1 & +0.298 & 23.7 & 0.29 & 13.4 & +0.270 & 14.6 & 0.12 & 10.9 & +0.295 & 27.0 & 0.29 \\
+149 & 14.6 & +0.226 & 14.0 & 0.13 & 11.0 & +0.298 & 23.4 & 0.29 & 13.4 & +0.270 & 14.3 & 0.12 & 10.8 & +0.295 & 27.1 & 0.29 \\
+\hline
+\end{tabular}
+\end{table}
+
+
 \subsection{Findings}
 \label{sec:abl-findings}
 
 \paragraph{F1. No arm satisfies the wet-frequency criterion at convergence, and
-all three are worse than the baseline.} The promotion criterion was a
+all four are worse than the baseline.} The promotion criterion was a
 wet-frequency error within $\pm 0.05$. At epoch 149 the errors are $+0.226$
-(A1), $+0.298$ (A2) and $+0.270$ (A3), against V1's $+0.19$. Taken at face
-value, the redesign not only failed to fix the defect it targeted but made it
-worse. A2 and A3 rain on more than $96\%$ of cells.
+(A1), $+0.298$ (A2), $+0.270$ (A3) and $+0.295$ (A4), against V1's $+0.19$.
+Taken at face value, the redesign not only failed to fix the defect it targeted
+but made it worse in every configuration tried. A2, A3 and A4 rain on more than
+$96\%$ of cells at convergence.
 
 \paragraph{F2. The target is nonetheless reachable: A1 attained a wet-frequency
 error of $+0.002$ at epoch 39, and further training destroyed it.} This is the
@@ -139,8 +179,8 @@ met the target perfectly a quarter of the way through training.
 
 \paragraph{F3. Ensemble spread grows monotonically with training in every arm,
 and is the proximate cause of the drift.} Spread against epoch correlates at
-$r = +0.99$ (A1), $+0.96$ (A2) and $+0.99$ (A3); no arm plateaus within 150
-epochs. In A1, the only arm with room to move on wet fraction, spread and wet
+$r = +0.99$ (A1), $+0.96$ (A2), $+0.99$ (A3) and $+0.88$ (A4); no arm plateaus
+within 150 epochs. Section~\ref{sec:abl-spread} treats this in full. In A1, the only arm with room to move on wet fraction, spread and wet
 fraction correlate at $r = +0.96$. The interpretation is mechanical: as the
 predictive distribution broadens, more cells and members cross the
 $1$~mm~day$^{-1}$ threshold, so the measured wet fraction rises even where the
@@ -163,13 +203,15 @@ remains a conditioning channel under the absolute parameterisation, but the
 network does not learn to exploit it to the same degree. On the evidence here,
 $T(\mathrm{CHIRPS}) - T(\mathrm{CPC})$ should be retained.
 
-\paragraph{F5. The hurdle head alone is insufficient; the dry weighting does the
-work.} A2 carries the hurdle head at $\texttt{dry\_weight}=1.0$ and sits at
+\paragraph{F5. The hurdle head alone is insufficient (partly superseded by F8).} A2 carries the hurdle head at $\texttt{dry\_weight}=1.0$ and sits at
 $0.997$ wet fraction from its first validation --- indistinguishable from A3,
 which has no hurdle head at all. Only A1, which combines the head with
 $\texttt{dry\_weight}=2.0$, produces a dry prior. The head supplies the
 mechanism for representing the atom at zero, but without upweighting the dry
 cells in the flow loss the gradient signal is too weak for it to be used.
+
+The stronger reading originally drawn from this --- that $\texttt{dry\_weight}$
+was the \emph{sufficient} ingredient --- was tested by A4 and is wrong. See F8.
 
 \paragraph{F6. A confound is present in all three arms, and it has now been
 tested and rejected as the explanation.} All three v3 configurations set
@@ -214,6 +256,102 @@ universal: in A2, which is saturated near $0.99$, a $14\%$ reduction in spread
 moves the wet fraction not at all. Excess spread amplifies the wet bias where
 one is developing; it does not create it.
 
+\paragraph{F7. Removing \texttt{cond\_dropout} at training time does not stop
+the spread growth, confirming F6's rejection from the other direction.} A4 is
+the only arm trained with $\texttt{cond\_dropout}=0.0$. Its spread nonetheless
+rises from $5.35$ to $27.11$~mm~day$^{-1}$ over 150 epochs --- the largest of any
+arm --- with $r=+0.88$ against epoch. The guidance probe rejected the
+unconditional branch as the explanation at sampling time; A4 rejects it at
+training time. The monotonic growth of predictive spread is therefore a property
+of the training objective or schedule, and is now the principal unexplained
+result of this study.
+
+In A4 the coupling between spread and wet frequency reaches $r=+0.974$, the
+strongest observed, which is consistent with the mechanical reading in F3: a
+broadening distribution pushes more cells across the $1$~mm~day$^{-1}$ threshold.
+
+\paragraph{F8. Correction to F5: the dry behaviour required the absolute target,
+not the dry weighting alone.} F5 concluded from A1--A3 that
+$\texttt{dry\_weight}=2.0$ was the active ingredient, since only the arm
+carrying it was ever dry. A4 isolates that claim directly: it pairs the hurdle
+head with $\texttt{dry\_weight}=2.0$ on the \emph{residual} target, and never
+descends below a wet-frequency error of $+0.196$, against A1's $+0.002$. At
+comparable spread ($5.35$ for A4 at epoch 9, $4.53$ for A1 at epoch 24) A1 is
+substantially drier. The dry weighting is necessary but not sufficient; the
+absolute parameterisation supplied the rest.
+
+This leaves a genuine trade-off rather than a single best configuration. The
+absolute target produces the correct wet frequency but poor spatial structure
+(A1: correlation $0.13$); the residual target preserves structure (A4:
+$0.29$--$0.40$, the best of the four) but is persistently too wet. A4 also
+achieves the lowest CRPS of any arm ($9.38$ at epoch 39) while having the worst
+wet-frequency error, which is a compact statement of why CRPS cannot be the
+selection criterion for this defect.
+
+\subsection{The spread pathology}
+\label{sec:abl-spread}
+
+Every arm follows the same trajectory: it begins comparatively dry and
+under-dispersed, and both quantities rise together for the whole of training
+without plateauing. Table~\ref{tab:ablation-spread} quantifies it.
+
+\begin{table}[htbp]
+\centering
+\caption{Ensemble spread growth and its coupling to wet frequency. Spread is in
+mm~day$^{-1}$; correlations are across the validation epochs of each run. No arm
+plateaus within 150 epochs, and the arms with the most headroom on wet frequency
+show the strongest coupling.}
+\label{tab:ablation-spread}
+\begin{tabular}{lrrrrr}
+\hline
+Arm & Spread first & Spread final & Growth & $r$(spread, epoch) & $r$(spread, wet frac.) \\
+\hline
+A1 & 4.53 & 14.05 & 3.1$\times$ & $+0.987$ & $+0.962$ \\
+A2 & 14.89 & 23.35 & 1.6$\times$ & $+0.957$ & $-0.779$ \\
+A3 & 2.24 & 14.29 & 6.4$\times$ & $+0.988$ & $-0.191$ \\
+A4 & 5.35 & 27.11 & 5.1$\times$ & $+0.879$ & $+0.974$ \\
+\hline
+\end{tabular}
+\end{table}
+
+The negative correlations for A2 and A3 are not counter-evidence. Both are
+saturated above $0.99$ wet fraction from their first validation, so the wet
+frequency has nowhere to move and the residual variation is noise; the coupling
+is only measurable where there is headroom, and there it is $+0.96$ (A1) and
+$+0.97$ (A4).
+
+Three explanations have been eliminated. Classifier-free guidance at $w=2$
+reduces spread by $14\%$ and does not change the wet frequency
+(Table~\ref{tab:cfg-probe}), so it is not a sampling artefact.
+$\texttt{cond\_dropout}=0.0$ in A4 does not prevent it, so it is not the learned
+unconditional branch. It appears with both target parameterisations and with and
+without the hurdle head, so it is none of the components under test.
+
+What remains is the training objective or schedule itself: the noise schedule,
+the weighting of the loss across the flow time $t$, or the interaction between
+the hurdle mask and the flow objective. A cheap next diagnostic is to measure
+predictive spread as a function of $t$ on an existing checkpoint, which
+localises the growth in flow time without training anything.
+
+\subsection{Consequences for assimilation}
+
+The prior's wet-frequency error is not confined to training diagnostics. In the
+May--June 2024 assimilation experiment (427 withheld station-days, 159 of them
+wet, gauges as truth), the rank histogram of the analysis ensemble carries
+$0.62$ of its mass in the lowest rank --- the observation falls below every
+member. The dry-day fraction of that sample is $0.628$. The agreement to three
+decimal places identifies the cause: the ensemble effectively never predicts
+zero, so on every dry day the gauge lies beneath the entire distribution. This
+is the same defect, measured against gauges rather than CHIRPS, and it is the
+mechanism by which it degrades the analysis.
+
+The assimilation nonetheless improves substantially on the background (CRPS
+$6.22$ against $9.45$; mean absolute error $9.56$ against $16.33$; bias $-0.66$
+against $+7.99$~mm~day$^{-1}$). What it does not do is beat the raw CPC field it
+was conditioned on ($9.62$ mean absolute error, $16.34$ on wet days against the
+analysis's $18.50$, correlation $0.79$ against $0.76$). Closing that gap is the
+practical reason the wet-frequency defect matters.
+
 \subsection{Limitations}
 
 \begin{enumerate}
@@ -254,12 +392,14 @@ the wet frequency, and a run adopting it should not be read as a test of that
 hypothesis.
 
 What remains unexplained is the ensemble spread, which grows monotonically
-throughout training in every arm without plateauing, and which the guidance
-probe shows is not attributable to the unconditional branch. Since it is a
-training-time rather than a sampling-time phenomenon, the remaining candidates
-are the noise schedule, the loss weighting across the $t$ range, and the
-interaction between the hurdle mask and the flow objective. This is the open
-question the next experiment should address.
+throughout training in all four arms without plateauing. The guidance probe
+rules it out as a sampling artefact and A4 rules out $\texttt{cond\_dropout}$ as
+a training cause, so the remaining candidates are the noise schedule, the loss
+weighting across the $t$ range, and the interaction between the hurdle mask and
+the flow objective. This is the open question the next experiment should
+address, and on present evidence no configuration of target, hurdle head or dry
+weighting will satisfy the wet-frequency criterion until it is resolved: every
+arm is dry early and drifts wet as the spread grows.
 
 Because the wet-frequency target is achieved transiently and then lost (F2, F3),
 model selection must track wet-frequency error rather than CRPS alone; the
