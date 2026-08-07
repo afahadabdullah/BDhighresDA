@@ -1,8 +1,13 @@
 # CFG probe: does guidance recover what cond_dropout gave away?
 #
 # NOT a new training run. This resumes the finished v3 residual+hurdle
-# checkpoint, trains two further epochs, and validates at guidance weight w=2
-# instead of w=1. Everything else is identical, so the comparison against that
+# checkpoint, trains five further epochs to reach the next checkpoint
+# boundary, and validates at guidance weight w=2 instead of w=1.
+#
+# Five extra epochs is a small confound. On the w=1 history, spread moved
+# 23.24 -> 23.35 over the last ten epochs, so training contributes ~0.05
+# per epoch while the effect being tested is on the order of several
+# mm/day. If w=2 changes nothing, five epochs did not mask it. Everything else is identical, so the comparison against that
 # run's w=1 numbers isolates the guidance weight.
 #
 # The question (docs/ablation_v3.tex, F6): all three v3 arms trained with
@@ -104,7 +109,8 @@ model:
 
 train:
   out_dir: runs/prior_h100_cpc_v3_hurdle_cfg2
-  epochs: 152
+  epochs: 155                # 150 -> 155: must LAND on a ckpt_every=5
+                             # boundary or the monitor never fires
   batch_size: 32
   lr: 1.5e-4
   weight_decay: 0.01
@@ -143,7 +149,7 @@ train:
 validation:
   enabled: true
   start_epoch: 0
-  every: 1
+  every: 5
   members: 8
   n_steps: 30
   cfg_scale: 2.0
