@@ -242,52 +242,97 @@ def load_gridded_products(
 
 
 def load_imerg_product(
-    imerg_path: str, dates: pd.DatetimeIndex, grid, meta: pd.DataFrame, factor: int
+    imerg_paths, dates: pd.DatetimeIndex, grid, meta: pd.DataFrame, factor: int
 ) -> dict | None:
     """Prepared IMERG footprints, upsampled to the fine grid for sampling.
 
+    Accepts SEVERAL files, because IMERG is prepared per evaluation period in
+    this project rather than as one continuous archive.  Days are merged onto
+    the requested calendar; if two files cover the same day the later file in
+    the list wins and the overlap is reported, since silently averaging two
+    different preparations of the same day would hide a preparation bug.
+
     Prepared IMERG is already accumulated on the exact BMD 03-03 UTC window, so
-    no day offset applies.  Footprints are nearest-neighbour expanded rather
-    than interpolated: a footprint IS a box average, and pretending otherwise
-    would invent structure the product does not have.
+    no day offset applies -- unlike CHIRPS and CPC, which are 00-00 UTC and need
+    lag -1.  Footprints are nearest-neighbour expanded rather than interpolated:
+    a footprint IS a box average, and smoothing it would invent structure the
+    product does not have.
     """
     import xarray as xr
 
-    with xr.open_dataset(imerg_path) as dataset:
-        available = np.asarray(dataset["time"].values).astype("datetime64[D]")
-        index_of = {np.datetime64(t, "D"): i for i, t in enumerate(available)}
-        precipitation = np.asarray(dataset["precipitation"].values, np.float32)
-
-    coarse_nlat, coarse_nlon = precipitation.shape[1:]
-    inferred = grid.nlat // coarse_nlat
-    if inferred != factor:
-        print(
-            f"[products] imerg: file is {coarse_nlat}x{coarse_nlon}, implying factor "
-            f"{inferred}, not the requested {factor}; using {inferred}",
-            flush=True,
-        )
-        factor = inferred
+    if isinstance(imerg_paths, (str, Path)):
+        imerg_paths = [imerg_paths]
+    imerg_paths = [Path(p) for p in imerg_paths]
 
     stack = np.full((len(dates), grid.nlat, grid.nlon), np.nan, np.float32)
-    found = 0
-    for position, date in enumerate(dates):
-        key = np.datetime64(date, "D")
-        if key not in index_of:
-            continue
-        coarse = precipitation[index_of[key]]
-        expanded = np.repeat(np.repeat(coarse, factor, axis=0), factor, axis=1)
-        stack[position, : expanded.shape[0], : expanded.shape[1]] = expanded[
-            : grid.nlat, : grid.nlon
-        ]
-        found += 1
-    if not found:
-        print("[products] imerg: no overlapping days; skipping", flush=True)
+    position_of = {np.datetime64(d, "D"): i for i, d in enumerate(dates)}
+    filled = np.zeros(len(dates), dtype=bool)
+    factors_seen: set[int] = set()
+    total_new = 0
+    total_overlap = 0
+
+    for path in imerg_paths:
+        with xr.open_dataset(path) as dataset:
+            available = np.asarray(dataset["time"].values).astype("datetime64[D]")
+            precipitation = np.asarray(dataset["precipitation"].values, np.float32)
+
+        coarse_nlat, coarse_nlon = precipitation.shape[1:]
+        file_factor = grid.nlat // coarse_nlat
+        if file_factor != factor:
+            print(
+                f"[products] imerg {path.name}: {coarse_nlat}x{coarse_nlon} implies "
+                f"factor {file_factor}, not the requested {factor}; using the file",
+                flush=True,
+            )
+        factors_seen.add(file_factor)
+
+        new = overlap = 0
+        for time_index, day in enumerate(available):
+            position = position_of.get(np.datetime64(day, "D"))
+            if position is None:
+                continue
+            if filled[position]:
+                overlap += 1
+            else:
+                new += 1
+            coarse = precipitation[time_index]
+            expanded = np.repeat(
+                np.repeat(coarse, file_factor, axis=0), file_factor, axis=1
+            )
+            stack[position, : expanded.shape[0], : expanded.shape[1]] = expanded[
+                : grid.nlat, : grid.nlon
+            ]
+            filled[position] = True
+        total_new += new
+        total_overlap += overlap
+        print(
+            f"[products] imerg {path.name}: {new} new day(s)"
+            + (f", {overlap} overlapping (later file wins)" if overlap else ""),
+            flush=True,
+        )
+
+    if not total_new:
+        print("[products] imerg: no overlapping days with the request; skipping",
+              flush=True)
         return None
-    print(f"[products] imerg: {found}/{len(dates)} days at day offset +0", flush=True)
+    if len(factors_seen) > 1:
+        print(
+            f"[products] imerg WARNING: files mix footprint factors {sorted(factors_seen)}. "
+            "Representativeness differs by footprint size, so the pooled IMERG score "
+            "is an average over two different observation scales.",
+            flush=True,
+        )
+    print(
+        f"[products] imerg: {int(filled.sum())}/{len(dates)} days at day offset +0 "
+        f"from {len(imerg_paths)} file(s), factor {sorted(factors_seen)}",
+        flush=True,
+    )
     return {
         "grid": stack,
         "at_stations": bilinear_sample(stack, grid, meta["lat"], meta["lon"]),
         "day_offset": 0,
+        "factor": sorted(factors_seen),
+        "n_files": len(imerg_paths),
     }
 
 
@@ -812,7 +857,11 @@ def main() -> None:
     parser.add_argument("--stations", required=True, help="BMD daily CSV from script 05")
     parser.add_argument("--zarr", required=True, help="training store, for CHIRPS and CPC")
     parser.add_argument("--stats", required=True, help="stats JSON, for the transform")
-    parser.add_argument("--imerg", default=None, help="optional prepared IMERG NetCDF")
+    parser.add_argument(
+        "--imerg", nargs="*", default=None,
+        help="prepared IMERG NetCDF(s); accepts several files or a shell glob, "
+             "since IMERG is prepared per evaluation period here",
+    )
     parser.add_argument("--imerg-factor", type=int, default=2)
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
@@ -823,6 +872,12 @@ def main() -> None:
     parser.add_argument("--cpc-day-offset", type=int, default=-1)
     parser.add_argument("--max-distance-km", type=float, default=400.0)
     parser.add_argument("--n-bins", type=int, default=24)
+    parser.add_argument(
+        "--common-sample", action="store_true",
+        help="score every product only on days covered by ALL of them, so the "
+             "rows of the budget table are comparable (the variogram still uses "
+             "the full gauge record, since it involves no product)",
+    )
     parser.add_argument("--monsoon-only", action="store_true",
                         help="restrict the variogram to Jun-Sep, whose convective "
                              "structure differs sharply from the pre-monsoon")
@@ -868,6 +923,35 @@ def main() -> None:
     )
 
     # ---------------------------------------------------------------- budget
+    # IMERG is prepared per evaluation period while CHIRPS and CPC run the whole
+    # archive, so without care the table would compare products scored on
+    # different years -- and monsoon years differ enough that the ranking could
+    # come entirely from the calendar. Report the mismatch always; --common-sample
+    # removes it by scoring every product on the days they all cover.
+    coverage = {
+        name: np.isfinite(block["at_stations"]).any(axis=1)
+        for name, block in products.items()
+    }
+    day_counts = {name: int(mask.sum()) for name, mask in coverage.items()}
+    print()
+    print("[budget] days available per product: "
+          + ", ".join(f"{n}={c}" for n, c in day_counts.items()))
+    shared = np.logical_and.reduce(list(coverage.values())) if coverage else None
+    if shared is not None and min(day_counts.values()) != max(day_counts.values()):
+        print(f"[budget] only {int(shared.sum())} day(s) are covered by ALL products.")
+        if not args.common_sample:
+            print("[budget] WARNING: scoring each product on its own days. Products "
+                  "are NOT directly comparable across rows; pass --common-sample "
+                  "to restrict every product to the shared days.")
+    if args.common_sample and shared is not None:
+        print(f"[budget] --common-sample: restricting all products to "
+              f"{int(shared.sum())} shared day(s)", flush=True)
+        gauge = np.where(shared[:, None], gauge, np.nan)
+        for block in products.values():
+            block["at_stations"] = np.where(
+                shared[:, None], block["at_stations"], np.nan
+            )
+
     budget = {
         name: scores_by_window(block["at_stations"], gauge)
         for name, block in products.items()
@@ -929,6 +1013,11 @@ def main() -> None:
             "coverage": meta["coverage"].tolist(),
         },
         "day_offsets": {n: b["day_offset"] for n, b in products.items()},
+        "days_per_product": day_counts,
+        "common_sample": {
+            "applied": bool(args.common_sample),
+            "n_shared_days": int(shared.sum()) if shared is not None else 0,
+        },
         "variogram": variograms,
         "budget": budget,
         "recommendation": recommendation,
