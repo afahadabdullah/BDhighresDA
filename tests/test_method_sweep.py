@@ -20,10 +20,26 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def _load(stem: str):
+    """Import a numbered script as a module.
+
+    The module MUST be registered in ``sys.modules`` before ``exec_module``.
+    On Python 3.10 ``dataclasses._is_type`` resolves a class's module with
+    ``sys.modules.get(cls.__module__).__dict__`` while checking for
+    ``KW_ONLY``; for a module that was never registered that lookup returns
+    ``None`` and every ``@dataclass`` in the file dies with
+    ``AttributeError: 'NoneType' object has no attribute '__dict__'``.
+    Python 3.12 made the lookup tolerant, so this only bites on the cluster.
+    """
     path = next(ROOT.glob(f"scripts/{stem}*.py"))
-    spec = importlib.util.spec_from_file_location(f"_{stem}", path)
+    name = f"_{stem}"
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
     return module
 
 
@@ -303,14 +319,19 @@ def test_bootstrap_tolerates_missing_pairs():
 
 try:
     sweep = _load("28_simultaneous_method_sweep")
-except ImportError as exc:  # pragma: no cover - environment dependent
+except Exception as exc:  # pragma: no cover - environment dependent
+    # Deliberately broad. A missing torch raises ImportError, but anything else
+    # that goes wrong while importing script 28 -- an interpreter-version quirk
+    # in dataclasses, a syntax error mid-edit -- must not take the numpy tests
+    # above down with it as a COLLECTION error, which is what a narrow
+    # ImportError clause allowed to happen.
     sweep = None
-    _sweep_error = str(exc)
+    _sweep_error = f"{type(exc).__name__}: {exc}"
 else:
     _sweep_error = ""
 
 needs_sweep = pytest.mark.skipif(
-    sweep is None, reason=f"script 28 needs torch: {_sweep_error}"
+    sweep is None, reason=f"script 28 did not import -- {_sweep_error}"
 )
 
 
