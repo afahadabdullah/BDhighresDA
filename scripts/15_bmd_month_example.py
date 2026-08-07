@@ -141,13 +141,45 @@ def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) 
                 f"{path} ends its accumulation at {end_hour:02d}:00 UTC, but BMD daily "
                 "rainfall ends at 03:00 UTC; calendar-day IMERG cannot be assimilated"
             )
-        if str(dataset.attrs.get("source_frequency", "")) != "half-hourly":
-            raise ValueError(
-                f"{path} was not prepared from half-hourly IMERG and cannot represent "
-                "the exact BMD 03:00-03:00 UTC window"
+        source_frequency = str(dataset.attrs.get("source_frequency", ""))
+        alignment = str(dataset.attrs.get("bmd_window_alignment", ""))
+        if source_frequency != "half-hourly":
+            # The guard exists to stop a 00-00 UTC daily product being assimilated
+            # as though it were the 03-03 UTC BMD window. That is a real hazard and
+            # the check stays. But a daily product that has ALREADY been shifted
+            # onto the BMD convention is a different case, and it has to declare
+            # itself explicitly rather than be waved through.
+            if alignment != "day-shift":
+                raise ValueError(
+                    f"{path} was not prepared from half-hourly IMERG and cannot "
+                    "represent the exact BMD 03:00-03:00 UTC window. If it is a "
+                    "daily product already shifted onto the BMD convention, set "
+                    "the attribute bmd_window_alignment='day-shift' when writing "
+                    "it (see scripts/34_make_cpc_pseudo_satellite.py)."
+                )
+            print(
+                f"[bmd] {path} is a DAILY product aligned by whole-day shift, not "
+                "built from half-hourly data. A day shift approximates the 3-hour "
+                "window offset; it cannot reproduce it. Treat the resulting "
+                "observation-error estimates as optimistic.",
+                flush=True,
             )
-        expected_lat = grid.lat.reshape(grid.nlat // factor, factor).mean(axis=1)
-        expected_lon = grid.lon.reshape(grid.nlon // factor, factor).mean(axis=1)
+
+        # A factor that does not divide the grid leaves a ragged edge. The writer
+        # crops to the largest exact tiling, so the expected footprint centres must
+        # be computed the same way -- grid.lat.reshape(128 // 10, 10) would simply
+        # raise, and silently comparing against the uncropped axis would be worse.
+        n_lat, n_lon = grid.nlat // factor, grid.nlon // factor
+        expected_lat = grid.lat[: n_lat * factor].reshape(n_lat, factor).mean(axis=1)
+        expected_lon = grid.lon[: n_lon * factor].reshape(n_lon, factor).mean(axis=1)
+        if (n_lat * factor, n_lon * factor) != (grid.nlat, grid.nlon):
+            print(
+                f"[bmd] factor {factor} does not divide the {grid.nlat}x{grid.nlon} "
+                f"grid; using the {n_lat * factor}x{n_lon * factor} exact tiling "
+                f"({n_lat}x{n_lon} footprints). The observation file must have been "
+                "written with the same crop.",
+                flush=True,
+            )
         if not np.allclose(dataset.lat.values, expected_lat, atol=2e-3, rtol=0):
             raise ValueError("prepared IMERG latitude does not nest on the model grid")
         if not np.allclose(dataset.lon.values, expected_lon, atol=2e-3, rtol=0):

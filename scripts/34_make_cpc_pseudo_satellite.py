@@ -197,6 +197,13 @@ def main() -> None:
         attrs={
             "bmd_accumulation_end_hour_utc": 3,
             "source_frequency": "daily",
+            # Declares to scripts/15 that this daily product has already been put
+            # on the BMD convention by a whole-day shift. The loader refuses any
+            # non-half-hourly file without this, which is the right default: a
+            # 00-00 UTC product assimilated as if it were 03-03 UTC is a silent,
+            # serious error. A day shift approximates the 3-hour offset and
+            # cannot reproduce it, so the loader also warns when it sees this.
+            "bmd_window_alignment": "day-shift",
             "pseudo_satellite_source": "cpc_precip from the packed Zarr",
             "block_factor": int(args.factor),
             "day_shift_applied": int(args.day_shift),
