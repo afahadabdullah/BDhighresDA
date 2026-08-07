@@ -91,7 +91,41 @@ fi
 # calendar day, BMD day D is the 24 h ending 03:00 UTC on D. Measured over
 # 43,781 station-days CPC peaks against the gauges at lag -1 (0.756) versus
 # 0.387 at lag 0.
-if [[ ! -s "$PSEUDO" ]]; then
+# Reuse only if the file is actually USABLE, not merely present. A stale file
+# written before the schema changed will otherwise be reused forever and fail
+# downstream with a confusing error from the loader instead of here.
+REGENERATE=1
+if [[ -s "$PSEUDO" ]]; then
+    if "$PYTHON_BIN" - "$PSEUDO" "$FACTOR" "$DAY_SHIFT" <<'PY'
+import sys
+import xarray as xr
+
+path, factor, shift = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with xr.open_dataset(path) as dataset:
+    attrs = dataset.attrs
+    checks = {
+        "bmd_window_alignment == 'day-shift'":
+            str(attrs.get("bmd_window_alignment", "")) == "day-shift",
+        "bmd_accumulation_end_hour_utc == 3":
+            int(attrs.get("bmd_accumulation_end_hour_utc", -1)) == 3,
+        f"block_factor == {factor}":
+            int(attrs.get("block_factor", -1)) == factor,
+        f"day_shift_applied == {shift}":
+            int(attrs.get("day_shift_applied", 999)) == shift,
+    }
+bad = [name for name, ok in checks.items() if not ok]
+if bad:
+    print("        stale/mismatched: " + "; ".join(bad))
+    raise SystemExit(1)
+PY
+    then
+        REGENERATE=0
+    else
+        echo "    $PSEUDO does not match the requested settings; regenerating."
+    fi
+fi
+
+if [[ "$REGENERATE" == "1" ]]; then
     "$PYTHON_BIN" -u scripts/34_make_cpc_pseudo_satellite.py \
         --zarr "$ZARR" \
         --start "$START" --end "$END" \
@@ -100,7 +134,7 @@ if [[ ! -s "$PSEUDO" ]]; then
         --out "$PSEUDO" \
         --report "${PSEUDO%.nc}_qc.json"
 else
-    echo "Reusing $PSEUDO"
+    echo "Reusing $PSEUDO (attributes verified)"
 fi
 
 # -------------------------------------------------------------------- arms
