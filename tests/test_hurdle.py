@@ -260,3 +260,81 @@ def test_hurdle_head_can_hit_a_wet_fraction_a_continuous_model_cannot():
 
     assert wet_before > wet_truth + 0.08, (wet_before, wet_truth)
     assert abs(wet_after - wet_truth) < 0.45 * abs(wet_before - wet_truth)
+
+
+def test_validation_loss_ignores_the_hurdle_channel():
+    """Regression: val_ema read 31.8 on hurdle arms against 0.16 without one.
+
+    ``flow_matching_loss`` used to decide whether to split the model output by
+    asking whether a ``dry_target`` had been supplied.  Validation passes none,
+    so a 2-channel model went unsplit and its dry LOGIT was broadcast against
+    the velocity target and scored as flow error.  best.pt would have been
+    selected on that number.
+    """
+    torch = pytest.importorskip("torch")
+    from bdhires.models.flow import RectifiedFlow, flow_matching_loss
+
+    class TwoChannel(torch.nn.Module):
+        """Velocity in channel 0, a large constant logit in channel 1."""
+
+        def forward(self, x, t, cond=None):
+            velocity = torch.zeros_like(x)
+            logit = torch.full_like(x, 8.0)
+            return torch.cat([velocity, logit], dim=1)
+
+    class OneChannel(torch.nn.Module):
+        def forward(self, x, t, cond=None):
+            return torch.zeros_like(x)
+
+    torch.manual_seed(0)
+    x1 = torch.randn(2, 1, 8, 8)
+    flow = RectifiedFlow()
+
+    torch.manual_seed(1)
+    two = flow_matching_loss(TwoChannel(), x1, None, flow, cond_dropout=0.0)
+    torch.manual_seed(1)
+    one = flow_matching_loss(OneChannel(), x1, None, flow, cond_dropout=0.0)
+
+    # The hurdle channel must not contribute: both models predict zero velocity.
+    assert float(two) == pytest.approx(float(one), rel=1e-5)
+    assert float(two) < 10.0
+
+
+def test_predict_dry_logit_broadcasts_a_single_case_over_an_ensemble():
+    """Regression: the validation monitor skipped every epoch on hurdle arms.
+
+    It samples an ENSEMBLE against a single case's conditioning, then reads the
+    dry logit.  Without expanding the conditioning the UNet concatenates a
+    batch-8 state onto a batch-1 condition and raises, which the monitor caught
+    and reported as a skip -- silently discarding the wet-fraction metric that
+    the whole v3 decision gate rests on.
+    """
+    torch = pytest.importorskip("torch")
+    from bdhires.models.flow import predict_dry_logit
+
+    class NeedsMatchingBatch(torch.nn.Module):
+        def forward(self, x, t, cond=None):
+            if cond is not None and cond.shape[0] != x.shape[0]:
+                raise RuntimeError(
+                    "Sizes of tensors must match except in dimension 1"
+                )
+            return torch.cat([torch.zeros_like(x), torch.ones_like(x)], dim=1)
+
+    ensemble = torch.zeros(8, 1, 6, 6)
+    single_case = torch.zeros(1, 7, 6, 6)
+
+    logit = predict_dry_logit(NeedsMatchingBatch(), ensemble, single_case)
+
+    assert logit.shape == (8, 1, 6, 6)
+
+
+def test_predict_dry_logit_refuses_an_ambiguous_batch():
+    torch = pytest.importorskip("torch")
+    from bdhires.models.flow import predict_dry_logit
+
+    class Any(torch.nn.Module):
+        def forward(self, x, t, cond=None):
+            return torch.cat([x, x], dim=1)
+
+    with pytest.raises(ValueError, match="cannot broadcast"):
+        predict_dry_logit(Any(), torch.zeros(8, 1, 4, 4), torch.zeros(3, 7, 4, 4))

@@ -185,6 +185,20 @@ def predict_dry_logit(model, x1: torch.Tensor, cond, t_eval: float = 0.99) -> to
     """
     batch = x1.shape[0]
     tb = torch.full((batch,), float(t_eval), device=x1.device, dtype=x1.dtype)
+    # ``x1`` is usually an ENSEMBLE while ``cond`` is a single case, exactly as
+    # the sampler is called. The sampler expands the conditioning internally;
+    # this function is called directly, so it has to do the same. Without it the
+    # UNet concatenates a batch-8 state onto a batch-1 condition and dies with
+    # "Sizes of tensors must match except in dimension 1", which surfaced as the
+    # validation monitor silently skipping every epoch on the hurdle arms --
+    # taking the wet-fraction metric, the sampled CRPS and best.pt with it.
+    if cond is not None and cond.shape[0] != batch:
+        if cond.shape[0] != 1:
+            raise ValueError(
+                f"cannot broadcast conditioning of batch {cond.shape[0]} "
+                f"onto a state of batch {batch}"
+            )
+        cond = cond.expand(batch, *cond.shape[1:])
     out = model(x1, tb, cond)
     if out.shape[1] < 2:
         raise ValueError(
@@ -247,7 +261,13 @@ def flow_matching_loss(
         cond = cond * keep
 
     raw = model(x_t, t, cond)
-    pred, dry_logit = split_prediction(raw, dry_target is not None)
+    # Split on the MODEL's channel count, not on whether a dry target was
+    # supplied. Validation calls this without dry_target, and keying the split
+    # off that left the 2-channel output unsplit: the dry LOGIT was then
+    # broadcast against the velocity target and scored as flow error, reporting
+    # val_ema 31.8 where the single-channel arm reported 0.16. The loss was
+    # meaningless and best.pt would have been chosen on it.
+    pred, dry_logit = split_prediction(raw, raw.shape[1] > 1)
 
     err = (pred - target) ** 2
     weights = torch.ones_like(err) if mask is None else mask.expand_as(err).clone().float()
