@@ -10,6 +10,9 @@
 #SBATCH --output=logs/%x-%j.out
 
 # CPC (0.5 deg) as the pseudo-satellite, real BMD gauges, 2024-05-01..05.
+# Fixed: error_corr_cells units (1.0 = footprints, not fine cells)
+# Fixed: day-shift alignment declared in CPC file attributes
+# Fixed: _smooth2d clamping prevents kernel shrinking on coarse grids
 #
 # READ scripts/34_make_cpc_pseudo_satellite.py BEFORE INTERPRETING THIS.
 # CPC conditions the prior and is itself a gauge analysis, so the withheld-gauge

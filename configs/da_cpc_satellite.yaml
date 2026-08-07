@@ -36,10 +36,9 @@ observations:
                                 # bigger mismatch than IMERG's 0.1 deg footprint
     # UNITS ARE FOOTPRINTS, not fine 0.05 deg cells. IMERG uses 3.0 at 0.1 deg
     # footprints, i.e. ~30 km. At 0.5 deg footprints one unit is already 0.5 deg,
-    # so CPC's error correlating over roughly a footprint means 1.0. (An earlier
-    # 10.0 here claimed a 5 degree correlation length -- wider than Bangladesh --
-    # and produced 69.8x R inflation plus an empty smoothing kernel on the 12x12
-    # footprint grid.)
+    # so CPC's error correlating over roughly a footprint means 1.0.
+    # FIXED (v2024-08-06): was 10.0 (claimed 5-degree width, R inflation 69.8x,
+    # _smooth2d shrink to 0 on 12x12 grid). Now 1.0 (one footprint = physical).
     error_corr_cells: 1.0
     bias_correction: null
 
