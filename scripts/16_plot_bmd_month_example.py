@@ -884,7 +884,14 @@ def main() -> None:
 
     # ---------------- non-independent gridded product intercomparison ----------------
     if imerg is not None:
-        imerg_fine = np.repeat(np.repeat(imerg, 2, axis=1), 2, axis=2)
+        # Derive the upsample from the shapes. A hardcoded 2 is right only for
+        # 0.1 deg IMERG; the scale-ladder arms assimilate 0.4 and 0.8 deg
+        # footprints, and factor 8 then produced a 32x32 field that could not
+        # broadcast against the 128x128 valid mask -- after the assimilation had
+        # already succeeded and written its NPZ.
+        scale_lat = max(1, -(-valid_grid.shape[0] // imerg.shape[1]))
+        scale_lon = max(1, -(-valid_grid.shape[1] // imerg.shape[2]))
+        imerg_fine = np.repeat(np.repeat(imerg, scale_lat, axis=1), scale_lon, axis=2)
         imerg_fine = imerg_fine[:, : valid_grid.shape[0], : valid_grid.shape[1]]
     else:
         imerg_fine = np.full_like(condition, np.nan)
