@@ -194,7 +194,12 @@ run_step "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --out "$DUMP" \
     --report "$REPORT"
 
-run_step "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
+# Plotting must not fail the job. The assimilation above has already written
+# the NPZ and the JSON -- the science is complete and the cross-arm evaluation
+# reads only those. A cosmetic broadcast error in a figure once marked five
+# successful folds as failed and left the dependent summary permanently in
+# DependencyNeverSatisfied, which is a far worse outcome than a missing PNG.
+if ! run_step "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --dump "$DUMP" \
     --report "$REPORT" \
     --out-diagnostics "$DIAGNOSTICS" \
@@ -202,7 +207,11 @@ run_step "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     --out-station-comparison "$STATION_COMPARISON" \
     --out-spatial "$SPATIAL" \
     --out-intercomparison "$INTERCOMPARISON" \
-    --out-evaluation "$EVALUATION"
+    --out-evaluation "$EVALUATION"; then
+    echo "WARNING: scripts/16 failed; figures are missing for this fold." >&2
+    echo "  The assimilation SUCCEEDED -- $DUMP and $REPORT are written and" >&2
+    echo "  are what scripts/42 and 45 read. Continuing so the summary runs." >&2
+fi
 
 echo "BMD + IMERG experiment complete for $START through $END."
 echo "Metrics: $REPORT"
