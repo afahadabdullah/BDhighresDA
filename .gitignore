@@ -27,3 +27,4 @@ dist/
 
 # Manuscript sources, review notes, and compiled submission artifacts stay local.
 /manuscript/
+.commit-msg.txt

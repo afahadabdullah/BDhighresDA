@@ -25,15 +25,23 @@ folds withhold different stations; pairing within fold and pooling afterwards is
 what makes the comparison valid. A configuration only counts as better if the
 interval on the difference excludes zero.
 
+**The two streams are compared where the pairing is exact.** ``--vs-arm``
+contrasts two arms of the SAME dump file -- ``--arm combined --vs-arm gauges``
+asks whether adding the satellite to the gauges helps -- and because both arms
+come from one run they share the fold, the withheld stations, the days and the
+seeds. That is a tighter comparison than any cross-run pairing can be, and it
+is the question the ingestion experiment exists to answer. There is no separate
+gauges-only configuration to run: every dump already contains all four arms.
+
 Configurations are grouped by the parent directory of each dump, which is how
 the submission wrappers separate them.
 
 Example
 -------
     python scripts/42_select_best_config.py \\
-        --dumps 'data/processed/bmd_imerg_eval_screen_*/*.npz' \\
-        --arm combined --reference s3r1 \\
-        --out-dir data/processed/config_selection
+        --dumps 'data/processed/bmd_imerg_eval_ing2022_*/*.npz' \\
+        --arm combined --vs-arm gauges --reference ing2022_RAW \\
+        --out-dir data/processed/ing2022_selection
 """
 
 from __future__ import annotations
@@ -286,6 +294,14 @@ def main() -> None:
     parser.add_argument("--reference", default=None,
                         help="configuration every other is compared against; "
                              "default is the one with the best CRPS")
+    parser.add_argument(
+        "--vs-arm", default=None, choices=sorted(ARM_KEYS),
+        help="also compare --arm against this arm WITHIN each configuration. "
+             "'--arm combined --vs-arm gauges' answers the question the "
+             "experiment is actually about -- does adding the satellite to the "
+             "gauges help -- and it is the cleanest comparison available, "
+             "because both arms come from the same dump file and so share the "
+             "fold, the withheld stations, the days and the seeds exactly.")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out-dir", required=True)
@@ -298,6 +314,7 @@ def main() -> None:
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
     by_config = defaultdict(dict)
+    by_vs_arm = defaultdict(dict)
     for path in paths:
         block = read_dump(path, args.arm)
         if block is None or block["truth"].size < 5:
@@ -305,6 +322,10 @@ def main() -> None:
                   f"{args.arm!r}")
             continue
         by_config[config_name(path)][fold_key(path)] = block
+        if args.vs_arm and args.vs_arm != args.arm:
+            other = read_dump(path, args.vs_arm)
+            if other is not None and other["truth"].size >= 5:
+                by_vs_arm[config_name(path)][fold_key(path)] = other
 
     if len(by_config) < 1:
         raise SystemExit("nothing to compare")
@@ -362,6 +383,49 @@ def main() -> None:
               f"[{c['ci_low']:>+7.3f},{c['ci_high']:>+7.3f}]  "
               f"{c['n_folds']} fold(s), n={c['n_samples']:,}  {verdict}")
 
+    # Within-configuration arm contrast. This is the sharpest test in the whole
+    # script: both arms come out of the same dump, so the pairing is exact
+    # rather than merely fold-matched, and no cross-run variance leaks in.
+    arm_comparisons = []
+    if by_vs_arm:
+        print()
+        print(f"[arms] '{args.arm}' minus '{args.vs_arm}' WITHIN each "
+              f"configuration -- same file, same withheld stations, same seeds.")
+        print(f"    Negative favours '{args.arm}'; positive means adding it "
+              f"HURT relative to '{args.vs_arm}'.")
+        for name in ranked:
+            if name not in by_vs_arm:
+                continue
+            result = paired_difference(by_config[name], by_vs_arm[name],
+                                       n_boot=args.n_boot, seed=args.seed)
+            if not result.get("comparable"):
+                print(f"    {name:22s} {result['reason']}")
+                continue
+            arm_comparisons.append({"config": name, "arm": args.arm,
+                                    "vs_arm": args.vs_arm, **result})
+            verdict = "SIGNIFICANT" if result["significant"] else \
+                "not distinguishable"
+            print(f"    {name:22s} {result['difference']:>+7.3f} "
+                  f"[{result['ci_low']:>+7.3f},{result['ci_high']:>+7.3f}]  "
+                  f"n={result['n_samples']:,}  {verdict}")
+        helped = [c["config"] for c in arm_comparisons
+                  if c["significant"] and c["difference"] < 0]
+        hurt = [c["config"] for c in arm_comparisons
+                if c["significant"] and c["difference"] > 0]
+        print()
+        if helped:
+            print(f"    '{args.arm}' significantly beats '{args.vs_arm}' in: "
+                  f"{', '.join(helped)}")
+        if hurt:
+            print(f"    '{args.arm}' is significantly WORSE than "
+                  f"'{args.vs_arm}' in: {', '.join(hurt)}")
+        if not helped and not hurt:
+            print(f"    No configuration makes '{args.arm}' distinguishable "
+                  f"from '{args.vs_arm}'.")
+            print(f"    On this sample the extra stream neither helps nor "
+                  f"hurts, which is a result,")
+            print(f"    not a failed experiment -- report it as one.")
+
     beaten = [c["a"] for c in comparisons
               if c["significant"] and c["difference"] < 0]
     print()
@@ -391,8 +455,9 @@ def main() -> None:
 
     plot_selection(summary, comparisons, out_dir / "config_selection.png")
     (out_dir / "config_selection.json").write_text(json.dumps(
-        {"arm": args.arm, "reference": reference, "summary": summary,
-         "comparisons": comparisons, "ranked_by_crps": ranked},
+        {"arm": args.arm, "vs_arm": args.vs_arm, "reference": reference,
+         "summary": summary, "comparisons": comparisons,
+         "arm_comparisons": arm_comparisons, "ranked_by_crps": ranked},
         indent=2, default=float))
     print()
     print(f"[done] wrote {out_dir / 'config_selection.json'}")

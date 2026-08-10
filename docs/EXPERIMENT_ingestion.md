@@ -59,18 +59,24 @@ defect and the first configuration below addresses it.
 
 ## The configurations
 
-Six arms, chosen so that each changes *what* is assimilated or *where*, not how
-hard. The strength axis is closed (above); repeating it would produce another
-set of indistinguishable results.
+Two axes. Group A changes *what* and *where* is assimilated; Group B changes
+*how strongly*. The earlier null result closed the **satellite** strength axis
+only — stride and the R multiplier — and left the gauge side and the
+gauge-to-satellite ratio untested, which is where the two streams actually
+trade off.
+
+Eleven arms are config-only and run with the code as it stands
+(`slurm/submit_ingestion_experiment.sh`). Four need code that does not exist
+yet and are listed but not submitted, so the experiment cannot half-execute.
 
 ### Group A — *what* and *where* is assimilated
 
 | tag | method | change | code |
 |---|---|---|---|
-| `G` | gauges only | no satellite at all | none |
+| `G` | gauges only | read out of any run with `scripts/42 --arm gauges`; **not submitted separately** | none |
 | `RAW` | simultaneous, raw IMERG | the current baseline | none |
 | `QM` | simultaneous, **bias-corrected** IMERG | quantile map from script 27 applied before assimilation | new |
-| `S01` | IMERG at **0.1°** | `imerg.factor: 2` — the native footprint. Identical to `RAW`; named so the scale ladder reads cleanly | none |
+| `S01` | IMERG at **0.1°** | `imerg.factor: 2` — the native footprint. This *is* `RAW`; named so the scale ladder reads cleanly, and **not submitted twice** | none |
 | `S04` | IMERG at **0.4°** | `imerg.factor: 8` — assimilate only the large-scale component and let the prior supply fine structure | config |
 | `S08` | IMERG at **0.8°** | `imerg.factor: 16` — the far end of the scale ladder | config |
 | `MULTI` | IMERG at 0.1° **and** 0.4° together | both footprint sets in one likelihood | new |
@@ -132,9 +138,14 @@ perturbations drawn with sd = √R. Changing `sigma_obs` reaches the same
 effective weight without the noise injection that made `s1r10T` fail. That
 contrast — same weight, different mechanism — is itself a result worth having.
 
-Fifteen arms x five folds = 75 GPU jobs at 10 days and 30 members. `RAW` and
-`S01` are the same configuration, so 14 are distinct; `RAW` is kept as the
-named baseline and `S01` as the foot of the scale ladder.
+Plus one thinning contrast, `S1` (stride 1 instead of 3), to confirm the
+earlier null on a new window rather than assume it transfers.
+
+**What is actually submitted: eleven arms x five folds = 55 GPU jobs** at 10
+days and 30 members — `RAW`, `S04`, `S08`, `GW`, `GL`, `GM`, `SW`, `SL`,
+`RATIO`, `MEASR`, `S1`. `G` and `S01` are omitted because they are already
+present in every run (`G` as the `gauges` arm, `S01` as `RAW`), and `QM`,
+`GAP`, `MULTI` and `CPCOBS` are omitted because they need code.
 
 ### Why each arm
 
@@ -171,7 +182,13 @@ decisive on its own.
 verdict. It reports, per configuration, pooled over all five folds:
 
 * **Primary (gauges):** CRPS, MAE, wet-day MAE, bias, correlation at withheld
-  stations, and a paired bootstrap against `G` matched fold by fold.
+  stations.
+* **Does the satellite help at all:** `--arm combined --vs-arm gauges`. Both
+  arms come out of the *same dump file*, so they share the fold, the withheld
+  stations, the days and the seeds, and the pairing is exact rather than merely
+  fold-matched. This is the sharpest test available and the one the experiment
+  exists to answer. It is also why `G` is not submitted as its own arm.
+* **Which configuration:** paired bootstrap against `RAW`, matched fold by fold.
 * **Secondary (structure):** spatial pattern correlation against each of CHIRPS,
   IMERG and CPC, and wet-area fraction against their envelope.
 
@@ -200,32 +217,46 @@ Supporting figures, all gauge-referenced:
 
 ---
 
-## What five days can and cannot show
+## What ten days can and cannot show
 
-Five days × five folds ≈ 185 withheld station-days, perhaps 80 of them wet. The
-10-day/300-station-day screen could not separate configurations differing by
-~0.1 mm/day CRPS, and this sample is smaller.
+Ten days × five folds ≈ 370 withheld station-days, matching the May 2024
+screen, which could **not** separate configurations differing by ~0.1 mm/day
+CRPS. Nothing about this window changes that resolution limit.
 
-That is acceptable *because these arms differ structurally rather than
-marginally*. `QM` changes the satellite bias by roughly 5 mm/day; `GAP` removes
-the satellite from most of the domain; `COARSE` changes its scale by a factor of
-four. Effects of that size are detectable here. What five days cannot do is rank
-two arms that come out close, and the plan for that outcome is to promote the
-top two to May–June rather than to read the point estimates.
+It is the right sample anyway, *because these arms differ structurally rather
+than marginally*. The scale ladder changes the observation footprint by factors
+of four and eight; `RATIO` moves the two streams' relative weight by a factor of
+400 in variance; `QM`, when it exists, changes the satellite bias by roughly
+5 mm/day. Effects of that size are detectable at 370 station-days. What ten days
+cannot do is rank two arms that come out close, and the plan for that outcome is
+to promote the top two to May–June rather than to read the point estimates.
 
-Expect roughly 80 wet station-days. `scripts/42` prints `n_wet`; if it comes
-back below ~50 the window is too dry to conclude anything and the honest move is
-to extend to 10 days before interpreting.
+`scripts/42` prints `n_wet`. Below ~50 the window is too dry to conclude
+anything, and the honest move is to extend the window rather than interpret it.
 
 ---
 
 ## Order of work
 
-1. Fit the bias correction (script 27, 2021–2024 IMERG, `--chirps-day-offset -1`).
-   Check the report: if the amplitude map is noise-dominated as in the earlier
-   fit (interannual sd 1.348 against mean 0.586), refit with `--frequency-only`,
-   which keeps the drizzle cut and drops the unstable amplitude adjustment.
-2. Apply the two code changes (`QM` application, `GAP` weighting), with unit
-   tests.
-3. Submit all six arms for 2022-05-01..05, five folds, 50 members.
-4. Run `scripts/42` for the three arms, then 38/40, then 37 for the winner.
+1. **Cut the prepared IMERG window** — `scripts/43_subset_prepared_imerg.py`
+   slices `data/processed/imerg_bd_aligned_20220501_20220531.nc` down to
+   2022-05-01..10. `scripts/15` compares the time axis to the checkpoint dates
+   with `array_equal`, so the monthly file cannot be used directly; but it was
+   written with the same `--source-frequency half-hourly --min-count 48
+   --accumulation-end-hour-utc 3` a rebuild would use, so the accumulation is
+   already right and only needs cutting. `submit_ingestion_experiment.sh` does
+   this automatically, once, before submitting — per-arm generation is what
+   caused the concurrent-write race that killed two folds of the last screen.
+2. **Submit the eleven config-only arms** —
+   `bash slurm/submit_ingestion_experiment.sh`.
+3. **Evaluate** — `scripts/42` for `--arm combined`, `--arm gauges` and
+   `--arm satellite`, then 38 and 40, then 37 for the winner.
+4. **Then the code arms.** `QM` first: `scripts/15` never reads
+   `observations.imerg.bias_correction`, so IMERG has been assimilated raw with
+   a +5.56 mm/day bias in every experiment ever run, and that is the largest
+   untested defect in the system. It needs the fit from script 27 (2021–2024,
+   `--chirps-day-offset -1`; if the amplitude map is noise-dominated as in the
+   earlier fit — interannual sd 1.348 against mean 0.586 — refit with
+   `--frequency-only`, which keeps the drizzle cut and drops the unstable
+   amplitude adjustment), then the application in script 15, with unit tests.
+   `GAP` and `MULTI` follow.
