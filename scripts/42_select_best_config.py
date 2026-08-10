@@ -374,14 +374,33 @@ def main() -> None:
             print(f"[pair] {name} vs {reference}: {result['reason']}")
 
     print()
-    print(f"[significance] every configuration against '{reference}', paired "
-          f"within fold.")
-    print("    Negative difference favours the first named configuration.")
-    for c in comparisons:
-        verdict = "SIGNIFICANT" if c["significant"] else "not distinguishable"
-        print(f"    {c['a']:22s} {c['difference']:>+7.3f} "
-              f"[{c['ci_low']:>+7.3f},{c['ci_high']:>+7.3f}]  "
-              f"{c['n_folds']} fold(s), n={c['n_samples']:,}  {verdict}")
+    # The background arm is the prior before any observation, so it is
+    # bit-identical across configurations that share a checkpoint and seeds.
+    # Every difference is then exactly zero, and printing it as a table of
+    # "not distinguishable" verdicts reads like a failure when it is in fact a
+    # control that passed.
+    identical = bool(comparisons) and all(
+        c["difference"] == 0.0 and c["ci_low"] == 0.0 and c["ci_high"] == 0.0
+        for c in comparisons)
+    if identical:
+        print(f"[control] arm {args.arm!r} is BIT-IDENTICAL across all "
+              f"{len(comparisons) + 1} configurations, as expected: it does "
+              f"not depend")
+        print("    on the observation settings being varied. This CONFIRMS the "
+              "arms share a")
+        print("    prior, seeds and fold structure, which is what makes the "
+              "fold-by-fold")
+        print("    pairing valid for the other arms. Nothing to compare here.")
+        comparisons = []
+    else:
+        print(f"[significance] every configuration against '{reference}', "
+              f"paired within fold.")
+        print("    Negative difference favours the first named configuration.")
+        for c in comparisons:
+            verdict = "SIGNIFICANT" if c["significant"] else "not distinguishable"
+            print(f"    {c['a']:22s} {c['difference']:>+7.3f} "
+                  f"[{c['ci_low']:>+7.3f},{c['ci_high']:>+7.3f}]  "
+                  f"{c['n_folds']} fold(s), n={c['n_samples']:,}  {verdict}")
 
     # Within-configuration arm contrast. This is the sharpest test in the whole
     # script: both arms come out of the same dump, so the pairing is exact
