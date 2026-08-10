@@ -29,13 +29,50 @@ cd "$(cd -- "$SCRIPT_DIR/.." && pwd)"
 START="${START:-2021-01-01}"
 END="${END:-2024-12-31}"
 OUT="${OUT:-docs/paper_figures}"
+STATIONS_WAS_SET="${STATIONS+x}"
 STATIONS="${STATIONS:-data/stations/bmd_daily.csv}"
+BMD_DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
+BMD_STATION_CATALOG="${BMD_STATION_CATALOG:-$BMD_DATA_DIR/Stations.csv}"
 OSSE_ROOT="${OSSE_ROOT:-data/processed/osse_paper}"
 PRIMARY="${PRIMARY:-simultaneous_realistic_40}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$OUT/data"
+
+# The repository stores recent BMD observations as one CSV per station.  The
+# plotting code consumes the canonical long-form table.  Build that table on
+# demand instead of assuming that an earlier DA run happened to create it.
+if [[ ! -s "$STATIONS" ]]; then
+    if [[ -n "$STATIONS_WAS_SET" ]]; then
+        echo "ERROR: explicitly requested station file does not exist: $STATIONS" >&2
+        exit 1
+    fi
+    if [[ ! -d "$BMD_DATA_DIR" || ! -s "$BMD_STATION_CATALOG" ]]; then
+        echo "ERROR: station file $STATIONS is absent and the source archive is incomplete." >&2
+        echo "Expected per-station CSVs in $BMD_DATA_DIR and catalogue $BMD_STATION_CATALOG" >&2
+        echo "Alternatively set STATIONS=/path/to/canonical_bmd_daily.csv" >&2
+        exit 1
+    fi
+    START_KEY="${START//-/}"
+    END_KEY="${END//-/}"
+    STATIONS="$OUT/data/bmd_daily_${START_KEY}_${END_KEY}.csv"
+    STATION_SUMMARY="$OUT/data/bmd_stations_${START_KEY}_${END_KEY}.csv"
+    STATION_QC="$OUT/data/bmd_qc_${START_KEY}_${END_KEY}.json"
+    if [[ -s "$STATIONS" && -s "$STATION_SUMMARY" && -s "$STATION_QC" ]]; then
+        echo "Reusing canonical BMD table: $STATIONS"
+    else
+        echo "Canonical BMD table is absent; converting $BMD_DATA_DIR"
+        "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
+            --data-dir "$BMD_DATA_DIR" \
+            --stations "$BMD_STATION_CATALOG" \
+            --start "$START" \
+            --end "$END" \
+            --out "$STATIONS" \
+            --summary "$STATION_SUMMARY" \
+            --report "$STATION_QC"
+    fi
+fi
 
 echo "============================================================"
 echo " Paper figures 1-7 + Table 1"

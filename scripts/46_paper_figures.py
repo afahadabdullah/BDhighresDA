@@ -97,9 +97,34 @@ def load_gauges(path: str, start: str, end: str):
             f"torch. Run this in the project environment, or pass --skip 2,3 "
             f"to build only the schematic."
         ) from error
+    station_path = Path(path)
+    if not station_path.is_file():
+        raise SystemExit(
+            f"station file not found: {station_path}. Run through "
+            "slurm/make_paper_figures.sh so the per-station BMD archive is "
+            "converted automatically, or pass --stations with a canonical "
+            "long-form CSV."
+        )
     dates = np.arange(np.datetime64(start, "D"),
                       np.datetime64(end, "D") + np.timedelta64(1, "D"))
     stations, values = load_stations(path, dates, grid=None, min_coverage=0.5)
+    if values.shape[1] == 0:
+        raise SystemExit(
+            f"no BMD station has at least 50% coverage between {start} and "
+            f"{end} in {station_path}"
+        )
+    valid_days = np.any(np.isfinite(values), axis=1)
+    if not valid_days.any():
+        raise SystemExit(
+            f"no valid BMD observations between {start} and {end} in "
+            f"{station_path}"
+        )
+    actual_start = str(dates[np.flatnonzero(valid_days)[0]])
+    actual_end = str(dates[np.flatnonzero(valid_days)[-1]])
+    print(
+        f"[stations] {values.shape[1]} stations; requested {start}..{end}; "
+        f"available observations {actual_start}..{actual_end}"
+    )
     return stations, values, dates
 
 
