@@ -1,0 +1,243 @@
+% ---------------------------------------------------------------------------
+% Results of the IMERG/BMD ingestion screen.
+%
+% DRAFTING NOTE: as with docs/ablation_v3.tex this is deliberately long, so
+% that it can be cut down later without re-deriving anything. Source data:
+%   data/processed/ing2022_report/ingestion_matrix.{csv,json}
+%   data/processed/ing2022_report/selection_{background,gauges,satellite,
+%                                            combined}/config_selection.json
+%   data/processed/bmd_imerg_eval_ing2022_*/fold[0-4].npz
+% Design: docs/EXPERIMENT_ingestion.md
+% ---------------------------------------------------------------------------
+
+\section{How should IMERG and BMD gauges be combined?}
+\label{sec:ingestion}
+
+\subsection{Design}
+
+Eleven assimilation configurations were run over 2022-05-01 to 2022-05-10 with
+five rotated station folds and 30 ensemble members, giving 380 withheld
+station-days of which 178 were wet ($\geq 1$~mm~day$^{-1}$). The prior was held
+fixed at V1 (\texttt{runs/prior\_h100\_cpc/best.pt}); nothing here retrains
+anything. Every run writes four arms from matched seeds --- background,
+gauges-only, satellite-only and simultaneous --- so no separate gauges-only
+configuration is required.
+
+The arms vary along two axes. \emph{Scale}: the same IMERG field assimilated at
+$0.1^\circ$, $0.4^\circ$ and $0.8^\circ$ footprints. \emph{Strength}: gauge
+$\sigma_{\mathrm{obs}}$ at $0.05$, $0.25$ and $0.41$; satellite
+$\sigma_{\mathrm{obs}}$ at $0.20$ and $1.00$; their ratio; and the measured
+observation error from the variogram analysis. One thinning contrast (stride 1
+against the default stride 3) tests whether an earlier null transfers.
+
+Two decisions constrain the design and are recorded because they are not
+obvious.
+
+\paragraph{The $R$ multiplier is not a usable strength knob.}
+\texttt{perturb\_observations} draws each member's observation perturbation with
+standard deviation $\sqrt{R}$, so inflating $R$ inflates the perturbations
+rather than merely down-weighting the observation. Strength is therefore varied
+through $\sigma_{\mathrm{obs}}$ throughout, which reaches the same effective
+weight without injecting noise.
+
+\paragraph{Observation scale requires a new observation file.}
+\texttt{observations.imerg.factor} declares which grid the observation file
+lies on: the assimilation constructs the expected footprint centres from the
+model grid and requires the file's coordinates to match them. Changing the
+factor alone is therefore not a scale experiment but an error. The coarse arms
+use block-averaged observation files
+(\texttt{scripts/44\_coarsen\_imerg\_observations.py}), with three settings
+moved in step: the file, the factor, and \texttt{error\_corr\_cells}, which is
+denominated in cells \emph{of the observation grid} and must be rescaled from
+$3.0$ to $0.75$ and $0.375$ to hold the physical correlation length fixed at
+$33$~km. Thinning is removed at the coarse scales, since coarsening already
+decorrelates and stride~3 would leave only 25 and 4 usable footprints.
+
+Aggregating \texttt{randomError} deserves a note. The variance of a block mean
+of $n$ footprints is $n^{-2}\sum_{ij}\rho_{ij}\sigma_i\sigma_j$, and under the
+exponential correlation implied by \texttt{error\_corr\_cells} the $4\times4$
+block retains $\sigma \times 0.744$ rather than the $\sigma/\sqrt{n} = \sigma
+\times 0.25$ that independence would give. Assuming independence would have
+overstated the satellite's precision by $3.0\times$ at $0.4^\circ$ and
+$4.5\times$ at $0.8^\circ$.
+
+The resulting arms carry comparable information: effective observation counts
+(footprints divided by the correlation inflation) are $57$, $57$ and $50$ at
+$0.1^\circ$, $0.4^\circ$ and $0.8^\circ$. The ladder therefore varies
+observation \emph{scale} at nearly fixed observation \emph{quantity}, which was
+not designed but makes the contrast much easier to interpret.
+
+\subsection{Primary result: the satellite does not help}
+
+Table~\ref{tab:ingestion-point} gives point skill at withheld gauges. The
+quantity of interest is $\Delta = \mathrm{CRPS}(\text{combined}) -
+\mathrm{CRPS}(\text{gauges})$, paired within the same dump file so that both
+arms share the fold, the withheld stations, the days and the seeds. This is an
+exact pairing rather than a fold-matched one, and it is the sharpest comparison
+the design admits.
+
+\begin{table}[t]
+\centering
+\caption{Point skill at 380 withheld station-days (178 wet). $\Delta$ is
+combined minus gauges-only with a 95\% paired bootstrap interval; negative
+favours adding the satellite. Background CRPS is $7.55$ for every arm, as it
+must be.}
+\label{tab:ingestion-point}
+\small
+\begin{tabular}{lrrrr@{\hspace{4pt}}l}
+\hline
+arm & gauges & satellite & combined & $\Delta$ & 95\% CI \\
+\hline
+S04   & 4.96 &  6.44 & \textbf{4.77} & $-0.192$ & $[-0.549, +0.112]$ \\
+GW    & 4.95 &  6.48 & 4.82 & $-0.130$ & $[-0.433, +0.143]$ \\
+RAW   & 4.96 &  6.48 & 4.85 & $-0.111$ & $[-0.413, +0.175]$ \\
+SW    & 4.96 &  6.49 & 4.86 & $-0.102$ & $[-0.410, +0.185]$ \\
+SL    & 4.96 &  6.89 & 4.93 & $-0.029$ & $[-0.289, +0.205]$ \\
+RATIO & 4.95 &  6.89 & 4.94 & $-0.006$ & $[-0.271, +0.236]$ \\
+S08   & 4.96 &  6.46 & 4.94 & $-0.016$ & $[-0.304, +0.246]$ \\
+GL    & 4.99 &  6.48 & 4.95 & $-0.041$ & $[-0.357, +0.252]$ \\
+MEASR & 4.98 &  6.56 & 5.01 & $+0.029$ & $[-0.261, +0.308]$ \\
+GM    & 5.07 &  6.48 & 5.10 & $+0.030$ & $[-0.295, +0.344]$ \\
+S1    & 4.96 & 13.23 & 7.35 & $+2.388$ & $[+1.824, +2.956]$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Ten of the eleven intervals contain zero.} Under the decision rule
+fixed before the runs --- an arm counts as better only if its interval excludes
+zero --- no configuration beats gauges-only, and gauges-only is the production
+configuration on this evidence. The best point estimate, S04 at $-0.192$, is
+not significant.
+
+Every arm nonetheless improves substantially on the background ($7.55
+\rightarrow 4.77$--$5.10$), so the assimilation is doing real work. The finding
+is specifically that IMERG adds nothing detectable \emph{on top of} 30 gauges,
+not that assimilation fails.
+
+\subsection{Stride 1 at native resolution is actively harmful}
+
+The single significant result is negative. S1 --- stride 1 at $0.1^\circ$,
+identical to RAW in every other respect --- degrades CRPS by
+$+2.388~[+1.824, +2.956]$, with satellite-arm CRPS of $13.23$ against
+${\sim}6.5$ elsewhere, bias $+17.53$~mm~day$^{-1}$ and wet-area fraction
+$0.990$.
+
+The mechanism is the perturbation pathology above. At stride 1 on the
+$0.1^\circ$ grid the automatic correlation inflation is $56.5\times$; because
+perturbations are drawn with $\mathrm{sd} = \sqrt{R}$, they are ${\sim}7.5\times$
+their nominal amplitude and the observation ceases to carry usable information.
+This reproduces an earlier finding (\texttt{s1r10T}, $+2.60$~CRPS, May 2024) on
+an independent window, so it should now be treated as established rather than
+provisional.
+
+\subsection{Secondary result: the satellite's usable information is at large scales}
+
+Point skill is flat across the scale ladder, but spatial structure is not
+(Table~\ref{tab:ingestion-structure}). Three metrics move monotonically with
+footprint size, and they are not measuring the same thing.
+
+\begin{table}[t]
+\centering
+\caption{Spatial structure by observation footprint. Pattern correlations are
+daily, domain-wide, against each product. The background's best pattern
+correlation is $0.60$.}
+\label{tab:ingestion-structure}
+\small
+\begin{tabular}{llrrrrr}
+\hline
+arm & footprint & CHIRPS & CPC & IMERG & wet area & bias \\
+\hline
+background & ---              & ---    & ---   & (0.60) & 0.904 & $+8.37$ \\
+S1         & $0.1^\circ$ str.\ 1 & $-0.078$ & 0.187 & 0.238 & 0.990 & $+17.53$ \\
+RAW        & $0.1^\circ$ str.\ 3 & $-0.019$ & 0.415 & 0.499 & 0.922 & $+1.84$ \\
+S04        & $0.4^\circ$      & $+0.011$ & 0.449 & 0.592 & 0.875 & $+2.16$ \\
+S08        & $0.8^\circ$      & $+0.029$ & \textbf{0.538} & \textbf{0.673} & \textbf{0.820} & \textbf{$+1.19$} \\
+\hline
+\end{tabular}
+\end{table}
+
+The sharpest statement of the result is a comparison with the background rather
+than between arms. \textbf{The background's own best pattern correlation is
+$0.60$. Assimilating IMERG at $0.1^\circ$ reduces it to $0.50$; only the
+$0.8^\circ$ arm improves on it, at $0.67$.} Assimilating the satellite at its
+native footprint currently makes the spatial field worse than not assimilating
+it at all. Coarsening removes retrieval noise the fine footprints were
+injecting while retaining the large-scale constraint, which is precisely the
+hypothesis the ladder was constructed to test.
+
+Wet-area fraction and bias corroborate independently: $0.922 \rightarrow 0.875
+\rightarrow 0.820$ and $+1.84 \rightarrow +2.16 \rightarrow +1.19$ across the
+ladder, with the coarsest arm closest to plausibility on both.
+
+\paragraph{Circularity, stated plainly.}
+Pattern correlation against IMERG is partly self-fulfilling, since IMERG is
+what is being assimilated. The CPC correlation is the cleaner signal --- CPC
+does not enter the likelihood --- and it tells the same story ($0.415
+\rightarrow 0.449 \rightarrow 0.538$), though CPC does condition the prior and
+so is not fully independent either. Wet-area fraction and bias carry no such
+circularity and agree. The result should be read as supported by three partly
+independent lines rather than proven by any one.
+
+\paragraph{The ladder is confounded with thinning, necessarily.}
+RAW uses stride~3 while S04 and S08 use stride~1, because stride~3 at the
+coarse scales would leave 25 and 4 footprints. The confound cannot be removed,
+but its direction is known: S1 shows that stride~1 at $0.1^\circ$ is
+catastrophic, so if thinning were driving the trend the coarse stride-1 arms
+should be the \emph{worst}, and they are the best. The effective observation
+counts (57/57/50) also match.
+
+\subsection{What the strength axis showed}
+
+Nothing separable, but with a consistent ordering worth recording. Combined
+CRPS rises monotonically as the gauges are loosened: GW ($\sigma = 0.05$)
+$4.82$, RAW ($0.10$) $4.85$, GL ($0.25$) $4.95$, GM ($0.41$) $5.10$. None of
+these differences is significant.
+
+MEASR --- which sets both streams to the representativeness measured from the
+variogram, $\sigma_{\mathrm{rep}} = 0.410$ --- is among the worst arms
+($5.01$, bias $+3.13$). This is worth stating carefully, because it is
+counter-intuitive and easy to misread. The measured value is a correct
+description of point-versus-cell mismatch; it is nevertheless not the best
+operational choice \emph{given a background biased by $+8.37$~mm~day$^{-1}$},
+because loosening the gauges admits more of that bias into the analysis. When
+the prior is badly biased, the statistically correct observation error and the
+skill-optimal observation error are different quantities. The correct
+conclusion is not that the measurement was wrong but that the prior is.
+
+\subsection{What remains broken}
+
+\begin{enumerate}
+  \item \textbf{Every arm is outside the product wet-area envelope}, best case
+    $0.820$. The background is $0.904$ with a bias of $+8.37$~mm~day$^{-1}$ at
+    withheld stations. Assimilation removes most of the bias
+    ($+8.37 \rightarrow +1.19$ at best) but cannot fix a prior that rains
+    almost everywhere.
+  \item \textbf{The analysis has essentially no daily agreement with CHIRPS}
+    ($-0.078$ to $+0.029$ across arms) --- the product the prior was
+    \emph{trained on}. Combined with CHIRPS's measured daily correlation of
+    $0.29$--$0.56$ against these same gauges, against IMERG's $0.71$--$0.78$,
+    this points at the training target rather than at any assimilation setting.
+  \item \textbf{IMERG has still never been bias-corrected.}
+    \texttt{observations.imerg.bias\_correction} exists in the configuration
+    and is not read by the assimilation script, so every result above uses raw
+    V07B with a measured $+5.56$~mm~day$^{-1}$ bias at the gauges, in a
+    Gaussian likelihood that assumes unbiasedness.
+\end{enumerate}
+
+\subsection{Power, and what would settle the scale question}
+
+The point-skill test is underpowered for the effect sizes observed. S04's
+interval half-width is $0.33$~mm~day$^{-1}$ against a point estimate of
+$0.192$; excluding zero requires roughly $(0.33/0.192)^2 \approx 3.0$ times the
+sample, that is ${\sim}1130$ withheld station-days, or about 30 days rather
+than 10.
+
+The confirmation run is therefore the full month of May 2022 (31 days, five
+folds, ${\sim}1240$ withheld station-days) restricted to RAW, S04 and S08 ---
+the scale ladder only, since the strength axis produced nothing to follow up
+and S1 is established as harmful.
+
+One caveat on that design: the 31-day window is a strict \emph{superset} of the
+10-day window, so it increases power rather than providing an independent
+replication. If the scale result survives, June 2022 gives a genuinely
+independent test on data not used here.
