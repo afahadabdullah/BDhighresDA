@@ -19,8 +19,18 @@ export BMD_DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 export BMD_STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 export BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:--1}"
 
-PREP_PYTHON="${V2_INGEST_PREP_PYTHON:-/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python}"
-[[ -x "$PREP_PYTHON" ]] || PREP_PYTHON="python"
+# Preparation runs on the node launching this script, not on the Grace-Hopper
+# nodes that execute the GPU array.  A Python binary from the GH200 environment
+# is therefore not portable to an x86 login node.  Use the active environment
+# unless the caller explicitly selects another compatible interpreter.
+if [[ -n "${V2_INGEST_PREP_PYTHON:-}" ]]; then
+    PREP_PYTHON="$V2_INGEST_PREP_PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    PREP_PYTHON="python"
+else
+    PREP_PYTHON="python3"
+fi
+PREP_PYTHON_CHECKED=0
 
 SHARED_DIR="${V2_INGEST_IMERG_DIR:-data/processed/imerg_prepared_ing2022}"
 ARCHIVE_GLOB="${IMERG_ARCHIVE_GLOB:-data/processed/imerg_bd_aligned_*.nc}"
@@ -40,6 +50,20 @@ prepare_imerg_window() {
     local window_end="$2"
     local native_out="$3"
     local coarse_out="$4"
+
+    if [[ ! -s "$native_out" || ! -s "$coarse_out" ]] && (( ! PREP_PYTHON_CHECKED )); then
+        if ! command -v "$PREP_PYTHON" >/dev/null 2>&1; then
+            echo "ERROR: preparation Python not found: $PREP_PYTHON"
+            echo "Activate a Python environment with numpy and xarray, or set V2_INGEST_PREP_PYTHON."
+            exit 1
+        fi
+        if ! "$PREP_PYTHON" -c 'import numpy, xarray' >/dev/null 2>&1; then
+            echo "ERROR: preparation Python cannot run with numpy and xarray: $PREP_PYTHON"
+            echo "Activate a compatible environment, or set V2_INGEST_PREP_PYTHON."
+            exit 1
+        fi
+        PREP_PYTHON_CHECKED=1
+    fi
 
     if [[ ! -s "$native_out" ]]; then
         PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u scripts/43_subset_prepared_imerg.py \

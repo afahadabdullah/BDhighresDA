@@ -92,6 +92,12 @@ git pull --ff-only origin main
 bash slurm/submit_v2_ingestion_triplet.sh
 ```
 
+IMERG preparation runs with `python` (or `python3`) from the active
+submission-node environment. If that interpreter does not contain NumPy and
+xarray, activate a compatible environment or set `V2_INGEST_PREP_PYTHON` to a
+binary built for the submission node. The GPU job continues to use its
+configured GH200 environment.
+
 The launcher submits a five-fold GPU array and a dependent CPU summary. Outputs
 are isolated at the path below. By default it first reproduces fold 0 through
 May 2 with all 30 members—the exact case that previously failed—and holds the
