@@ -80,7 +80,10 @@ CATALOG="${OSSE_BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 ROOT="${DAY_ROOT:-data/processed/osse_day_${DAY//-/}}"
 [[ -s "$CATALOG" ]] || { echo "ERROR: no catalogue at $CATALOG"; exit 1; }
 
-# NAME|SPREAD_CELLS|GAMMA|PRIOR_TEMPERATURE   (empty = leave the config alone)
+# NAME|SPREAD_CELLS|GAMMA|PRIOR_TEMPERATURE|MODE|SAT_SOURCE|SAT_FACTOR
+# Empty fields leave the config alone. MODE is gauges|satellite|combined,
+# SAT_SOURCE is truth (CHIRPS block means) or cpc, SAT_FACTOR is in 0.05-degree
+# cells so 10 = 0.5 degrees, the CPC resolution.
 VARIANTS="${VARIANTS:-
 base|0||
 s6|6||
@@ -102,7 +105,8 @@ echo "============================================================"
 
 for spec in $VARIANTS; do
     [[ -z "$spec" ]] && continue
-    IFS='|' read -r NAME SPREAD GAMMA TEMP <<< "$spec"
+    IFS='|' read -r NAME SPREAD GAMMA TEMP MODE SATSRC SATFAC <<< "$spec"
+    MODE="${MODE:-gauges}"; SATSRC="${SATSRC:-truth}"; SATFAC="${SATFAC:-10}"
     OUT="$ROOT/$NAME"
     if [[ -s "$OUT/ensemble.npz" ]]; then
         echo ">>> $NAME already present, skipping"; continue
@@ -112,12 +116,20 @@ for spec in $VARIANTS; do
     FAILED=0
     mkdir -p "$OUT"
     echo
-    echo ">>> variant $NAME  spread=${SPREAD:-0} gamma=${GAMMA:-config} temp=${TEMP:-config}"
+    echo ">>> variant $NAME  mode=$MODE spread=${SPREAD:-0} gamma=${GAMMA:-config} temp=${TEMP:-config}"
+    [[ "$MODE" != "gauges" ]] && echo "    satellite: source=$SATSRC factor=$SATFAC (= $(awk -v f=$SATFAC 'BEGIN{printf "%.2f", f*0.05}') deg)"
 
     EXTRA=()
     [[ -n "${SPREAD:-}" ]] && EXTRA+=(--guidance-spread-cells "$SPREAD")
     [[ -n "${GAMMA:-}"  ]] && EXTRA+=(--guidance-gamma "$GAMMA")
     [[ -n "${TEMP:-}"   ]] && EXTRA+=(--prior-temperature "$TEMP")
+    if [[ "$MODE" != "gauges" ]]; then
+        # stride 1 and no correlation control: the observation is exact, so
+        # there is no correlated error to guard against and inflating R would
+        # only down-weight perfect information.
+        EXTRA+=(--satellite-factor "$SATFAC" --satellite-stride 1
+                --satellite-source "$SATSRC")
+    fi
 
     run_step "$PYTHON_BIN" -u scripts/10_osse.py \
         --config "$CONFIG" --ckpt "$CKPT" \
@@ -129,7 +141,7 @@ for spec in $VARIANTS; do
         --holdout-neighbor-km "$NEIGHBOR_KM" \
         --holdout-max-gap-deg "$MAX_GAP_DEG" \
         --withhold "$WITHHOLD" --seed "$SEED" \
-        --obs-error exact --observation-mode gauges \
+        --obs-error exact --observation-mode "$MODE" \
         --dump "$OUT/ensemble.npz" \
         --dump-network "$NETWORK" --dump-obs-error exact \
         --out-figure "$OUT/osse_overview.png" \

@@ -256,6 +256,20 @@ def parse_args() -> argparse.Namespace:
              "reaches, and the correction does not propagate.",
     )
     parser.add_argument(
+        "--satellite-source",
+        choices=["truth", "cpc"],
+        default="truth",
+        help="what the pseudo-satellite OBSERVES. 'truth' is block means of the "
+             "CHIRPS nature run -- perfect coarse information, the upper bound "
+             "on what coarse forcing can do. 'cpc' assimilates the 0.5-degree "
+             "CPC conditioning field instead, which is what actually exists in "
+             "the real system. Note CPC is ALSO the prior's input channel, so "
+             "assimilating it adds no information: it forces the model to "
+             "HONOUR conditioning it already had. And CPC is not the nature "
+             "run, so it is scored against a field it genuinely differs from; "
+             "read the pair, not either alone.",
+    )
+    parser.add_argument(
         "--guidance-gamma", type=float, default=None,
         help="override guidance.gamma without going through --tune",
     )
@@ -1163,15 +1177,34 @@ def main() -> None:
                         satellite_truth_transformed[
                             ~satellite_selection.reshape(-1)
                         ] = np.nan
+                        # The OBSERVATION may differ from the truth: with
+                        # --satellite-source cpc the analysis is forced toward
+                        # the coarse conditioning field, while scoring still
+                        # uses the CHIRPS block means. Keeping the two arrays
+                        # separate is the whole point -- collapsing them would
+                        # silently make CPC the truth.
+                        if args.satellite_source == "cpc":
+                            satellite_obs_mm, _ = block_mean_mm(
+                                coarse_base_mm, valid, satellite_factor,
+                                crop=satellite_crop,
+                            )
+                            satellite_source_transformed = transform.forward(
+                                satellite_obs_mm
+                            ).astype(np.float32).reshape(-1)
+                            satellite_source_transformed[
+                                ~satellite_selection.reshape(-1)
+                            ] = np.nan
+                        else:
+                            satellite_source_transformed = satellite_truth_transformed
                         # One correlated error realisation creates the actual
                         # pseudo-IMERG product.  Member-wise perturbations below
                         # then preserve posterior ensemble variance.
                         satellite_R = R[len(active_assim_idx):]
                         if exact_observations:
-                            satellite_observed = satellite_truth_transformed.copy()
+                            satellite_observed = satellite_source_transformed.copy()
                         else:
                             satellite_observed = perturb_observations(
-                                satellite_truth_transformed,
+                                satellite_source_transformed,
                                 satellite_R,
                                 1,
                                 seed=args.seed + index + 100_000,
@@ -1189,14 +1222,14 @@ def main() -> None:
                                 ],
                             )[0].astype(np.float32)
                         satellite_observed[
-                            ~np.isfinite(satellite_truth_transformed)
+                            ~np.isfinite(satellite_source_transformed)
                         ] = np.nan
                         truth_obs.append(satellite_truth_transformed)
                         observed.append(satellite_observed)
                         satellite_observed_mm = transform.inverse(
                             satellite_observed
                         ).reshape(satellite_shape).astype(np.float32)
-                        if exact_observations:
+                        if exact_observations and args.satellite_source == "truth":
                             exact_footprints = (
                                 satellite_selection
                                 & np.isfinite(satellite_truth_mm)
@@ -1579,6 +1612,7 @@ def main() -> None:
         "holdout_neighbor_km": float(args.holdout_neighbor_km),
         "holdout_max_gap_deg": float(args.holdout_max_gap_deg),
         "guidance_spread_cells": float(base_guidance.spread_cells),
+        "satellite_source": args.satellite_source,
         "bmd_station_catalog": bmd_station_source,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (
