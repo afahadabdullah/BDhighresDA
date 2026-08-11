@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=16:00:00
+#SBATCH --time=24:00:00
 #SBATCH --array=0-2%2
 #SBATCH --output=logs/%x-%A_%a.out
 #
@@ -49,6 +49,35 @@
 #   4  satellite_realistic_bmd   footprints only, configured + correlated error
 #   5  simultaneous_realistic_bmd both, configured error
 #   6  gauges_tune_bmd           gamma x sigma_obs x prior_temperature, 60 combos
+#   --- better gauge ingestion, exact observations (ARRAY=7-9) --------------
+#   7  gauges_exact_nbr          exact gauges, NEIGHBOURED holdout
+#   8  gauges_tune_exact_nbr     the same, sweeping the ingestion settings
+#   9  gauges_exact_spread_ref   exact gauges, ISOLATED holdout, kept as the
+#                                honest comparator for arm 7
+#
+# WHY ARMS 7-9
+# spread_holdout seeds at the station farthest from the centroid and then
+# samples farthest-point, so it selects the most ISOLATED stations by
+# construction. On a BMD-like geometry it put all three isolates into an
+# eight-station holdout, with a mean nearest-neighbour distance of 90 km
+# against 32 km for a neighbour-supported selection. A gauge with nothing
+# inside the ~146 km variogram range cannot be reconstructed from
+# observations, so its score measures the PRIOR, not the assimilation.
+#
+# Two defects are excluded, and they fail differently. ISOLATION: no neighbour
+# within 75 km, so nothing to reconstruct from. EDGE: neighbours on one side
+# only, so reconstruction is extrapolation rather than interpolation, caught by
+# the largest angular gap between bearings to the nearest stations. On BMD-like
+# geometry the old holdout reached 291 km to the nearest ASSIMILATED station and
+# a 322 degree gap; the new one, 55 km and 186 degrees.
+#
+# Support is checked against the ASSIMILATED stations, not all stations: a
+# holdout can otherwise strip the very neighbours that qualified its members,
+# each supporting the next and all removed together.
+#
+# Arm 7 withholds only stations that pass both tests. This RAISES
+# apparent skill, so arm 9 repeats the old isolated holdout unchanged and both
+# are reported: the pair is the result, either alone is cherry-picking.
 #
 # WHY 2021-2024 AND NOT 2020: the prior splits train [1981,2018],
 # val [2019,2020], test [2021,2025]. Scoring on 2020 would use years the
@@ -88,6 +117,12 @@ CKPT="${OSSE_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${OSSE_CONFIG:-configs/da.yaml}"
 DAYS="${OSSE_BMD_DAYS:-48}"
 MEMBERS="${OSSE_BMD_MEMBERS:-16}"
+# Arms 7-9 use 50 members. scripts/41 measured fair CRPS to be flat in ensemble
+# size while the member-sampling interval narrows from ~3.0 mm/day at m=2 to
+# ~0.3 at m=30 and ~0 at m=50: members buy PRECISION, not skill. These three
+# arms are compared against each other and, in arm 8, ranked sixty ways, so
+# precision is exactly what they need.
+MEMBERS_INGESTION="${OSSE_BMD_MEMBERS_INGESTION:-50}"
 START="${OSSE_BMD_START:-2021-01-01}"
 END="${OSSE_BMD_END:-2024-12-31}"
 WITHHOLD="${OSSE_BMD_WITHHOLD:-0.2}"
@@ -95,7 +130,11 @@ SEED="${OSSE_BMD_SEED:-7}"
 ROOT="${OSSE_BMD_ROOT:-data/processed/osse_bmd}"
 NETWORK="${OSSE_BMD_NETWORK:-bmd}"
 FACTOR="${OSSE_BMD_FACTOR:-2}"          # 2 x 0.05 deg = the 0.1 deg IMERG footprint
-TUNE_DAYS="${OSSE_BMD_TUNE_DAYS:-16}"
+# 8 rather than 16 for the 50-member tuning arm. At 16 days it is 48,000
+# member-days against 768 for a 16-member single-config arm -- 62x -- which
+# does not fit the wall. Halving the days keeps the RANKING, which is what a
+# sweep is for, while a single configuration still gets all 48 days.
+TUNE_DAYS="${OSSE_BMD_TUNE_DAYS:-8}"
 
 # The 'bmd' token reads coordinates from this catalogue. scripts/10_osse.py
 # defaults to data/bmd/Stations.csv, which does not exist in this checkout.
@@ -112,10 +151,26 @@ case "$SLURM_ARRAY_TASK_ID" in
     4) SET=("satellite_realistic_bmd"    "satellite"   "realistic" 3 1 0) ;;
     5) SET=("simultaneous_realistic_bmd" "combined"    "realistic" 3 1 0) ;;
     6) SET=("gauges_tune_bmd"            "gauges"      "realistic" 3 0 1) ;;
+    7) SET=("gauges_exact_nbr"           "gauges"      "exact"     1 0 0) ;;
+    8) SET=("gauges_tune_exact_nbr"      "gauges"      "exact"     1 0 1) ;;
+    9) SET=("gauges_exact_spread_ref"    "gauges"      "exact"     1 0 0) ;;
     *) echo "ERROR: unknown task $SLURM_ARRAY_TASK_ID"; exit 2 ;;
 esac
 LABEL="${SET[0]}"; MODE="${SET[1]}"; ERROR="${SET[2]}"
 STRIDE="${SET[3]}"; CORRCTL="${SET[4]}"; TUNE="${SET[5]}"
+
+# Arms 7 and 8 verify only where verification is meaningful; arm 9 is the
+# unrestricted comparator that keeps arm 7 honest.
+HOLDOUT="${OSSE_BMD_HOLDOUT:-spread}"
+case "$SLURM_ARRAY_TASK_ID" in
+    7|8) HOLDOUT="neighbored" ;;
+esac
+NEIGHBOR_KM="${OSSE_BMD_NEIGHBOR_KM:-75}"
+MAX_GAP_DEG="${OSSE_BMD_MAX_GAP_DEG:-200}"
+
+case "$SLURM_ARRAY_TASK_ID" in
+    7|8|9) MEMBERS="$MEMBERS_INGESTION" ;;
+esac
 
 OUT="$ROOT/$LABEL"
 mkdir -p "$OUT"
@@ -125,6 +180,17 @@ echo "  mode=$MODE error=$ERROR stride=$STRIDE corr_control=$CORRCTL tune=$TUNE"
 FOOTPRINT_DEG="$(awk -v f="$FACTOR" 'BEGIN{printf "%.2f", f*0.05}')"
 echo "  network=$NETWORK ($CATALOG) footprint factor=$FACTOR (= $FOOTPRINT_DEG deg)"
 echo "  window=$START..$END days=$DAYS members=$MEMBERS withhold=$WITHHOLD seed=$SEED"
+echo "  holdout=$HOLDOUT (neighbour <= ${NEIGHBOR_KM} km, bearing gap <= ${MAX_GAP_DEG} deg)"
+if [[ "$TUNE" == "1" ]]; then
+    COMBOS=60   # gamma(3) x sigma_obs(4) x prior_temperature(5), configs/da.yaml
+    WORK=$(( TUNE_DAYS * COMBOS * MEMBERS ))
+    echo "  TUNING: $TUNE_DAYS days x $COMBOS combinations x $MEMBERS members"
+    echo "          = $WORK member-days, against $(( DAYS * MEMBERS )) for a"
+    echo "          single-configuration arm. Reduce OSSE_BMD_TUNE_DAYS if this"
+    echo "          approaches the 24 h wall."
+else
+    echo "  work: $(( DAYS * MEMBERS )) member-days"
+fi
 if [[ "$ERROR" == "exact" ]]; then
     echo "  PERFECT OBSERVATIONS: no error is added to either stream, and the"
     echo "  run asserts the pseudo-satellite equals the CHIRPS block mean."
@@ -150,7 +216,9 @@ run_step "$PYTHON_BIN" -u scripts/10_osse.py \
     --networks "$NETWORK" \
     --bmd-stations "$CATALOG" \
     --station-layout spread \
-    --holdout-layout spread \
+    --holdout-layout "$HOLDOUT" \
+    --holdout-neighbor-km "$NEIGHBOR_KM" \
+    --holdout-max-gap-deg "$MAX_GAP_DEG" \
     --withhold "$WITHHOLD" \
     --seed "$SEED" \
     --obs-error "$ERROR" \

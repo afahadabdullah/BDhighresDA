@@ -401,6 +401,200 @@ def spread_holdout(lat: np.ndarray, lon: np.ndarray, count: int) -> np.ndarray:
     return np.sort(np.asarray(selected, dtype=int))
 
 
+def nearest_neighbour_km(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Great-circle distance from each station to its closest OTHER station.
+
+    Used to describe how supportable a station is: a withheld gauge with a
+    neighbour 20 km away can in principle be reconstructed from nearby
+    observations, while one 120 km from anything can only be reconstructed from
+    the prior. Scoring both together, without saying which is which, mixes a
+    test of the assimilation with a test of the prior.
+    """
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    if lat.shape != lon.shape or lat.ndim != 1:
+        raise ValueError("lat and lon must be same-length one-dimensional arrays")
+    if lat.size < 2:
+        return np.full(lat.size, np.inf)
+    return _pairwise_km(lat, lon).min(axis=1)
+
+
+def max_bearing_gap_deg(
+    lat: np.ndarray, lon: np.ndarray, k: int = 6
+) -> np.ndarray:
+    """Largest angular gap between the bearings to a station's ``k`` neighbours.
+
+    This detects stations at the EDGE of a network, which is a different defect
+    from being far from everything. A station in the interior has neighbours in
+    every direction, so its bearings are spread around the circle and the
+    largest gap between consecutive ones is small. A station on the boundary has
+    neighbours only on the inward side, so one gap approaches or exceeds
+    180 degrees -- everything beyond the boundary is missing.
+
+    That matters for verification because an interior gauge can be reconstructed
+    by interpolation while a boundary gauge can only be reconstructed by
+    extrapolation, which is a far harder problem and one the prior, not the
+    assimilation, ends up answering.
+
+    Returns degrees in ``[0, 360]``; ``360`` for a station with no neighbours.
+    """
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    n = lat.size
+    if n < 2:
+        return np.full(n, 360.0)
+
+    scale = np.cos(np.radians(float(lat.mean())))
+    y = lat
+    x = lon * scale
+    out = np.empty(n, dtype=float)
+    for i in range(n):
+        dy = y - y[i]
+        dx = x - x[i]
+        distance = np.hypot(dy, dx)
+        distance[i] = np.inf
+        take = np.argsort(distance)[: min(k, n - 1)]
+        bearings = np.sort(np.degrees(np.arctan2(dy[take], dx[take])) % 360.0)
+        if bearings.size == 0:
+            out[i] = 360.0
+            continue
+        # Circular gaps, including the wrap from the last bearing to the first.
+        gaps = np.diff(bearings)
+        wrap = 360.0 - (bearings[-1] - bearings[0])
+        out[i] = float(max(gaps.max() if gaps.size else 0.0, wrap))
+    return out
+
+
+def neighbored_holdout(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    count: int,
+    radius_km: float = 75.0,
+    max_gap_deg: float = 200.0,
+    neighbours: int = 6,
+) -> np.ndarray:
+    """Spread holdout restricted to stations that HAVE a nearby neighbour.
+
+    ``spread_holdout`` seeds at the station farthest from the centroid and then
+    samples farthest-point, so it selects the most ISOLATED and most PERIPHERAL
+    stations by construction -- Sylhet, Teknaf, Tetulia and the like. That makes
+    the verification set maximally adversarial for reasons that have nothing to
+    do with the assimilation method.
+
+    Two distinct defects are excluded here, because they fail differently:
+
+    **Isolation.** A withheld gauge with no neighbour inside the background
+    error correlation length cannot be reconstructed from observations at all,
+    so its score measures the prior. Excluded by ``radius_km``.
+
+    **Edge.** A gauge on the network boundary has neighbours only on the inward
+    side, so reconstructing it is EXTRAPOLATION rather than interpolation --
+    a harder problem, and again mostly a test of the prior. Excluded by
+    ``max_gap_deg``, the largest angular gap between bearings to its
+    ``neighbours`` nearest stations: an interior station has neighbours all
+    around and a small maximum gap, a boundary station has one gap approaching
+    or exceeding 180 degrees.
+
+    The selection is then spread among the survivors, so the withheld set stays
+    geographically distributed rather than clustered.
+
+    HONESTY REQUIREMENT. This raises apparent skill, and reporting it alone
+    would be cherry-picking. It is defensible only when described for what it
+    is -- skill at stations the analysis could plausibly reconstruct -- and it
+    should be reported ALONGSIDE the unrestricted holdout, not instead of it.
+    Callers are expected to record each withheld station's nearest-neighbour
+    distance so the score can be stratified after the fact.
+    """
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    if not 1 <= count < len(lat):
+        raise ValueError("holdout count must be between 1 and n_stations - 1")
+
+    nearest = nearest_neighbour_km(lat, lon)
+    gap = max_bearing_gap_deg(lat, lon, k=neighbours)
+    supported = nearest <= float(radius_km)
+    interior = gap <= float(max_gap_deg)
+    eligible = np.flatnonzero(supported & interior)
+    if eligible.size < count:
+        raise ValueError(
+            f"only {eligible.size} of {lat.size} stations qualify "
+            f"({int(supported.sum())} have a neighbour within {radius_km:g} km, "
+            f"{int(interior.sum())} are interior at a {max_gap_deg:g} deg gap "
+            f"threshold), which is fewer than the {count} to be withheld. "
+            f"Lower the withheld fraction, raise --holdout-neighbor-km, or "
+            f"relax --holdout-max-gap-deg. Do NOT fall back silently: "
+            f"reintroducing isolated or peripheral stations is the exact bias "
+            f"this function exists to remove."
+        )
+
+    # Farthest-point spread among the eligible subset only.
+    x = lon * np.cos(np.radians(float(lat.mean())))
+    points = np.column_stack([lat, x])[eligible]
+    centroid = points.mean(axis=0)
+    selected = [int(np.argmax(np.sum((points - centroid) ** 2, axis=1)))]
+    while len(selected) < count:
+        distance = np.min(
+            np.sum((points[:, None, :] - points[np.asarray(selected)][None, :, :]) ** 2,
+                   axis=2),
+            axis=1,
+        )
+        distance[np.asarray(selected)] = -np.inf
+        selected.append(int(np.argmax(distance)))
+    chosen = eligible[np.asarray(selected, dtype=int)]
+
+    # A station's support must come from gauges that REMAIN IN THE ANALYSIS.
+    # Eligibility above was computed against all stations, so withholding a
+    # cluster can strip the very neighbours that made its members eligible --
+    # each supporting the next, all removed together. Repair by swapping the
+    # worst-supported pick for the best-supported unused candidate until every
+    # withheld station has an ASSIMILATED neighbour inside the radius.
+    all_pairs = _pairwise_km(lat, lon)
+    unused = [int(i) for i in eligible if i not in set(chosen.tolist())]
+    for _ in range(len(eligible) + 1):
+        held = set(int(i) for i in chosen)
+        support = np.array([
+            np.min([all_pairs[i, j] for j in range(lat.size) if j not in held])
+            if lat.size - len(held) else np.inf
+            for i in chosen
+        ])
+        worst = int(np.argmax(support))
+        if support[worst] <= float(radius_km):
+            break
+        if not unused:
+            raise ValueError(
+                f"cannot withhold {count} stations and still leave every one of "
+                f"them an assimilated neighbour within {radius_km:g} km. The "
+                f"eligible pool ({eligible.size}) is too small relative to the "
+                f"withheld count. Lower the withheld fraction or raise the "
+                f"radius; a holdout whose members removed each other's support "
+                f"is the bias this function exists to avoid."
+            )
+        replacement_scores = []
+        for candidate in unused:
+            trial = set(held) - {int(chosen[worst])} | {candidate}
+            others = [j for j in range(lat.size) if j not in trial]
+            replacement_scores.append(
+                min(all_pairs[candidate, j] for j in others) if others else np.inf
+            )
+        best = int(np.argmin(replacement_scores))
+        unused.append(int(chosen[worst]))
+        chosen[worst] = unused.pop(best)
+    return np.sort(chosen)
+
+
+def _pairwise_km(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Full great-circle distance matrix, diagonal set to infinity."""
+    phi = np.radians(np.asarray(lat, float))
+    lam = np.radians(np.asarray(lon, float))
+    dphi = phi[:, None] - phi[None, :]
+    dlam = lam[:, None] - lam[None, :]
+    a = (np.sin(dphi / 2.0) ** 2
+         + np.cos(phi[:, None]) * np.cos(phi[None, :]) * np.sin(dlam / 2.0) ** 2)
+    distance = 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    np.fill_diagonal(distance, np.inf)
+    return distance
+
+
 def spread_folds(
     lat: np.ndarray, lon: np.ndarray, n_splits: int = 5
 ) -> list[np.ndarray]:

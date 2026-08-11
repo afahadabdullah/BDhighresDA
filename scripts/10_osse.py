@@ -94,7 +94,13 @@ from bdhires.da import (  # noqa: E402
     perturb_observations,
 )
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
-from bdhires.bmd import read_station_catalog, spread_holdout  # noqa: E402
+from bdhires.bmd import (  # noqa: E402
+    max_bearing_gap_deg,
+    nearest_neighbour_km,
+    neighbored_holdout,
+    read_station_catalog,
+    spread_holdout,
+)
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
@@ -208,8 +214,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--holdout-layout",
         default="spread",
-        choices=["random", "spread"],
-        help="choose withheld gauges randomly or geographically spread",
+        choices=["random", "spread", "neighbored"],
+        help="how withheld gauges are chosen. 'spread' seeds at the station "
+             "farthest from the centroid and samples farthest-point, so it "
+             "selects the most ISOLATED stations by construction -- a "
+             "maximally adversarial verification set, since a gauge with no "
+             "neighbour inside the background correlation length can only be "
+             "reconstructed from the prior. 'neighbored' spreads the selection "
+             "among stations that HAVE a neighbour within "
+             "--holdout-neighbor-km, which measures the assimilation rather "
+             "than the prior. Report it as such, and alongside 'spread'.",
+    )
+    parser.add_argument(
+        "--holdout-neighbor-km",
+        type=float,
+        default=75.0,
+        help="neighbour radius for --holdout-layout neighbored. 75 km is "
+             "inside the ~146 km variogram range measured for this network, "
+             "so an eligible station has genuinely informative neighbours. "
+             "The check is applied against the ASSIMILATED stations, not all "
+             "stations, so a holdout cannot strip its own support.",
+    )
+    parser.add_argument(
+        "--holdout-max-gap-deg",
+        type=float,
+        default=200.0,
+        help="largest permitted angular gap between bearings to a candidate's "
+             "nearest neighbours. Excludes stations at the network EDGE, whose "
+             "neighbours lie on one side only, so reconstructing them is "
+             "extrapolation rather than interpolation. 180 is strictly "
+             "interior; 200 keeps a workable pool while still excluding the "
+             "clearly peripheral (the old spread holdout reached 322).",
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
@@ -887,9 +922,30 @@ def main() -> None:
             eval_idx = np.sort(
                 spread_holdout(stations.lat, stations.lon, n_withhold)
             )
+        elif args.holdout_layout == "neighbored":
+            eval_idx = np.sort(
+                neighbored_holdout(
+                    stations.lat, stations.lon, n_withhold,
+                    radius_km=args.holdout_neighbor_km,
+                    max_gap_deg=args.holdout_max_gap_deg,
+                )
+            )
         else:
             order = split_rng.permutation(n_stations)
             eval_idx = np.sort(order[:n_withhold])
+        station_nn_km = nearest_neighbour_km(stations.lat, stations.lon)
+        station_gap_deg = max_bearing_gap_deg(stations.lat, stations.lon)
+        print(
+            f"[osse] holdout '{args.holdout_layout}': {n_withhold} withheld of "
+            f"{n_stations}; nearest-neighbour distance of withheld stations "
+            f"min/median/max = {station_nn_km[eval_idx].min():.1f}/"
+            f"{np.median(station_nn_km[eval_idx]):.1f}/"
+            f"{station_nn_km[eval_idx].max():.1f} km "
+            f"(all stations median {np.median(station_nn_km):.1f} km); "
+            f"bearing gap median {np.median(station_gap_deg[eval_idx]):.0f} deg, "
+            f"max {station_gap_deg[eval_idx].max():.0f} deg",
+            flush=True,
+        )
         eval_set = set(eval_idx.tolist())
         assim_idx = np.asarray(
             [index for index in range(n_stations) if index not in eval_set],
@@ -1474,6 +1530,8 @@ def main() -> None:
         "satellite_r_inflation": satellite_r_inflation if use_satellite else None,
         "station_layout": args.station_layout,
         "holdout_layout": args.holdout_layout,
+        "holdout_neighbor_km": float(args.holdout_neighbor_km),
+        "holdout_max_gap_deg": float(args.holdout_max_gap_deg),
         "bmd_station_catalog": bmd_station_source,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (
