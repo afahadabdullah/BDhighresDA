@@ -53,10 +53,25 @@ submission="$(sbatch --parsable --array="$ARRAY" \
     slurm/osse_gauges_bmd.sbatch)"
 echo "submitted gauges-only OSSE array: $submission"
 
-summary="$(sbatch --parsable --dependency="afterok:${submission}" \
-    --export="ALL,OSSE_GAUGE_ROOT=$ROOT" \
-    slurm/summarize_osse_gauges_bmd.sbatch)"
-echo "submitted dependent figure job:   $summary"
+# A failure here must not look like a failure of the array, which is already
+# queued and holds all the GPU time. Report it and print the recovery command
+# rather than exiting non-zero and leaving the impression nothing ran.
+if summary="$(sbatch --parsable --dependency="afterok:${submission}" \
+        --export="ALL,OSSE_GAUGE_ROOT=$ROOT" \
+        slurm/summarize_osse_gauges_bmd.sbatch 2>&1)"; then
+    echo "submitted dependent figure job:   $summary"
+else
+    echo
+    echo "WARNING: the GPU array ($submission) SUBMITTED FINE, but the" >&2
+    echo "dependent figure job did not:" >&2
+    echo "  $summary" >&2
+    echo
+    echo "Nothing is lost. When the array finishes, run the figures directly:" >&2
+    echo "  OSSE_GAUGE_ROOT=$ROOT sbatch slurm/summarize_osse_gauges_bmd.sbatch" >&2
+    echo "or on the login node:" >&2
+    echo "  OSSE_ROOT=$ROOT PRIMARY=gauges_realistic_bmd \\" >&2
+    echo "      bash slurm/make_paper_figures.sh" >&2
+fi
 
 cat <<EOF
 

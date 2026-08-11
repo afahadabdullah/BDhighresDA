@@ -1,0 +1,176 @@
+% ---------------------------------------------------------------------------
+% Pseudo-satellite assimilation in the CHIRPS OSSE: a defect, not a result.
+%
+% DRAFTING NOTE: recorded in full, as with docs/ablation_v3.tex, so the section
+% can be cut down later without re-deriving anything. Source data:
+%   data/processed/osse_paper/gauges_realistic_40/
+%   data/processed/osse_paper/satellite_realistic_40/
+%   data/processed/osse_paper/simultaneous_realistic_40/
+%   data/processed/osse_paper/paper/  (scripts/24_osse_paper_suite.py output)
+% Consequence: slurm/osse_gauges_bmd.sbatch runs gauges only until this is
+% resolved.
+% ---------------------------------------------------------------------------
+
+\section{Pseudo-satellite assimilation degrades the analysis: diagnosis}
+\label{sec:pseudo-satellite-defect}
+
+\subsection{What was run}
+
+The CHIRPS OSSE over 2021--2024 supplies a $0.05^\circ$ nature run, pseudo-gauge
+values at real BMD coordinates, and exact nested $0.1^\circ$ block means as
+pseudo-IMERG. Three matched arms share dates, seeds and holdout: gauges only,
+pseudo-IMERG only, and simultaneous. Scoring is at withheld pseudo-gauges,
+with gridded diagnostics at the full field, at the $0.1^\circ$ footprints, and
+on the subgrid residual left after removing each field's own footprint mean.
+
+Because the observations are drawn from the nature run itself, the
+pseudo-satellite is close to ideal information: unbiased block means of the
+truth, on a grid the operator represents exactly. It should be easy to
+assimilate.
+
+\subsection{The numbers}
+
+\begin{table}[t]
+\centering
+\caption{OSSE arms against their own matched background. Percentages are
+improvements, so negative means the analysis is WORSE than the prior it
+started from. $\Delta r$ is analysis minus background correlation.}
+\label{tab:pseudo-satellite}
+\small
+\begin{tabular}{lrrr}
+\hline
+ & gauges only & pseudo-IMERG only & simultaneous \\
+\hline
+Withheld CRPSS (\%)        & $+14.03$ & $-68.42$  & $-38.65$ \\
+Withheld RMSE gain (\%)    & $+10.05$ & $-146.03$ & $-91.04$ \\
+Field CRPSS (\%)           & $+25.96$ & $-34.17$  & $-2.11$  \\
+$0.1^\circ$ CRPSS (\%)     & $+27.59$ & $-36.33$  & $-2.75$  \\
+Subgrid CRPSS (\%)         & $+3.65$  & $-5.41$   & $-1.19$  \\
+Subgrid RMSE gain (\%)     & $+0.53$  & $-5.31$   & $-2.84$  \\
+\hline
+$\Delta r$, withheld gauges & $+0.110$ & $-0.058$ & $-0.049$ \\
+$\Delta r$, full field      & $+0.130$ & $-0.017$ & $+0.040$ \\
+$\Delta r$, footprints      & $+0.133$ & $-0.019$ & $+0.040$ \\
+$\Delta r$, subgrid         & $+0.018$ & $+0.038$ & $+0.047$ \\
+\hline
+Withheld coverage$_{90}$    & 0.581 & 0.688 & 0.667 \\
+Withheld spread/skill       & 0.698 & 0.595 & 0.643 \\
+\hline
+CRPS at withheld gauges (mm\,day$^{-1}$) & & & \\
+\quad background            & 4.22 & 4.22 & 4.22 \\
+\quad analysis              & \textbf{3.64} & 7.14 & 5.86 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Why this is a defect and not a result}
+
+\textbf{The gauge arm works.} It improves CRPS by $14\%$ at withheld
+pseudo-gauges, the full field by $26\%$, the footprint scale by $28\%$, and
+raises correlation by $+0.11$ at withheld stations. The sampler, the guidance,
+the holdout and the scoring are therefore all functioning; whatever is wrong is
+specific to the pseudo-satellite path.
+
+\textbf{An uninformative observation cannot do this.} Assimilating an
+observation that carries no usable information should drive the analysis toward
+the prior, converging on zero improvement. It cannot push the analysis
+\emph{below} the prior by $68\%$ in CRPS and $146\%$ in RMSE. Degradation of
+that magnitude requires the likelihood to be actively pulling the state toward
+somewhere the truth is not. Since the pseudo-observations \emph{are} block means
+of the truth, the error must lie in how those values are generated, transformed,
+or compared against the operator's prediction --- not in the observation's
+information content.
+
+\subsection{The signature points at magnitude, not noise}
+
+The discriminating comparison is between the correlation changes and the
+RMSE changes, because correlation is invariant to a constant offset and to a
+uniform scaling while RMSE is not.
+
+Correlation is \emph{approximately unchanged} where the observation acts: at
+the footprint scale the pseudo-IMERG arm moves $r$ by only $-0.019$, and at the
+full field by $-0.017$. Over the same fields RMSE degrades by $81\%$ and CRPS by
+$34$--$36\%$. A field can only keep its correlation while losing that much RMSE
+if its \emph{values} are wrong and its \emph{pattern} is broadly right.
+
+Random observation noise does not behave this way. Noise degrades pattern and
+amplitude together, so $r$ would fall alongside RMSE. What the table shows
+instead is the signature of a systematic offset or scale error applied
+consistently across footprints.
+
+Two further details are consistent with that reading and with nothing else
+obvious. First, the subgrid residual --- the component the satellite does
+\emph{not} constrain --- is the one place pseudo-IMERG \emph{improves}
+correlation ($+0.038$, against $+0.018$ for gauges alone), which is what one
+expects if a large systematic increment at footprint scale leaves the
+within-footprint structure comparatively untouched. Second, coverage$_{90}$
+\emph{rises} to $0.688$ from the gauge arm's $0.581$ while spread/skill
+\emph{falls} to $0.595$: the ensemble is not becoming better calibrated, its
+error is growing faster than its spread.
+
+\paragraph{A caveat on the correlation argument.}
+At the withheld gauges themselves $\Delta r$ is $-0.058$, a larger drop than at
+field or footprint scale. A pure offset would leave point correlation untouched,
+so the mechanism is not \emph{only} an offset. An intensity-\emph{dependent}
+distortion --- one whose size grows with rainfall amount --- would produce
+exactly this: near-preserved correlation at aggregate scales, with a measurable
+loss at points where intensities vary most. That is the form the leading
+hypothesis below takes.
+
+\subsection{Leading hypothesis}
+
+The precipitation transform is nonlinear, so
+\[
+  T\!\left(\frac{1}{n}\sum_i x_i\right) \;\neq\; \frac{1}{n}\sum_i T(x_i).
+\]
+The assimilation uses \texttt{PhysicalBlockAverageObsOperator}, which averages
+in \emph{physical} space and transforms afterwards. If the pseudo-observations
+are instead constructed by averaging \emph{transformed} CHIRPS, then every
+footprint is compared against a quantity the operator never predicts, and the
+discrepancy is a function of the within-block intensity distribution: near zero
+for uniform light rain, large for heavy or spatially variable rain. That is an
+intensity-dependent distortion of exactly the form the previous paragraph
+requires, and it would be invisible in any check that only verified the
+footprint geometry.
+
+Two weaker alternatives, kept because they have not been excluded:
+
+\begin{enumerate}
+  \item \textbf{Units.} A pseudo-observation supplied in mm\,day$^{-1}$ where the
+    likelihood expects transformed units, or the reverse. This predicts a much
+    larger correlation loss than observed and is therefore unlikely, but it is
+    cheap to rule out.
+  \item \textbf{Observation error too small.} If $R$ for the pseudo-satellite is
+    set from a near-zero retrieval error --- reasonable, since the values come
+    from the truth --- while a transform mismatch introduces a large systematic
+    discrepancy, the analysis would be forced hard onto wrong values. This is
+    not an independent cause so much as the amplifier that turns a modest
+    inconsistency into a $146\%$ RMSE loss.
+\end{enumerate}
+
+\subsection{The test that discriminates}
+
+For a sample of days, compute both $T(\overline{x})$ and $\overline{T(x)}$ over
+each $0.1^\circ$ block of CHIRPS and plot the difference against block-mean
+intensity. The hypothesis predicts a difference that is near zero for dry and
+light blocks and grows systematically with intensity and with within-block
+variance. If instead the difference is negligible at all intensities, the
+transform is not the cause and the units and $R$ paths should be examined next.
+
+This requires no GPU time and no model run.
+
+\subsection{Consequence for the paper}
+
+The pseudo-satellite contaminates every arm it enters: the simultaneous arm is
+also below its background at withheld gauges ($-38.65\%$), so no arm containing
+pseudo-IMERG can currently be reported. The OSSE has therefore been re-run
+gauges-only on the real BMD geometry
+(\texttt{slurm/osse\_gauges\_bmd.sbatch}), where the machinery demonstrably
+works, and satellite arms are excluded until the diagnosis above is resolved.
+
+This does \emph{not} affect the real-data results in
+Section~\ref{sec:ingestion}, which use actual IMERG through a different code
+path (\texttt{scripts/15\_bmd\_month\_example.py}) and never touch the OSSE's
+pseudo-observation generator. It does, however, mean the OSSE cannot yet be
+used to explain the real-data null --- which was its main purpose in the
+argument --- and that experiment is deferred rather than abandoned.

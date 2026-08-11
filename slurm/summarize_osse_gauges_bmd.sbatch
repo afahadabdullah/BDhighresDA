@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bdhires-osse-gauges-figs
-#SBATCH --partition=grace-cpu
+#SBATCH --partition=grace-cpuonly
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
