@@ -67,6 +67,23 @@ unset PYTHONPATH
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
 
+# These are aarch64 Grace nodes. Guard explicitly: the failure mode otherwise
+# is an x86_64 binary on PATH dying with "cannot execute binary file", which
+# reads as a corrupt install rather than a wrong architecture.
+[[ "$(uname -m)" == "aarch64" ]] || {
+    echo "ERROR: this job must run on an aarch64 Grace node (got $(uname -m))."
+    exit 1
+}
+
+# srun inside an allocation fails on the GH200 nodes with "CPU binding outside
+# of job step allocation ... Unable to satisfy cpu bind request": since SLURM
+# 22.05 the step does not inherit --cpus-per-task, so its default binding asks
+# for more than the 8 CPUs the job holds. slurm/bmd_imerg_example.sbatch
+# already carries this fix; running Python directly is the working path here
+# too. Set BDHIRES_LAUNCH="srun --cpu-bind=none" to restore a step launcher.
+read -r -a LAUNCH <<< "${BDHIRES_LAUNCH:-}"
+run_step() { "${LAUNCH[@]+"${LAUNCH[@]}"}" "$@"; }
+
 CKPT="${OSSE_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${OSSE_CONFIG:-configs/da.yaml}"
 DAYS="${OSSE_BMD_DAYS:-48}"
@@ -105,7 +122,8 @@ mkdir -p "$OUT"
 
 echo "OSSE arm: $LABEL"
 echo "  mode=$MODE error=$ERROR stride=$STRIDE corr_control=$CORRCTL tune=$TUNE"
-echo "  network=$NETWORK ($CATALOG) footprint factor=$FACTOR (=$(python3 -c "print($FACTOR*0.05)") deg)"
+FOOTPRINT_DEG="$(awk -v f="$FACTOR" 'BEGIN{printf "%.2f", f*0.05}')"
+echo "  network=$NETWORK ($CATALOG) footprint factor=$FACTOR (= $FOOTPRINT_DEG deg)"
 echo "  window=$START..$END days=$DAYS members=$MEMBERS withhold=$WITHHOLD seed=$SEED"
 if [[ "$ERROR" == "exact" ]]; then
     echo "  PERFECT OBSERVATIONS: no error is added to either stream, and the"
@@ -121,7 +139,7 @@ EXTRA=()
 [[ "$TUNE" == "1" ]] && EXTRA+=(--tune --tune-network "$NETWORK"
                                 --tune-days "$TUNE_DAYS")
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/10_osse.py \
+run_step "$PYTHON_BIN" -u scripts/10_osse.py \
     --config "$CONFIG" \
     --ckpt "$CKPT" \
     --start "$START" \
@@ -151,12 +169,12 @@ if [[ "$TUNE" == "1" ]]; then
     exit 0
 fi
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/11_da_diagnostics.py \
+run_step "$PYTHON_BIN" -u scripts/11_da_diagnostics.py \
     --dump "$OUT/ensemble.npz" \
     --out-figure "$OUT/da_diagnostics.png" \
     --out-report "$OUT/da_diagnostics.json"
 
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/14_osse_summary.py \
+run_step "$PYTHON_BIN" -u scripts/14_osse_summary.py \
     --dump "$OUT/ensemble.npz" \
     --cases 4 \
     --out-reconstruction "$OUT/reconstruction.png" \
@@ -169,7 +187,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/14_osse_summary.py \
 # block means? In the satellite_exact arm the assimilated observation IS that
 # null's information, so Claim B there measures precisely what the prior adds
 # BELOW the footprint -- the cleanest form of the question in this project.
-srun --ntasks=1 "$PYTHON_BIN" -u scripts/22_evaluate_osse_downscaling.py \
+run_step "$PYTHON_BIN" -u scripts/22_evaluate_osse_downscaling.py \
     --dump "$OUT/ensemble.npz" \
     --label "$LABEL" \
     --minimum-valid-fraction 1.0 \
