@@ -77,6 +77,38 @@ V2_SWEEP_LABEL=ing2022_ensrf \
 bash slurm/submit_v2_gauge_method_sweep.sh
 ```
 
+## Non-overlapping refinement tournament
+
+The preliminary core folds showed almost no T100/T125 sensitivity, while
+spread 6 improved CRPS and correlation but shifted the analysis substantially
+wetter than spread 0.  Submit the pre-defined second-stage tournament with:
+
+```bash
+bash slurm/submit_v2_gauge_refinement.sh
+```
+
+It runs eleven analysis arms not present in `v2_gauges_core`: spread 2/3/4/5/8,
+spread 6 at likelihood weights 0.50/0.75, spread 6 at gamma 0.003/0.01, and
+EnSRF localization at 100/200 km.  Temperature stays fixed at 1.0.  The
+background is necessarily repeated as the paired reference and as the exact
+ensemble updated by EnSRF.
+
+The isolated output is:
+
+```text
+data/processed/v2_gauge_da_sweep/ing2022_refine/
+  fold0.npz ... fold4.npz
+  fold0.json ... fold4.json
+  method_selection.md
+  method_selection.json
+  method_selection.png
+```
+
+The refinement summary ranks its arms against the repeated background.  Compare
+`ing2022_refine/method_selection.json` manually with
+`ing2022_core/method_selection.json`; do not combine unpaired fold outputs or
+treat station-days as independent replicates.
+
 Config overrides are semicolon-separated and recorded in every report.  This is
 how a later run should inject observation errors calibrated specifically under
 `stats_cpc_v2.json`:

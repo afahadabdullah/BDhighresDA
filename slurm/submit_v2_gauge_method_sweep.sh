@@ -14,6 +14,7 @@ export V2_SWEEP_MEMBERS="${V2_SWEEP_MEMBERS:-30}"
 export V2_SWEEP_GROUP="${V2_SWEEP_GROUP:-v2_gauges_core}"
 export V2_SWEEP_LABEL="${V2_SWEEP_LABEL:-ing2022_core}"
 export V2_SWEEP_ROOT="${V2_SWEEP_ROOT:-data/processed/v2_gauge_da_sweep/${V2_SWEEP_LABEL}}"
+export V2_SWEEP_CURRENT="${V2_SWEEP_CURRENT:-guided_s0_t125}"
 # Match scripts/15 and the existing v1/v2 runs so the two legacy-control arms
 # reproduce the already inspected outputs rather than introducing seed drift.
 export V2_SWEEP_SEED="${V2_SWEEP_SEED:-201805}"
@@ -36,6 +37,7 @@ echo "  period: $V2_SWEEP_START through $V2_SWEEP_END"
 echo "  group: $V2_SWEEP_GROUP; members: $V2_SWEEP_MEMBERS"
 echo "  checkpoint: $BMD_CKPT"
 echo "  outputs: $V2_SWEEP_ROOT"
+echo "  within-run comparator: $V2_SWEEP_CURRENT"
 echo "  final comparison: $V2_SWEEP_ROOT/method_selection.{md,json,png}"
 
 array_result="$(sbatch --parsable --export=ALL "$@" slurm/v2_gauge_method_sweep.sbatch)"

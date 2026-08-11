@@ -24,6 +24,7 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/bdhires-v2-gauge-summary-${SLURM_JOB_ID}"
 mkdir -p "$MPLCONFIGDIR" logs
 
 ROOT="${V2_SWEEP_ROOT:-data/processed/v2_gauge_da_sweep/ing2022_core}"
+CURRENT="${V2_SWEEP_CURRENT:-guided_s0_t125}"
 DUMPS=()
 REPORTS=()
 for fold in 0 1 2 3 4; do
@@ -39,7 +40,7 @@ done
     --dumps "${DUMPS[@]}" \
     --reports "${REPORTS[@]}" \
     --baseline background \
-    --current guided_s0_t125 \
+    --current "$CURRENT" \
     --block-days "${V2_SWEEP_BLOCK_DAYS:-3}" \
     --n-resamples "${V2_SWEEP_BOOTSTRAPS:-10000}" \
     --out-json "$ROOT/method_selection.json" \

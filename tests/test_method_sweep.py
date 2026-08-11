@@ -387,12 +387,22 @@ def test_two_step_variants_request_both_streams():
 
 @needs_sweep
 def test_v2_gauge_groups_need_no_satellite_and_ensrf_uses_gauges():
-    for group in ("v2_gauges_core", "v2_gauges_spread", "v2_gauges_ensrf"):
+    for group in (
+        "v2_gauges_core", "v2_gauges_spread", "v2_gauges_ensrf",
+        "v2_gauges_refine",
+    ):
         variants = sweep.resolve_variants(group, None)
         assert not any(variant.uses_imerg for variant in variants)
         for variant in variants:
             if variant.algorithm == "ensrf":
                 assert variant.streams == "gauges"
+
+
+@needs_sweep
+def test_v2_refinement_does_not_repeat_core_analysis_arms():
+    core = {variant.name for variant in sweep.GROUPS["v2_gauges_core"]}
+    refinement = {variant.name for variant in sweep.GROUPS["v2_gauges_refine"]}
+    assert core.isdisjoint(refinement)
 
 
 @needs_sweep

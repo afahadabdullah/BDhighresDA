@@ -152,6 +152,7 @@ class Variant:
     prior_temperature: float | None = None  # None -> config value
     n_corrections: int | None = None
     guidance_spread_cells: float | None = None
+    guidance_gamma: float | None = None
     ensrf_localization_km: float = 200.0
     note: str = ""
 
@@ -282,6 +283,48 @@ V2_GAUGES_ENSRF = [
             ensrf_localization_km=300.0),
 ]
 
+# Second-stage v2 refinement.  These candidates do not repeat any analysis arm
+# in ``v2_gauges_core``.  The background is inserted automatically by
+# ``resolve_variants`` because it is required for paired scores and EnSRF.
+# Temperature is fixed at 1.0 after the core folds showed negligible T100/T125
+# sensitivity.  The new axes target the observed s0/s6 trade-off: spatial reach,
+# total likelihood weight, early-time likelihood softness, and EnSRF support.
+V2_GAUGES_REFINE = [
+    Variant("guided_s2_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=2.0,
+            note="narrow non-point update (~11 km Gaussian sigma)"),
+    Variant("guided_s3_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=3.0,
+            note="intermediate spread (~17 km Gaussian sigma)"),
+    Variant("guided_s4_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=4.0,
+            note="intermediate spread (~22 km Gaussian sigma)"),
+    Variant("guided_s5_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=5.0,
+            note="near-core spread (~28 km Gaussian sigma)"),
+    Variant("guided_s8_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=8.0,
+            note="tests whether structure keeps improving beyond spread 6"),
+    Variant("guided_s6_w050_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, gauge_weight=0.50,
+            note="spread 6 with half-strength likelihood"),
+    Variant("guided_s6_w075_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, gauge_weight=0.75,
+            note="spread 6 with three-quarter-strength likelihood"),
+    Variant("guided_s6_g003_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, guidance_gamma=3.0e-3,
+            note="spread 6 with 3x softer early-time guidance"),
+    Variant("guided_s6_g010_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, guidance_gamma=1.0e-2,
+            note="spread 6 with 10x softer early-time guidance"),
+    Variant("ensrf_loc100", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=100.0,
+            note="EnSRF compact support below the core 150 km arm"),
+    Variant("ensrf_loc200", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=200.0,
+            note="EnSRF compact support above the core 150 km arm"),
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -303,9 +346,11 @@ GROUPS = {
     "v2_gauges_core": V2_GAUGES_CORE,
     "v2_gauges_spread": V2_GAUGES_SPREAD,
     "v2_gauges_ensrf": V2_GAUGES_ENSRF,
+    "v2_gauges_refine": V2_GAUGES_REFINE,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
+        + V2_GAUGES_REFINE
     ),
 }
 
@@ -870,7 +915,11 @@ def main() -> None:
             # inflation by w, so the whole V(t) scales and the cost term scales by
             # exactly w at every t. Scaling R alone would leave the early-time
             # inflation term unweighted.
-            gamma = float(base_guidance.gamma)
+            gamma = float(
+                variant.guidance_gamma
+                if variant.guidance_gamma is not None
+                else base_guidance.gamma
+            )
 
             if variant.streams == "gauges":
                 operator, y, R = gauge_operator, gauge_y, gauge_R / variant.gauge_weight
