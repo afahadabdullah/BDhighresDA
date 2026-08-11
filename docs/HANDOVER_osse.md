@@ -173,6 +173,16 @@ fails at the first non-finite derivative with per-member counts. A regression
 test covers a NaN ocean state. The one-day GPU preflight must pass before this
 is called operationally verified.
 
+A subsequent real-IMERG run completed day 1, then failed on day 2 inside the
+Langevin corrector: exactly one of 30 simultaneous-analysis members had all
+16,384 gradient cells invalid (gauge component in one fold, IMERG component in
+another). This ruled out either observation stream as the common cause. The
+corrector had an unbounded adaptive delta and its two substeps did not restore
+the land mask between network evaluations. The failed run did not record delta,
+so their relative contribution is unknown. Delta is now capped at 0.3, its norm
+uses active land dimensions only, the mask is restored after each substep, and
+cap activation is written to the reports.
+
 ### Hypotheses already ruled out
 
 1. **Crop misalignment** -- factor 8 divides 128 evenly, needs no crop, fails.

@@ -93,6 +93,41 @@ def imerg_pattern_correlation(folds: list[dict], name: str) -> float | None:
     return float(np.mean(values)) if values else None
 
 
+def corrector_stability(folds: list[dict], name: str) -> dict | None:
+    """Aggregate auditable Langevin-cap diagnostics across folds and days."""
+    entries = []
+    for item in folds:
+        entries.extend(
+            item["report"].get("sampler_diagnostics", {}).get(name, [])
+        )
+    correctors = [entry.get("corrector", {}) for entry in entries]
+    correctors = [entry for entry in correctors if entry]
+    if not correctors:
+        return None
+    member_steps = sum(int(entry.get("member_steps", 0)) for entry in correctors)
+    capped = sum(int(entry.get("capped_member_steps", 0)) for entry in correctors)
+    raw = [
+        entry.get("max_raw_step")
+        for entry in correctors
+        if entry.get("max_raw_step") is not None
+    ]
+    applied = [
+        entry.get("max_applied_step")
+        for entry in correctors
+        if entry.get("max_applied_step") is not None
+    ]
+    if not raw or not applied:
+        return None
+    return {
+        "member_steps": member_steps,
+        "capped_member_steps": capped,
+        "capped_fraction": capped / member_steps if member_steps else 0.0,
+        "max_raw_step": max(raw),
+        "max_applied_step": max(applied),
+        "configured_max_step": correctors[0].get("configured_max_step"),
+    }
+
+
 def time_mean(field: np.ndarray) -> np.ndarray:
     """Mean over days without warnings on permanently masked ocean cells."""
     field = np.asarray(field, dtype=float)
@@ -250,6 +285,7 @@ def main() -> None:
         metrics[name]["imerg_pattern_correlation"] = imerg_pattern_correlation(
             folds, name
         )
+        metrics[name]["corrector_stability"] = corrector_stability(folds, name)
 
     pair_specs = [
         ("gauges_vs_background", GAUGES, "background"),
@@ -267,6 +303,17 @@ def main() -> None:
     }
     direct = comparisons["simultaneous_vs_gauges"]
     decision = verdict(direct)
+    stability_values = {
+        name: metrics[name]["corrector_stability"]
+        for name in (GAUGES, IMERG, SIMULTANEOUS)
+    }
+    stability_missing = [
+        name for name, value in stability_values.items() if value is None
+    ]
+    stability_passed = not stability_missing and all(
+        value["capped_fraction"] <= 0.01
+        for value in stability_values.values()
+    )
     ordered = sorted(names, key=lambda name: metrics[name]["crps"])
     scope = folds[0]["report"]["scope"]
 
@@ -307,6 +354,38 @@ def main() -> None:
         "",
         "Positive values favour the method before `_vs_`.",
         "",
+        "## Corrector stability",
+        "",
+        *(
+            f"- `{name}`: "
+            + (
+                "no corrector diagnostics"
+                if metrics[name]["corrector_stability"] is None
+                else (
+                    f"{metrics[name]['corrector_stability']['capped_member_steps']}/"
+                    f"{metrics[name]['corrector_stability']['member_steps']} member-steps "
+                    f"capped; maximum raw/applied delta "
+                    f"{metrics[name]['corrector_stability']['max_raw_step']:.3g}/"
+                    f"{metrics[name]['corrector_stability']['max_applied_step']:.3g}"
+                )
+            )
+            for name in names
+        ),
+        "",
+        (
+            "Stability screen: **PASS** (all guided arms cap at most 1% of "
+            "corrector member-steps)."
+            if stability_passed
+            else (
+                "Stability screen: **NOT EVALUATED** (missing diagnostics for "
+                + ", ".join(f"`{name}`" for name in stability_missing)
+                + ")."
+                if stability_missing
+                else "Stability screen: **FAIL** (at least one guided arm "
+                "caps more than 1% of corrector member-steps)."
+            )
+        ),
+        "",
         "## Primary decision",
         "",
         f"**{decision.replace('_', ' ').title()}**: simultaneous minus gauges-only "
@@ -336,6 +415,11 @@ def main() -> None:
         "metrics": metrics,
         "comparisons": comparisons,
         "primary_verdict": decision,
+        "stability_screen": {
+            "threshold_capped_fraction": 0.01,
+            "passed": stability_passed,
+            "missing": stability_missing,
+        },
     }
 
     out_json = Path(args.out_json)

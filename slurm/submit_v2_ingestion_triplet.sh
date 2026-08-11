@@ -12,7 +12,7 @@ export V2_INGEST_START="${V2_INGEST_START:-2022-05-01}"
 export V2_INGEST_END="${V2_INGEST_END:-2022-05-10}"
 export V2_INGEST_MEMBERS="${V2_INGEST_MEMBERS:-30}"
 export V2_INGEST_SEED="${V2_INGEST_SEED:-201805}"
-export V2_INGEST_ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04}"
+export V2_INGEST_ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04_g010_capped}"
 export BMD_CKPT="${BMD_CKPT:-runs/prior_h100_cpc_v2/best.pt}"
 export BMD_CONFIG="${BMD_CONFIG:-configs/da.yaml}"
 export BMD_DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
@@ -52,26 +52,49 @@ echo "  members: $V2_INGEST_MEMBERS; checkpoint: $BMD_CKPT"
 echo "  IMERG: S04 0.4-degree file $V2_INGEST_IMERG"
 echo "  outputs: $V2_INGEST_ROOT"
 
-ARRAY_OVERRIDE=()
 if [[ "${V2_INGEST_PREFLIGHT:-0}" == "1" ]]; then
-    ARRAY_OVERRIDE=(--array=0)
     echo "  mode: numerical preflight (fold 0 only; no pooled summary)"
-fi
-
-array_result="$(sbatch --parsable --export=ALL "$@" \
-    "${ARRAY_OVERRIDE[@]+"${ARRAY_OVERRIDE[@]}"}" \
-    slurm/v2_ingestion_triplet.sbatch)"
-array_job="${array_result%%;*}"
-if [[ "${V2_INGEST_PREFLIGHT:-0}" == "1" ]]; then
+    array_result="$(sbatch --parsable --export=ALL "$@" --array=0 \
+        slurm/v2_ingestion_triplet.sbatch)"
+    array_job="${array_result%%;*}"
     echo "submitted fold-0 preflight: $array_job"
     echo "inspect: logs/bdhires-v2-ingest-${array_job}_0.out"
     exit 0
 fi
 
+# A full request automatically gates the expensive five-fold array behind the
+# exact fold-0/member reproduction through May 2. The second historical
+# failure appeared only on day 2 and member 17, so a tiny smoke test would give
+# false reassurance. The full array remains pending without consuming GPUs if
+# this numerical preflight fails.
+DEPENDENCY_ARGS=()
+preflight_job=""
+if [[ "${V2_INGEST_AUTO_PREFLIGHT:-1}" == "1" ]]; then
+    PREFLIGHT_ROOT="$V2_INGEST_ROOT/preflight"
+    PREFLIGHT_END="${V2_INGEST_PREFLIGHT_END:-2022-05-02}"
+    PREFLIGHT_MEMBERS="${V2_INGEST_PREFLIGHT_MEMBERS:-30}"
+    PREFLIGHT_EXPORT="ALL,V2_INGEST_END=$PREFLIGHT_END"
+    PREFLIGHT_EXPORT+=",V2_INGEST_MEMBERS=$PREFLIGHT_MEMBERS"
+    PREFLIGHT_EXPORT+=",V2_INGEST_ROOT=$PREFLIGHT_ROOT"
+    preflight_result="$(sbatch --parsable "$@" --array=0 \
+        --export="$PREFLIGHT_EXPORT" \
+        slurm/v2_ingestion_triplet.sbatch)"
+    preflight_job="${preflight_result%%;*}"
+    DEPENDENCY_ARGS=(--dependency="afterok:${preflight_job}")
+fi
+
+array_result="$(sbatch --parsable --export=ALL "$@" \
+    "${DEPENDENCY_ARGS[@]+"${DEPENDENCY_ARGS[@]}"}" \
+    slurm/v2_ingestion_triplet.sbatch)"
+array_job="${array_result%%;*}"
+
 summary_result="$(sbatch --parsable --dependency="afterok:${array_job}" --export=ALL \
     "$@" slurm/v2_ingestion_triplet_summary.sbatch)"
 summary_job="${summary_result%%;*}"
 
+if [[ -n "$preflight_job" ]]; then
+    echo "submitted automatic fold-0 preflight: $preflight_job"
+fi
 echo "submitted five-fold GPU array: $array_job"
 echo "submitted dependent pooled summary: $summary_job"
 echo "final comparison: $V2_INGEST_ROOT/ingestion_selection.{md,json,png}"

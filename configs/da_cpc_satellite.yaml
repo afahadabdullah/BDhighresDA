@@ -65,6 +65,7 @@ sampler:
   temperature_t_start: 0.15
   n_corrections: 2              # Langevin correctors (SDA Alg. 4)
   corrector_tau: 0.3
+  corrector_max_step: 0.3       # cap singular delta when posterior scores cancel
   t_noise_end: 0.98
   seed: null
 
@@ -86,6 +87,7 @@ background_sampler:
   temperature_t_start: 0.15
   n_corrections: 0              # correctors only earn their cost under guidance
   corrector_tau: 0.3
+  corrector_max_step: 0.3
   t_noise_end: 0.98
   seed: null
 

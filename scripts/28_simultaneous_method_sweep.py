@@ -898,6 +898,33 @@ def main() -> None:
                 )
                 continue
 
+            sampler_diagnostic: dict = {}
+
+            def run_guided_with_context(**kwargs):
+                try:
+                    return run_assim(**kwargs, diagnostics=sampler_diagnostic)
+                except FloatingPointError as error:
+                    day = selected_times[day_position].astype("datetime64[D]")
+                    raise FloatingPointError(
+                        f"{variant.name} on {day}: {error}"
+                    ) from error
+
+            def record_sampler_diagnostic() -> None:
+                diagnostics.setdefault(variant.name, {}).setdefault(
+                    "sampler", []
+                ).append(sampler_diagnostic)
+                corrector = sampler_diagnostic.get("corrector", {})
+                if corrector.get("member_steps"):
+                    day = selected_times[day_position].astype("datetime64[D]")
+                    print(
+                        f"[corrector] {variant.name} {day}: capped "
+                        f"{corrector['capped_member_steps']}/"
+                        f"{corrector['member_steps']} member-steps; max raw/applied "
+                        f"delta {corrector['max_raw_step']:.4g}/"
+                        f"{corrector['max_applied_step']:.4g}",
+                        flush=True,
+                    )
+
             # --- satellite observation vector for this variant ----------------------
             satellite_y = satellite_R = None
             if variant.uses_imerg:
@@ -1022,11 +1049,11 @@ def main() -> None:
                         f"{variant.name}: the two-step scheme needs both streams; "
                         "with one stream it is just the corresponding single-stream arm"
                     )
-                generated = run_assim(
-                    model,
-                    cond,
-                    (args.members, 1, grid.nlat, grid.nlon),
-                    device,
+                generated = run_guided_with_context(
+                    model=model,
+                    cond=cond,
+                    shape=(args.members, 1, grid.nlat, grid.nlon),
+                    device=device,
                     H=satellite_operator,
                     y=satellite_y,
                     R=satellite_R,
@@ -1043,6 +1070,7 @@ def main() -> None:
                     mask=mask,
                     to_precip=lambda x, b=base: residual.decode(x, b),
                 ).detach()
+                record_sampler_diagnostic()
                 satellite_posterior = decode(generated)
                 updated, ensrf_diagnostic = localized_serial_ensrf(
                     ensemble_mm=satellite_posterior,
@@ -1063,11 +1091,11 @@ def main() -> None:
                 continue
 
             # --- joint guidance ------------------------------------------------------
-            generated = run_assim(
-                model,
-                cond,
-                (args.members, 1, grid.nlat, grid.nlon),
-                device,
+            generated = run_guided_with_context(
+                model=model,
+                cond=cond,
+                shape=(args.members, 1, grid.nlat, grid.nlon),
+                device=device,
                 H=operator,
                 y=y,
                 R=R,
@@ -1077,6 +1105,7 @@ def main() -> None:
                 mask=mask,
                 to_precip=lambda x, b=base: residual.decode(x, b),
             ).detach()
+            record_sampler_diagnostic()
             decoded = decode(generated)
             if not np.isfinite(decoded[:, valid]).all():
                 bad = int((~np.isfinite(decoded[:, valid])).sum())
@@ -1202,6 +1231,11 @@ def main() -> None:
             }
             for name, payload in diagnostics.items()
             if payload.get("satellite_valid_count")
+        },
+        "sampler_diagnostics": {
+            name: payload.get("sampler", [])
+            for name, payload in diagnostics.items()
+            if payload.get("sampler")
         },
     }
 

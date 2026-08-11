@@ -56,15 +56,31 @@ operators now replace invalid cells before nonlinear transforms. Guidance also
 fails on the first non-finite gradient, before clipping can contaminate a full
 field.
 
-Before committing a full five-fold run, use one fold, one day, and four members:
+The first full rerun then isolated a second issue to one ensemble member during
+the simultaneous arm's Langevin correction. That code path had two uncontrolled
+mechanisms: the adaptive step `delta = tau * dimension / ||score||^2` was
+unbounded if prior and observation scores nearly cancelled, and correctors
+perturbed masked ocean cells until the outer sampler restored the mask. The
+failed run predates delta diagnostics, so their individual contributions cannot
+be separated. The sampler now (1) computes the score norm over active land
+dimensions, (2) caps delta at the configured `corrector_max_step=0.3`, and
+(3) reapplies the land mask after every correction. Every fold report records
+the cap count and maximum raw/applied delta under `sampler_diagnostics`; the
+pooled report carries the aggregate so this safeguard cannot operate silently.
+Treat cap activation above 1% of member-steps, or a much higher fraction in the
+simultaneous arm than either single-stream arm, as a failed stability screen;
+in that case the result needs a no-corrector sensitivity before publication.
+
+Before committing a full five-fold run, reproduce the failing fold through day
+2 with all 30 members:
 
 ```bash
-V2_INGEST_PREFLIGHT=1 V2_INGEST_END=2022-05-01 V2_INGEST_MEMBERS=4 \
+V2_INGEST_PREFLIGHT=1 V2_INGEST_END=2022-05-02 V2_INGEST_MEMBERS=30 \
   V2_INGEST_ROOT=data/processed/v2_ingestion_triplet/preflight \
   bash slurm/submit_v2_ingestion_triplet.sh
 ```
 
-This prepares the matching one-day S04 file and submits fold 0 only. It does
+This prepares the matching two-day S04 file and submits fold 0 only. It does
 not submit the five-fold summary, which correctly requires all folds.
 
 ## Run
@@ -77,10 +93,19 @@ bash slurm/submit_v2_ingestion_triplet.sh
 ```
 
 The launcher submits a five-fold GPU array and a dependent CPU summary. Outputs
-are isolated at:
+are isolated at the path below. By default it first reproduces fold 0 through
+May 2 with all 30 members—the exact case that previously failed—and holds the
+full array on an `afterok` dependency. Set `V2_INGEST_AUTO_PREFLIGHT=0` only
+after an identical commit has already passed that preflight.
 
 ```text
-data/processed/v2_ingestion_triplet/ing2022_s04/
+preflight -> five-fold array -> pooled summary
+```
+
+Outputs are isolated at:
+
+```text
+data/processed/v2_ingestion_triplet/ing2022_s04_g010_capped/
   fold0.npz ... fold4.npz
   fold0.json ... fold4.json
   ingestion_selection.md

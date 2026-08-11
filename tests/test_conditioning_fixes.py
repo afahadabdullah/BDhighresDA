@@ -36,7 +36,12 @@ try:  # pragma: no cover
     import torch
 
     from bdhires.data import DatasetConfig, PrecipDataset
-    from bdhires.da.sampler import SamplerConfig, apply_mask, sample
+    from bdhires.da.sampler import (
+        SamplerConfig,
+        _langevin_correct,
+        apply_mask,
+        sample,
+    )
     from bdhires.models import RectifiedFlow, UNet, flow_matching_loss
 except ImportError:  # pragma: no cover
     torch = None
@@ -261,6 +266,53 @@ def test_apply_mask_holds_masked_cells_at_fill():
     assert apply_mask(x, None, fill=-1.0) is x
 
 
+@needs_torch
+def test_apply_mask_replaces_nonfinite_masked_cells():
+    x = torch.ones(1, 1, 4, 4)
+    x[..., 2:, :] = float("nan")
+    mask = torch.zeros(1, 1, 4, 4)
+    mask[..., :2, :] = 1.0
+    out = apply_mask(x, mask, fill=-1.25)
+    assert torch.isfinite(out).all()
+    assert torch.all(out[..., 2:, :] == -1.25)
+
+
+@needs_torch
+def test_langevin_corrector_caps_near_zero_score_and_reapplies_mask():
+    torch.manual_seed(0)
+    x = torch.zeros(2, 1, 4, 4)
+    mask = torch.zeros(1, 1, 4, 4)
+    mask[..., :2, :] = 1.0
+    config = SamplerConfig(
+        n_corrections=1,
+        corrector_tau=0.3,
+        corrector_max_step=0.05,
+        mask_fill=-1.0,
+    )
+    stats = {
+        "member_steps": 0,
+        "capped_member_steps": torch.zeros((), dtype=torch.long),
+        "max_raw_step": torch.zeros((), dtype=torch.float64),
+        "max_applied_step": torch.zeros((), dtype=torch.float64),
+    }
+
+    corrected = _langevin_correct(
+        x,
+        0.5,
+        lambda state, time: torch.zeros_like(state),
+        RectifiedFlow(),
+        config,
+        mask=mask,
+        stats=stats,
+    )
+
+    assert torch.isfinite(corrected).all()
+    assert corrected[..., :2, :].abs().max() < 2.0
+    assert torch.all(corrected[..., 2:, :] == -1.0)
+    assert int(stats["capped_member_steps"]) == 2
+    assert float(stats["max_applied_step"]) <= 0.050001
+
+
 # --------------------------------------------------------------------------
 # 2. classifier-free guidance
 # --------------------------------------------------------------------------
@@ -332,6 +384,7 @@ def test_config_blocks_construct_and_background_is_uninflated():
     assert background.prior_temperature == 1.0, "unguided background must not inflate"
     assert background.n_corrections == 0
     assert analysis.prior_temperature >= 1.0
+    assert analysis.corrector_max_step is not None
 
     # This originally asserted cfg_scale > 1.0, on the assumption that CFG was
     # worth having because cond_dropout had already paid for it.  Measured on the

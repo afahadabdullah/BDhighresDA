@@ -88,6 +88,10 @@ class SamplerConfig:
     temperature_t_start: float = 0.15
     n_corrections: int = 0       # Langevin corrector steps per level (C in SDA)
     corrector_tau: float = 0.3   # tau~ ; step size delta = tau~ * dim(s)/||s||^2
+    corrector_max_step: float | None = 0.3
+    # The adaptive delta is singular when prior and observation scores nearly
+    # cancel. The state is standardised, so delta <= tau is the conservative
+    # Euler stability bound; set None only for exact legacy reproduction.
     t_noise_end: float = 0.98    # stop injecting noise near t = 1 (avoids grain)
     mask_fill: float = 0.0       # value held at masked cells; must be the
                                  # transform of 0 mm, not a literal 0.0
@@ -103,7 +107,14 @@ def apply_mask(x, mask, fill: float = 0.0):
     """
     if mask is None:
         return x
-    return x * mask + fill * (1.0 - mask)
+    # Multiplication does not repair NaNs: NaN * 0 remains NaN. Corrector noise
+    # is applied over the whole tensor, so use where() to restore the invariant
+    # that every masked cell has the finite training-time fill value.
+    return torch.where(
+        mask.to(device=x.device, dtype=torch.bool),
+        x,
+        torch.full_like(x, fill),
+    )
 
 
 def make_schedule(cfg: SamplerConfig, device) -> torch.Tensor:
@@ -112,9 +123,23 @@ def make_schedule(cfg: SamplerConfig, device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _langevin_correct(x, t, prior_velocity, flow, cfg: SamplerConfig, guide=None):
+def _langevin_correct(
+    x,
+    t,
+    prior_velocity,
+    flow,
+    cfg: SamplerConfig,
+    guide=None,
+    mask=None,
+    stats: dict | None = None,
+    effective_dim: int | None = None,
+):
     """C steps of Langevin MC at fixed t using the (possibly guided) score."""
     for _ in range(cfg.n_corrections):
+        # A correction is a full sampler sub-step. Keep the same mask invariant
+        # as the outer integrator before every model evaluation, not merely
+        # after all C corrections have finished.
+        x = apply_mask(x, mask, cfg.mask_fill)
         tb = torch.full((x.shape[0],), float(t), device=x.device)
         if guide is None:
             u = prior_velocity(x, tb)
@@ -122,10 +147,41 @@ def _langevin_correct(x, t, prior_velocity, flow, cfg: SamplerConfig, guide=None
         else:
             u, g = guide(x, tb)
             s = flow.score(x, tb, u) + g
+        if mask is not None:
+            score_mask = mask.to(device=s.device, dtype=torch.bool)
+            s = torch.where(score_mask, s, torch.zeros_like(s))
         norm2 = s.flatten(1).pow(2).sum(dim=1).clamp_min(1e-8)
-        dim = s[0].numel()
-        delta = (cfg.corrector_tau * dim / norm2).view(-1, 1, 1, 1)
+        if effective_dim is None:
+            if mask is None:
+                dim = s[0].numel()
+            else:
+                dim = int(
+                    score_mask.expand(1, s.shape[1], *s.shape[2:]).sum().item()
+                )
+        else:
+            dim = effective_dim
+        raw_delta = cfg.corrector_tau * dim / norm2
+        delta = raw_delta
+        if cfg.corrector_max_step is not None:
+            if cfg.corrector_max_step <= 0.0:
+                raise ValueError("corrector_max_step must be positive or None")
+            delta = raw_delta.clamp_max(float(cfg.corrector_max_step))
+        if stats is not None:
+            stats["member_steps"] += x.shape[0]
+            stats["capped_member_steps"] = stats["capped_member_steps"] + (
+                delta < raw_delta
+            ).sum()
+            stats["max_raw_step"] = torch.maximum(
+                stats["max_raw_step"],
+                raw_delta.detach().amax().to(stats["max_raw_step"].dtype),
+            )
+            stats["max_applied_step"] = torch.maximum(
+                stats["max_applied_step"],
+                delta.detach().amax().to(stats["max_applied_step"].dtype),
+            )
+        delta = delta.view(-1, 1, 1, 1)
         x = x + delta * s + (2 * delta).sqrt() * torch.randn_like(x)
+        x = apply_mask(x, mask, cfg.mask_fill)
     return x
 
 
@@ -160,6 +216,7 @@ def assimilate(
     mask: torch.Tensor | None = None,
     x0: torch.Tensor | None = None,
     to_precip=None,
+    diagnostics: dict | None = None,
 ) -> torch.Tensor:
     """Generate an ensemble, optionally guided by observations.
 
@@ -221,6 +278,17 @@ def assimilate(
 
     stochastic = cfg.noise_scale > 0.0
     ts = make_schedule(cfg, device)
+    corrector_stats = None
+    corrector_effective_dim = None
+    if cfg.n_corrections and mask is not None:
+        corrector_effective_dim = int(mask[0].to(dtype=torch.bool).sum().item()) * shape[1]
+    if diagnostics is not None and cfg.n_corrections:
+        corrector_stats = {
+            "member_steps": 0,
+            "capped_member_steps": torch.zeros((), dtype=torch.long, device=device),
+            "max_raw_step": torch.zeros((), dtype=torch.float64, device=device),
+            "max_applied_step": torch.zeros((), dtype=torch.float64, device=device),
+        }
 
     for i in range(cfg.n_steps):
         t0, t1 = float(ts[i]), float(ts[i + 1])
@@ -260,11 +328,42 @@ def assimilate(
 
         if cfg.n_corrections and 0.0 < t1 < 1.0:
             x = _langevin_correct(
-                x, t1, prior_velocity, flow, cfg, guide=guide if guided else None
+                x,
+                t1,
+                prior_velocity,
+                flow,
+                cfg,
+                guide=guide if guided else None,
+                mask=mask,
+                stats=corrector_stats,
+                effective_dim=corrector_effective_dim,
             )
 
         x = apply_mask(x, mask, cfg.mask_fill)
 
+    if diagnostics is not None:
+        if corrector_stats is None:
+            diagnostics["corrector"] = {
+                "member_steps": 0,
+                "capped_member_steps": 0,
+                "capped_fraction": 0.0,
+                "max_raw_step": None,
+                "max_applied_step": None,
+                "configured_max_step": cfg.corrector_max_step,
+            }
+        else:
+            member_steps = int(corrector_stats["member_steps"])
+            capped = int(corrector_stats["capped_member_steps"].item())
+            diagnostics["corrector"] = {
+                "member_steps": member_steps,
+                "capped_member_steps": capped,
+                "capped_fraction": capped / member_steps if member_steps else 0.0,
+                "max_raw_step": float(corrector_stats["max_raw_step"].item()),
+                "max_applied_step": float(
+                    corrector_stats["max_applied_step"].item()
+                ),
+                "configured_max_step": cfg.corrector_max_step,
+            }
     return x
 
 
