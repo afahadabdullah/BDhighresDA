@@ -1,51 +1,82 @@
 % ---------------------------------------------------------------------------
-% Pseudo-satellite assimilation in the CHIRPS OSSE: a defect, not a result.
+% What adding observation error does in the CHIRPS OSSE.
 %
 % DRAFTING NOTE: recorded in full, as with docs/ablation_v3.tex, so the section
 % can be cut down later without re-deriving anything. Source data:
-%   data/processed/osse_paper/gauges_realistic_40/
-%   data/processed/osse_paper/satellite_realistic_40/
-%   data/processed/osse_paper/simultaneous_realistic_40/
-%   data/processed/osse_paper/paper/  (scripts/24_osse_paper_suite.py output)
-% Consequence: slurm/osse_gauges_bmd.sbatch runs gauges only until this is
-% resolved.
+%   data/processed/osse_paper/{gauges,satellite,simultaneous}_realistic_40/
+%   data/processed/osse_paper/paper/   (scripts/24_osse_paper_suite.py)
+% Perfect-observation counterparts are arms 0-2 of slurm/osse_exact_bmd.sbatch
+% and are NOT yet run; Section~\ref{sec:osse-error-predictions} records what
+% they are expected to show, written before the fact.
 % ---------------------------------------------------------------------------
 
-\section{Pseudo-satellite assimilation degrades the analysis: diagnosis}
-\label{sec:pseudo-satellite-defect}
+\section{Adding error to the pseudo-observations}
+\label{sec:osse-error}
 
-\subsection{What was run}
+\subsection{What ``adding error'' does, per stream}
 
-The CHIRPS OSSE over 2021--2024 supplies a $0.05^\circ$ nature run, pseudo-gauge
-values at real BMD coordinates, and exact nested $0.1^\circ$ block means as
-pseudo-IMERG. Three matched arms share dates, seeds and holdout: gauges only,
-pseudo-IMERG only, and simultaneous. Scoring is at withheld pseudo-gauges,
-with gridded diagnostics at the full field, at the $0.1^\circ$ footprints, and
-on the subgrid residual left after removing each field's own footprint mean.
+The OSSE draws both observation types from the CHIRPS nature run and then, under
+\texttt{--obs-error realistic}, perturbs them. The two streams are perturbed by
+different mechanisms, and the difference turns out to matter more than anything
+else in this section.
 
-Both observation types are drawn from the nature run and then perturbed. Under
-\texttt{--obs-error realistic}, which is what the arms below use, gauges receive
-\emph{white} noise of standard deviation
-$\sqrt{\sigma_{\mathrm{obs}}^2 + \mathrm{rep}^2} = \sqrt{0.10^2 + 0.25^2} =
-0.269$ in transformed units, and the pseudo-satellite receives a
-\emph{spatially correlated} error described in
-Section~\ref{sec:pseudo-satellite-defect} below. Under
-\texttt{--obs-error exact} neither is perturbed at all: observed values are the
-CHIRPS pseudo-data unchanged, and $R = 0.05$ is a numerical regulariser, since
-the likelihood variance $V(t) = R + \gamma(1-t)^2/t^2$ is singular as
-$t \to 1$.
+\paragraph{Gauges: white noise, drawn once per station-day.}
+\begin{verbatim}
+gauge_obs_transformed = gauge_truth_transformed
+                      + rng.normal(0.0, gauge_noise_sd, n_stations)
+gauge_noise_sd = sqrt(sigma_obs**2 + representativeness**2)
+\end{verbatim}
+With the configured $\sigma_{\mathrm{obs}} = 0.10$ and representativeness
+$0.25$, that is $\sqrt{0.10^2 + 0.25^2} = 0.269$ in transformed units, spatially
+independent.
 
-The distinction matters for reading the table. These are \emph{not} perfect
-observations, and the gauge arm's $+14\%$ is skill obtained despite a
-realistic error, not an upper bound.
-
-\subsection{The numbers}
+\paragraph{Satellite: correlated noise, drawn from the INFLATED $R$.}
+\begin{verbatim}
+R[len(active_assim_idx):] *= satellite_r_inflation    # 6.28x at stride 3
+...
+satellite_observed = perturb_observations(
+    satellite_truth_transformed, satellite_R, 1, corr_blocks=[...])
+\end{verbatim}
+The base error is $\sqrt{0.35^2 + 0.10^2} = 0.364$. But the same $R$ that was
+inflated by $\max(1, 2\pi(\ell/s)^2)$ --- in order to \emph{down-weight}
+correlated observations in the analysis --- is then used to \emph{generate} the
+observation.
 
 \begin{table}[t]
 \centering
-\caption{OSSE arms against their own matched background. Percentages are
-improvements, so negative means the analysis is WORSE than the prior it
-started from. $\Delta r$ is analysis minus background correlation.}
+\caption{Error actually injected into each stream, in transformed units. The
+ratio in the last column is independent of the transform's standardisation and
+is the robust quantity; the multiplicative column assumes the standardisation
+$\mathrm{sd} = 1$ and should be recomputed if that is not so.}
+\label{tab:injected-error}
+\small
+\begin{tabular}{llrrrr}
+\hline
+stream & structure & base sd & $R$ inflation & injected sd & $\times$ gauge \\
+\hline
+gauges                     & white      & 0.269 & ---            & 0.269 & $1.0$ \\
+satellite, stride 3        & correlated & 0.364 & $6.28\times$   & 0.912 & $3.4$ \\
+satellite, stride 1        & correlated & 0.364 & $56.55\times$  & 2.737 & $10.2$ \\
+\hline
+\end{tabular}
+\end{table}
+
+Under the \texttt{log1p} transform an additive shift in transformed space is a
+\emph{multiplicative} error on rainfall. Taking $\mathrm{sd} = 1$ for
+illustration, one standard deviation of injected error multiplies
+$(p + \varepsilon)$ by $1.31$ for the gauges, $2.49$ for the satellite at
+stride 3, and $15.45$ at stride 1. A $20$~mm\,day$^{-1}$ footprint becomes
+$50$~mm\,day$^{-1}$ at stride 3 and $310$~mm\,day$^{-1}$ at stride 1. The
+``pseudo-IMERG product'' is not a noisy satellite retrieval; at stride 1 it is
+not rainfall.
+
+\subsection{What the arms then do}
+
+\begin{table}[t]
+\centering
+\caption{OSSE arms with error added, against their own matched background.
+Percentages are improvements, so negative means the analysis is WORSE than the
+prior it started from.}
 \label{tab:pseudo-satellite}
 \small
 \begin{tabular}{lrrr}
@@ -74,153 +105,126 @@ CRPS at withheld gauges (mm\,day$^{-1}$) & & & \\
 \end{tabular}
 \end{table}
 
-\subsection{Why this is a defect and not a result}
+\paragraph{Gauges tolerate their error; the satellite does not.}
+This is the whole result. A $0.269$ white error costs the gauge arm nothing it
+cannot absorb --- it still improves CRPS by $14\%$ at withheld stations, the
+full field by $26\%$, and correlation by $+0.11$. A $0.912$ correlated error
+takes the satellite arm to $-68\%$ CRPS and $-146\%$ RMSE. Adding the gauges
+back on top recovers the gridded scores almost to neutral ($-2.1\%$ field) but
+not the point scores ($-38.7\%$): the gauges repair the field where they are,
+and cannot repair it where they are not.
 
-\textbf{The gauge arm works.} It improves CRPS by $14\%$ at withheld
-pseudo-gauges, the full field by $26\%$, the footprint scale by $28\%$, and
-raises correlation by $+0.11$ at withheld stations. The sampler, the guidance,
-the holdout and the scoring are therefore all functioning; whatever is wrong is
-specific to the pseudo-satellite path.
+\paragraph{An uninformative observation cannot do this.}
+Assimilating an observation carrying no usable information should drive the
+analysis toward the prior and converge on zero improvement. It cannot push the
+analysis $68\%$ \emph{below} the prior. Degradation of that size requires the
+likelihood to be pulling the state confidently toward somewhere the truth is
+not, which is what an error drawn from an inflated $R$ and then assimilated
+under that same inflated $R$ produces: the analysis is told the observation is
+imprecise, but the observation is \emph{also} wrong by exactly that much, and
+the two do not cancel.
 
-\textbf{An uninformative observation cannot do this.} Assimilating an
-observation that carries no usable information should drive the analysis toward
-the prior, converging on zero improvement. It cannot push the analysis
-\emph{below} the prior by $68\%$ in CRPS and $146\%$ in RMSE. Degradation of
-that magnitude requires the likelihood to be actively pulling the state toward
-somewhere the truth is not. Since the pseudo-observations \emph{are} block means
-of the truth, the error must lie in how those values are generated, transformed,
-or compared against the operator's prediction --- not in the observation's
-information content.
+\subsection{The cause, established from the code}
 
-\subsection{The signature points at magnitude, not noise}
+An earlier draft proposed that the pseudo-observations were built by averaging
+\emph{transformed} CHIRPS while the operator averages in physical space, making
+$T(\overline{x})$ and $\overline{T(x)}$ inconsistent. \textbf{That hypothesis is
+wrong} and is recorded here only so it is not proposed again:
+\texttt{scripts/10\_osse.py} computes \texttt{block\_mean\_mm} followed by
+\texttt{transform.forward}, which is exactly what
+\texttt{PhysicalBlockAverageObsOperator} predicts. The two are consistent.
 
-The discriminating comparison is between the correlation changes and the
-RMSE changes, because correlation is invariant to a constant offset and to a
-uniform scaling while RMSE is not.
+The cause is the double use of the correlation inflation shown above. The
+inflation exists to down-weight observations whose errors are not independent;
+using it to \emph{build} the observation means that asking for a more
+conservative $R$ makes the synthetic data worse, and the inflation is then
+counted twice --- once in the values, once in the weight. An OSSE should
+generate the observation with its \emph{true} error and assimilate it under
+whatever $R$ is being tested.
 
-Correlation is \emph{approximately unchanged} where the observation acts: at
-the footprint scale the pseudo-IMERG arm moves $r$ by only $-0.019$, and at the
-full field by $-0.017$. Over the same fields RMSE degrades by $81\%$ and CRPS by
-$34$--$36\%$. A field can only keep its correlation while losing that much RMSE
-if its \emph{values} are wrong and its \emph{pattern} is broadly right.
-
-Random observation noise does not behave this way. Noise degrades pattern and
-amplitude together, so $r$ would fall alongside RMSE. What the table shows
-instead is the signature of a systematic offset or scale error applied
-consistently across footprints.
-
-Two further details are consistent with that reading and with nothing else
-obvious. First, the subgrid residual --- the component the satellite does
-\emph{not} constrain --- is the one place pseudo-IMERG \emph{improves}
-correlation ($+0.038$, against $+0.018$ for gauges alone), which is what one
-expects if a large systematic increment at footprint scale leaves the
-within-footprint structure comparatively untouched. Second, coverage$_{90}$
-\emph{rises} to $0.688$ from the gauge arm's $0.581$ while spread/skill
-\emph{falls} to $0.595$: the ensemble is not becoming better calibrated, its
-error is growing faster than its spread.
-
-\paragraph{A caveat on the correlation argument.}
-At the withheld gauges themselves $\Delta r$ is $-0.058$, a larger drop than at
-field or footprint scale. A pure offset would leave point correlation untouched,
-so the mechanism is not \emph{only} an offset. An intensity-\emph{dependent}
-distortion --- one whose size grows with rainfall amount --- would produce
-exactly this: near-preserved correlation at aggregate scales, with a measurable
-loss at points where intensities vary most. That is the form the leading
-hypothesis below takes.
-
-\subsection{Cause, established from the code}
-
-An earlier draft of this section proposed that the pseudo-observations were
-built by averaging \emph{transformed} CHIRPS while the operator averages in
-physical space, making $T(\overline{x})$ and $\overline{T(x)}$ inconsistent.
-\textbf{That hypothesis is wrong} and is recorded here only so it is not
-proposed again. \texttt{scripts/10\_osse.py} computes the pseudo-satellite truth
-as \texttt{block\_mean\_mm(truth, \ldots)} followed by
-\texttt{transform.forward(\ldots)} --- a physical-space mean, then the transform
---- which is exactly what \texttt{PhysicalBlockAverageObsOperator} predicts. The
-two are consistent.
-
-The actual cause is that \textbf{the correlation inflation applied to $R$ is
-also used to manufacture the observation error}. In sequence:
-
-\begin{enumerate}
-  \item $R$ for the satellite block is built from the configured
-    $\sigma_{\mathrm{obs}} = 0.35$ and representativeness $0.10$, giving a
-    standard deviation of $\sqrt{0.35^2 + 0.10^2} = 0.364$ in transformed units.
-  \item It is then inflated in place by
-    $\max\!\left(1,\; 2\pi(\ell/s)^2\right)$ with correlation length
-    $\ell = 3$ cells and stride $s = 3$, i.e.\ by $6.28\times$ in variance:
-\begin{verbatim}
-if use_satellite and satellite_r_inflation != 1.0:
-    R[len(active_assim_idx):] *= satellite_r_inflation
-\end{verbatim}
-  \item The pseudo-IMERG product is then \emph{generated} by drawing from that
-    same inflated $R$, with spatial correlation imposed:
-\begin{verbatim}
-satellite_observed = perturb_observations(
-    satellite_truth_transformed, satellite_R, 1, corr_blocks=[...])
-\end{verbatim}
-\end{enumerate}
-
-The synthetic satellite is therefore corrupted with a \emph{spatially
-correlated} error of standard deviation $0.364 \times \sqrt{6.28} = 0.91$
-transformed units, against the gauges' \emph{white} $0.269$. The pseudo-IMERG
-product carries roughly $3.4\times$ the gauge error, and because that error is
-correlated over $\sim\!30$~km it does not average away across footprints.
-
-This is a design error, not a tuning choice. The correlation inflation exists to
-\emph{down-weight} observations whose errors are not independent. Using it to
-build the observation means that asking for a more conservative $R$ makes the
-synthetic product worse, and the two effects are then counted twice: once in
-the data and once in the weight. An OSSE should generate the observation with
-its \emph{true} error and assimilate it under whatever $R$ is being tested.
-
-\paragraph{This explains every feature of Table~\ref{tab:pseudo-satellite}.}
-A large correlated error displaces whole regions coherently, which destroys
-RMSE while leaving the broad pattern --- and hence $r$ --- largely intact. And
-it explains the one anomaly a magnitude-error story could not: subtracting each
+\paragraph{This accounts for the one anomaly.}
+Subgrid correlation \emph{improves} with pseudo-IMERG ($+0.038$, against
+$+0.018$ for gauges alone) even as everything else collapses. Subtracting each
 field's own $0.1^\circ$ footprint mean removes most of a footprint-scale
-correlated error, so the \emph{subgrid} residual is comparatively clean and its
-correlation \emph{improves} ($+0.038$), while everything at and above footprint
-scale collapses.
+correlated error, so the residual is comparatively clean. A magnitude error
+alone would not produce that; a \emph{footprint-scale correlated} one does.
 
 \paragraph{The same mechanism, now seen twice.}
 This is the $\sqrt{R}$ pathology already established on real data, where stride
 1 at $0.1^\circ$ degraded CRPS by $+2.388~[+1.824, +2.956]$ because
 \texttt{perturb\_observations} draws with $\mathrm{sd} = \sqrt{R}$ and a
-$56.5\times$ inflation therefore multiplied the perturbation amplitude by
-$7.5$. It has now appeared in two independent code paths --- once when
-perturbing ensemble members, once when constructing a synthetic observation ---
-which makes it a property of how $R$ is used throughout this system rather than
-a local slip.
+$56.5\times$ inflation multiplied the perturbation amplitude by $7.5$. It has
+now appeared in two independent code paths --- once perturbing ensemble members
+in the real-data assimilation, once constructing a synthetic observation in the
+OSSE --- which makes it a property of how $R$ is used throughout this system
+rather than a local slip.
 
-\subsection{The fix, and how to confirm it}
+\subsection{What this means for reading any OSSE result with error}
 
-Generate the pseudo-observation from the \emph{uninflated} error and keep the
-inflation for the assimilation weight only. Concretely, pass the pre-inflation
-$R$ to \texttt{perturb\_observations} at the product-generation step while
-leaving the inflated $R$ in the likelihood.
+Three consequences worth stating explicitly, because they apply beyond this
+experiment.
 
-The confirmation is cheap and needs no GPU: re-run the satellite arm with
-\texttt{--obs-error exact}, which bypasses \texttt{perturb\_observations}
-entirely (\texttt{satellite\_observed = satellite\_truth\_transformed.copy()})
-and is already guarded by an invariant check against the same-day CHIRPS block
-mean. If the exact satellite arm improves on its background while the realistic
-one does not, the observation-generation path is confirmed as the cause and the
-operator, geometry and likelihood are all exonerated.
+\begin{enumerate}
+  \item \textbf{Error settings that pass through $R$ are not a clean strength
+    axis.} Any knob that scales $R$ also scales the error injected into the
+    synthetic observation, so a ``down-weighting'' experiment is silently also
+    a ``corrupt the data'' experiment. The two effects have opposite intent and
+    the same control.
+  \item \textbf{Thinning and error magnitude are entangled.} The inflation is
+    $\propto (\ell/s)^2$, so halving the stride quadruples the injected error.
+    A stride sweep is therefore not a sweep over observation \emph{density} but
+    over density and corruption together --- which is exactly the confound that
+    made the real-data \texttt{S1} arm uninterpretable until the mechanism was
+    identified.
+  \item \textbf{Correlated error is far more damaging than white error of the
+    same nominal size.} The gauge stream absorbs $0.269$; the satellite stream
+    is destroyed by $0.912$. Some of that is the $3.4\times$ magnitude, but the
+    structure matters independently: white error across many observations
+    averages down in the analysis, correlated error does not.
+\end{enumerate}
+
+\subsection{Predictions for the perfect-observation arms}
+\label{sec:osse-error-predictions}
+
+Arms 0--2 of \texttt{slurm/osse\_exact\_bmd.sbatch} repeat this experiment with
+\texttt{--obs-error exact}, which perturbs neither stream and asserts that the
+pseudo-satellite equals the same-day CHIRPS block mean. They are not yet run.
+Recording the expectations before the fact, so the diagnosis above is
+falsifiable:
+
+\begin{enumerate}
+  \item \texttt{gauges\_exact\_bmd} should improve on
+    \texttt{gauges\_realistic\_bmd}'s $+14\%$, since the only change is the
+    removal of a $0.269$ error. A large improvement would also quantify how
+    much of the real-data gauge arm's ceiling is observation error rather than
+    prior quality.
+  \item \texttt{satellite\_exact\_bmd} should be \emph{strongly positive}. It
+    assimilates the truth's own $0.1^\circ$ block means at every footprint. If
+    it is, the defect is confirmed and localised to observation generation, and
+    the operator, the geometry and the likelihood are all exonerated. \textbf{If
+    it is still negative, the diagnosis in this section is wrong} and the fault
+    lies in the operator or the likelihood.
+  \item \texttt{simultaneous\_exact\_bmd} should be no worse than the better of
+    the two single-source arms. Perfect information from two consistent sources
+    cannot legitimately be worse than either alone; if it is, the composite
+    likelihood is mis-weighting them, which is a separate defect from the one
+    described here and would not have been visible while the satellite error
+    dominated everything.
+\end{enumerate}
 
 \subsection{Consequence for the paper}
 
-The pseudo-satellite contaminates every arm it enters: the simultaneous arm is
-also below its background at withheld gauges ($-38.65\%$), so no arm containing
-pseudo-IMERG can currently be reported. The OSSE has therefore been re-run
-gauges-only on the real BMD geometry
-(\texttt{slurm/osse\_gauges\_bmd.sbatch}), where the machinery demonstrably
-works, and satellite arms are excluded until the diagnosis above is resolved.
+No arm containing perturbed pseudo-IMERG can currently be reported: the
+simultaneous arm is also below its background at withheld gauges
+($-38.65\%$). The OSSE has therefore been restructured to run perfect
+observations first, with error arms retained as sensitivities to be interpreted
+only once the perfect arms establish what correct information buys.
 
 This does \emph{not} affect the real-data results in
-Section~\ref{sec:ingestion}, which use actual IMERG through a different code
-path (\texttt{scripts/15\_bmd\_month\_example.py}) and never touch the OSSE's
-pseudo-observation generator. It does, however, mean the OSSE cannot yet be
-used to explain the real-data null --- which was its main purpose in the
-argument --- and that experiment is deferred rather than abandoned.
+Section~\ref{sec:ingestion}, which use actual IMERG through
+\texttt{scripts/15\_bmd\_month\_example.py} and never touch the OSSE's
+pseudo-observation generator. It does mean the OSSE cannot yet serve its
+intended role in the argument --- explaining the real-data null by locating the
+observation-error threshold at which a satellite starts to help --- because the
+error axis it would sweep is the same axis that corrupts the data. Fixing the
+generation path is a prerequisite for that experiment, not an optional tidy-up.
