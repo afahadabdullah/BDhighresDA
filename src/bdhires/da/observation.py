@@ -190,13 +190,19 @@ class PhysicalBilinearObsOperator(BilinearObsOperator):
         self.register_buffer("physical_valid", physical_valid)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        physical = self.transform.inverse(x)
         if self.physical_valid.numel():
-            # A residual checkpoint can reintroduce its CPC/ERA5 base after the
-            # network-space ocean mask is applied. Gauges near the coast must
-            # still interpolate physical zero over ocean, just as the nature
-            # truth sampler does.
-            physical = physical * self.physical_valid.to(physical.dtype)
+            # A residual checkpoint can reintroduce a non-finite CPC/ERA5 base
+            # after the network-space ocean mask is applied. Mask BEFORE the
+            # nonlinear inverse transform: masking ``inverse(NaN)`` afterwards
+            # leaves a NaN derivative, and autograd evaluates 0 * NaN as NaN.
+            # That poisoned the full guidance norm even though no ocean value
+            # entered a retained observation.
+            valid = self.physical_valid.to(device=x.device, dtype=torch.bool)
+            x = torch.where(valid, x, torch.zeros_like(x))
+            physical = self.transform.inverse(x)
+            physical = torch.where(valid, physical, torch.zeros_like(physical))
+        else:
+            physical = self.transform.inverse(x)
         sampled = super().forward(physical)
         return self.transform.forward(sampled)
 
@@ -222,11 +228,36 @@ class PhysicalBlockAverageObsOperator(BlockAverageObsOperator):
             factor=factor, valid=valid, min_valid_frac=min_valid_frac, crop=crop
         )
         self.transform = transform
+        physical_valid = (
+            torch.as_tensor(valid, dtype=torch.bool)[None, None]
+            if valid is not None
+            else torch.empty(0, dtype=torch.bool)
+        )
+        if physical_valid.numel() and crop is not None:
+            row_start, row_stop, col_start, col_stop = crop
+            physical_valid = physical_valid[
+                ..., row_start:row_stop, col_start:col_stop
+            ]
+        self.register_buffer("physical_valid", physical_valid)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        physical = self.transform.inverse(x)
-        coarse = super().forward(physical)
-        return self.transform.forward(coarse)
+        if self.crop is not None:
+            row_start, row_stop, col_start, col_stop = self.crop
+            x = x[..., row_start:row_stop, col_start:col_stop]
+        if self.physical_valid.numel():
+            # Invalid/ocean footprints are excluded through NaNs in y, but H is
+            # still evaluated for the whole coarse grid. A NaN CPC residual
+            # base outside land therefore has to be replaced before inverse()
+            # and pooling; masking only the likelihood is too late for autograd.
+            valid = self.physical_valid.to(device=x.device, dtype=torch.bool)
+            x = torch.where(valid, x, torch.zeros_like(x))
+            physical = self.transform.inverse(x)
+            physical = torch.where(valid, physical, torch.zeros_like(physical))
+        else:
+            physical = self.transform.inverse(x)
+        coarse = F.avg_pool2d(physical, self.factor)
+        out = coarse.reshape(coarse.shape[0], coarse.shape[1], -1)
+        return self.transform.forward(out)
 
 
 class CompositeObsOperator(torch.nn.Module):

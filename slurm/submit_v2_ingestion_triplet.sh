@@ -52,8 +52,22 @@ echo "  members: $V2_INGEST_MEMBERS; checkpoint: $BMD_CKPT"
 echo "  IMERG: S04 0.4-degree file $V2_INGEST_IMERG"
 echo "  outputs: $V2_INGEST_ROOT"
 
-array_result="$(sbatch --parsable --export=ALL "$@" slurm/v2_ingestion_triplet.sbatch)"
+ARRAY_OVERRIDE=()
+if [[ "${V2_INGEST_PREFLIGHT:-0}" == "1" ]]; then
+    ARRAY_OVERRIDE=(--array=0)
+    echo "  mode: numerical preflight (fold 0 only; no pooled summary)"
+fi
+
+array_result="$(sbatch --parsable --export=ALL "$@" \
+    "${ARRAY_OVERRIDE[@]+"${ARRAY_OVERRIDE[@]}"}" \
+    slurm/v2_ingestion_triplet.sbatch)"
 array_job="${array_result%%;*}"
+if [[ "${V2_INGEST_PREFLIGHT:-0}" == "1" ]]; then
+    echo "submitted fold-0 preflight: $array_job"
+    echo "inspect: logs/bdhires-v2-ingest-${array_job}_0.out"
+    exit 0
+fi
+
 summary_result="$(sbatch --parsable --dependency="afterok:${array_job}" --export=ALL \
     "$@" slurm/v2_ingestion_triplet_summary.sbatch)"
 summary_job="${summary_result%%;*}"

@@ -78,6 +78,35 @@ def test_bilinear_station_zeros_masked_ocean_before_coastal_interpolation():
     assert torch.allclose(actual, expected, atol=1e-6)
 
 
+def test_physical_operators_mask_nonfinite_ocean_before_inverse_transform():
+    """A masked NaN must not poison a finite likelihood gradient."""
+    grid = Grid("tiny", lon_min=90.0, lat_min=20.0, nlon=4, nlat=4, res=0.05)
+    transform = PrecipTransform(kind="log1p", eps=0.1, mu=1.2, sd=0.8)
+    valid = np.zeros((4, 4), dtype=np.float32)
+    valid[:, :2] = 1.0
+    physical = torch.full((1, 1, 4, 4), 8.0)
+    transformed = transform.forward(physical)
+    transformed[..., :, 2:] = float("nan")
+    transformed.requires_grad_(True)
+
+    block = PhysicalBlockAverageObsOperator(2, transform, valid=valid)
+    block_values = block(transformed)
+    assert torch.isfinite(block_values).all()
+    assert torch.allclose(
+        block_values[0, 0, 0], transform.forward(torch.tensor(8.0)), atol=1e-6
+    )
+
+    lat = np.array([(grid.lat[1] + grid.lat[2]) / 2])
+    lon = np.array([(grid.lon[0] + grid.lon[1]) / 2])
+    gauge = PhysicalBilinearObsOperator(
+        grid, lat, lon, transform, valid=valid
+    )
+    objective = block_values[0, 0, 0] + gauge(transformed).sum()
+    objective.backward()
+    assert torch.isfinite(transformed.grad).all()
+    assert torch.count_nonzero(transformed.grad[..., :, 2:]) == 0
+
+
 def test_coarse_footprint_grid_admits_a_station_inside_the_domain():
     """A station can sit inside the domain but outside the box of cell centres.
 

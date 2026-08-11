@@ -156,6 +156,7 @@ def guidance_grad(
             hx = H(x1_hat)
             ll = obs_log_likelihood(y, hx, R, t, cfg).sum()
             (grad,) = torch.autograd.grad(ll, x)
+            _require_finite_gradient(grad, "observation likelihood")
         else:
             # A simultaneous likelihood is additive across independent streams.
             # Differentiate each term through the SAME denoised state so a gauge
@@ -187,12 +188,16 @@ def guidance_grad(
                 (component_grad,) = torch.autograd.grad(
                     ll, x, retain_graph=index < len(hx_parts) - 1
                 )
+                _require_finite_gradient(
+                    component_grad, f"observation component {index}"
+                )
                 if spread > 0.0:
                     component_grad = spread_gradient(
                         component_grad, spread, mask=mask
                     )
                 component_grads.append(component_grad)
             grad = torch.stack(component_grads).sum(dim=0)
+            _require_finite_gradient(grad, "summed observation components")
 
     if cfg.spread_cells and cfg.spread_cells > 0.0:
         grad = spread_gradient(grad, cfg.spread_cells, mask=mask)
@@ -206,6 +211,26 @@ def guidance_grad(
         grad = grad * (cfg.clip_norm / n.clamp_min(cfg.clip_norm))
 
     return u.detach(), grad.detach()
+
+
+def _require_finite_gradient(grad: torch.Tensor, stage: str) -> None:
+    """Fail at the first invalid guidance step, before norm contamination.
+
+    Replacing a non-finite likelihood derivative with zero would silently turn
+    the requested posterior into a different method. Observation operators
+    must instead keep masked cells finite. This check makes any remaining
+    numerical failure immediate and names the stage, rather than allowing one
+    bad element to make the norm and then the complete analysis NaN.
+    """
+    finite = torch.isfinite(grad)
+    if finite.all().item():
+        return
+    per_member = (~finite).flatten(1).sum(dim=1).detach().cpu().tolist()
+    total = int(sum(per_member))
+    raise FloatingPointError(
+        f"non-finite {stage} gradient: {total}/{grad.numel()} values; "
+        f"per-member counts={per_member}"
+    )
 
 
 def spread_gradient(
@@ -222,16 +247,8 @@ def spread_gradient(
     """
     if sigma_cells <= 0.0:
         return grad
-    # A convolution turns ONE non-finite element into non-finite EVERYWHERE
-    # within the kernel, and after two separable passes that is the whole
-    # domain. Satellite arms returned an analysis that was 100% NaN while the
-    # background was untouched, which is this failure exactly: a sharp
-    # likelihood over a few hundred block observations at R ~ 0.0025 produces
-    # an overflow at one footprint, and the blur then erases the field.
-    # Zeroing means "no correction here" -- the honest reading of a gradient
-    # that could not be evaluated -- rather than destroying every other cell's.
-    if not torch.isfinite(grad).all():
-        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+    # Non-finite values are rejected by guidance_grad BEFORE convolution. One
+    # invalid element would otherwise contaminate the entire kernel support.
     radius = int(max(1, round(3.0 * float(sigma_cells))))
     offsets = torch.arange(
         -radius, radius + 1, device=grad.device, dtype=grad.dtype

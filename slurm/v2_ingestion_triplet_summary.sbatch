@@ -41,9 +41,11 @@ done
     --n-resamples "${V2_INGEST_BOOTSTRAPS:-10000}" \
     --out-json "$ROOT/ingestion_selection.json" \
     --out-markdown "$ROOT/ingestion_selection.md" \
-    --out-plot "$ROOT/ingestion_selection.png"
+    --out-plot "$ROOT/ingestion_selection.png" \
+    --fold-plot-dir "$ROOT/fold_plots"
 
 echo "CPC-v2 ingestion selection complete."
 echo "  table:  $ROOT/ingestion_selection.md"
 echo "  data:   $ROOT/ingestion_selection.json"
 echo "  figure: $ROOT/ingestion_selection.png"
+echo "  folds:  $ROOT/fold_plots/fold{0..4}_diagnostics.png"

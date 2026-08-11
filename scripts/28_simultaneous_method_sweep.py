@@ -154,6 +154,8 @@ class Variant:
     guidance_spread_cells: float | None = None
     gauge_component_spread_cells: float | None = None
     guidance_gamma: float | None = None
+    gauge_guidance_gamma: float | None = None
+    imerg_guidance_gamma: float | None = None
     ensrf_localization_km: float = 200.0
     note: str = ""
 
@@ -333,13 +335,16 @@ V2_GAUGES_REFINE = [
 # the simultaneous arm only the point-gauge component receives spread-6; the
 # IMERG block gradient is already areal and must not be blurred a second time.
 V2_INGESTION_S04 = [
-    V2_GAUGES_CORE[4],
+    Variant("guided_s6_g010_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, guidance_gamma=1.0e-2,
+            note="selected v2 gauge method: spread 6, gamma 0.01"),
     Variant("v2_imerg_s04_t100", streams="imerg", prior_temperature=1.0,
-            imerg_stride=1,
+            imerg_stride=1, imerg_guidance_gamma=1.0e-3,
             note="best earlier IMERG scale: 0.4-degree S04"),
     Variant("v2_simultaneous_s04_t100", streams="both", prior_temperature=1.0,
             imerg_stride=1, gauge_component_spread_cells=6.0,
-            note="joint likelihood: spread gauges only, preserve S04 footprints"),
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="joint likelihood: selected gauge gamma/spread plus S04 IMERG"),
 ]
 
 
@@ -956,21 +961,31 @@ def main() -> None:
             # inflation by w, so the whole V(t) scales and the cost term scales by
             # exactly w at every t. Scaling R alone would leave the early-time
             # inflation term unweighted.
-            gamma = float(
+            default_gamma = float(
                 variant.guidance_gamma
                 if variant.guidance_gamma is not None
                 else base_guidance.gamma
+            )
+            gauge_gamma = float(
+                variant.gauge_guidance_gamma
+                if variant.gauge_guidance_gamma is not None
+                else default_gamma
+            )
+            imerg_gamma = float(
+                variant.imerg_guidance_gamma
+                if variant.imerg_guidance_gamma is not None
+                else default_gamma
             )
 
             if variant.streams == "gauges":
                 operator, y, R = gauge_operator, gauge_y, gauge_R / variant.gauge_weight
                 gamma_vector = torch.full(
-                    (len(assim_idx),), gamma / variant.gauge_weight, device=device
+                    (len(assim_idx),), gauge_gamma / variant.gauge_weight, device=device
                 )
             elif variant.streams == "imerg":
                 operator, y, R = satellite_operator, satellite_y, satellite_R
                 gamma_vector = torch.full(
-                    satellite_R.shape, gamma / variant.imerg_weight, device=device
+                    satellite_R.shape, imerg_gamma / variant.imerg_weight, device=device
                 )
             else:
                 if variant.gauge_component_spread_cells is None:
@@ -987,10 +1002,14 @@ def main() -> None:
                 gamma_vector = torch.cat(
                     [
                         torch.full(
-                            (len(assim_idx),), gamma / variant.gauge_weight, device=device
+                            (len(assim_idx),),
+                            gauge_gamma / variant.gauge_weight,
+                            device=device,
                         ),
                         torch.full(
-                            satellite_R.shape, gamma / variant.imerg_weight, device=device
+                            satellite_R.shape,
+                            imerg_gamma / variant.imerg_weight,
+                            device=device,
                         ),
                     ]
                 )
@@ -1015,7 +1034,9 @@ def main() -> None:
                     gcfg=replace(
                         guidance,
                         gamma=torch.full(
-                            satellite_R.shape, gamma / variant.imerg_weight, device=device
+                            satellite_R.shape,
+                            imerg_gamma / variant.imerg_weight,
+                            device=device,
                         ),
                     ),
                     flow=flow,
@@ -1056,7 +1077,14 @@ def main() -> None:
                 mask=mask,
                 to_precip=lambda x, b=base: residual.decode(x, b),
             ).detach()
-            fields[variant.name][day_position] = decode(generated)
+            decoded = decode(generated)
+            if not np.isfinite(decoded[:, valid]).all():
+                bad = int((~np.isfinite(decoded[:, valid])).sum())
+                raise FloatingPointError(
+                    f"{variant.name}: {bad} non-finite land values on "
+                    f"{selected_times[day_position].astype('datetime64[D]')}"
+                )
+            fields[variant.name][day_position] = decoded
 
         elapsed = walltime.time() - started
         print(
@@ -1190,6 +1218,8 @@ def main() -> None:
         station_ids=np.asarray(stations.ids, dtype=str),
         station_lat=stations.lat,
         station_lon=stations.lon,
+        grid_lat=grid.lat,
+        grid_lon=grid.lon,
         eval_idx=eval_idx,
         assim_idx=assim_idx,
         gauge_mm=gauge_mm,

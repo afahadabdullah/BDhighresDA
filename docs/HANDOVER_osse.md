@@ -157,15 +157,21 @@ Supporting facts:
 * the gridded `analysis` array is **0.000 finite**; station-space CRPS still
   computes, which is why it looked like a NaN bug rather than divergence
 
-**Leading hypothesis, UNVERIFIED.** NaN observations (29.2% of footprints are
-ocean blocks) enter `obs_log_likelihood(...).sum()`, making the gradient NaN;
-`clip_norm` then turns NaN into a fixed-magnitude direction -- which the code's
-own `perfect` branch docstring warns about -- giving the same degenerate
-analysis regardless of input. Gauges-only survives because all 34 gauge
-observations are finite.
+**Root cause identified; cluster preflight pending.** `obs_log_likelihood`
+correctly masks non-finite `y`, so the observations themselves do not enter the
+sum. The CPC residual base can nevertheless be NaN outside land. The physical
+satellite operator used to apply its nonlinear inverse before masking those
+cells, leaving NaN values and NaN derivatives in `H(x)`. Backward propagation
+then evaluated an otherwise zero masked derivative through that branch as
+`0 * NaN`; one invalid gradient entry made the norm NaN, and clipping poisoned
+the complete update. Spread-guidance arms appeared healthier only because
+`spread_gradient` silently replaced invalid values before convolution.
 
-This accounts for every observation above, including why the results are
-identical. It is still a hypothesis.
+Physical gauge and block operators now mask invalid cells *before* nonlinear
+transforms, the silent gradient replacement has been removed, and guidance
+fails at the first non-finite derivative with per-member counts. A regression
+test covers a NaN ocean state. The one-day GPU preflight must pass before this
+is called operationally verified.
 
 ### Hypotheses already ruled out
 

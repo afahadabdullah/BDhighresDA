@@ -28,7 +28,7 @@ _spec = importlib.util.spec_from_file_location(
 _summary = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_summary)
 
-GAUGES = "guided_s6_t100"
+GAUGES = "guided_s6_g010_t100"
 IMERG = "v2_imerg_s04_t100"
 SIMULTANEOUS = "v2_simultaneous_s04_t100"
 EXPECTED = ["background", GAUGES, IMERG, SIMULTANEOUS]
@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--out-markdown", required=True)
     parser.add_argument("--out-plot", required=True)
+    parser.add_argument(
+        "--fold-plot-dir",
+        default=None,
+        help="directory for fold0_diagnostics.png ... fold4_diagnostics.png",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +91,132 @@ def imerg_pattern_correlation(folds: list[dict], name: str) -> float | None:
         if np.isfinite(value):
             values.append(value)
     return float(np.mean(values)) if values else None
+
+
+def time_mean(field: np.ndarray) -> np.ndarray:
+    """Mean over days without warnings on permanently masked ocean cells."""
+    field = np.asarray(field, dtype=float)
+    finite = np.isfinite(field)
+    count = finite.sum(axis=0)
+    total = np.where(finite, field, 0.0).sum(axis=0)
+    return np.divide(
+        total, count, out=np.full(total.shape, np.nan), where=count > 0
+    )
+
+
+def plot_fold_diagnostics(item: dict, names: list[str], out_path: Path) -> None:
+    """Write one spatial-and-score diagnostic figure for a withheld fold."""
+    dump = item["dump"]
+    fold = item["fold"]
+    valid = np.asarray(dump["valid"], bool)
+    means = {
+        name: time_mean(np.asarray(dump[f"meanfield_{name}"], float))
+        for name in names
+    }
+    fold_metrics = {
+        name: _summary.pooled_variant([item], name)[0] for name in names
+    }
+    display = {
+        "background": "background",
+        GAUGES: "gauges: s6, gamma 0.01",
+        IMERG: "IMERG S04",
+        SIMULTANEOUS: "simultaneous",
+    }
+
+    rain_values = np.concatenate([means[name][valid] for name in names])
+    rain_top = max(1.0, float(np.nanpercentile(rain_values, 99.0)))
+    increment_names = [GAUGES, IMERG, SIMULTANEOUS]
+    increments = {
+        name: means[name] - means["background"] for name in increment_names
+    }
+    increment_values = np.concatenate(
+        [np.abs(increments[name][valid]) for name in increment_names]
+    )
+    increment_top = max(0.25, float(np.nanpercentile(increment_values, 99.0)))
+
+    grid_lat = np.asarray(dump["grid_lat"], float)
+    grid_lon = np.asarray(dump["grid_lon"], float)
+    extent = [grid_lon[0], grid_lon[-1], grid_lat[0], grid_lat[-1]]
+    station_lat = np.asarray(dump["station_lat"], float)
+    station_lon = np.asarray(dump["station_lon"], float)
+    assim_idx = np.asarray(dump["assim_idx"], int)
+    eval_idx = np.asarray(dump["eval_idx"], int)
+    dates = np.asarray(dump["times"]).astype(str)
+
+    figure, axes = plt.subplots(2, 4, figsize=(16, 8), constrained_layout=True)
+    rain_image = None
+    for column, name in enumerate(names):
+        axis = axes[0, column]
+        rain_image = axis.imshow(
+            np.where(valid, means[name], np.nan), origin="lower", extent=extent,
+            cmap="viridis", vmin=0.0, vmax=rain_top, aspect="auto",
+        )
+        axis.scatter(
+            station_lon[assim_idx], station_lat[assim_idx], s=7, c="black",
+            marker=".", label="assimilated" if column == 0 else None,
+        )
+        axis.scatter(
+            station_lon[eval_idx], station_lat[eval_idx], s=22,
+            facecolors="none", edgecolors="cyan", linewidths=0.8,
+            label="withheld" if column == 0 else None,
+        )
+        axis.set_xlim(extent[0], extent[1])
+        axis.set_ylim(extent[2], extent[3])
+        metric = fold_metrics[name]
+        axis.set_title(
+            f"{display[name]}\nCRPS {metric['crps']:.2f}; "
+            f"bias {metric['bias']:+.2f}"
+        )
+        axis.set_xlabel("longitude")
+        if column == 0:
+            axis.set_ylabel("latitude")
+            axis.legend(loc="lower left", fontsize=7)
+    figure.colorbar(
+        rain_image, ax=axes[0, :],
+        label=f"{dates[0]}–{dates[-1]} mean rain (mm/day)", shrink=0.82,
+    )
+
+    positions = np.arange(len(names))
+    axes[1, 0].barh(
+        positions, [fold_metrics[name]["crps"] for name in names], color="#C1440E"
+    )
+    axes[1, 0].set_yticks(positions, [display[name] for name in names], fontsize=8)
+    axes[1, 0].invert_yaxis()
+    axes[1, 0].set_xlabel("withheld-gauge CRPS (mm/day)")
+    axes[1, 0].set_title("Fold point skill")
+
+    increment_images = []
+    for column, name in enumerate(increment_names, start=1):
+        axis = axes[1, column]
+        image = axis.imshow(
+            np.where(valid, increments[name], np.nan), origin="lower", extent=extent,
+            cmap="RdBu_r", vmin=-increment_top, vmax=increment_top, aspect="auto",
+        )
+        increment_images.append(image)
+        axis.scatter(
+            station_lon[assim_idx], station_lat[assim_idx], s=7, c="black", marker="."
+        )
+        axis.scatter(
+            station_lon[eval_idx], station_lat[eval_idx], s=22,
+            facecolors="none", edgecolors="cyan", linewidths=0.8,
+        )
+        axis.set_xlim(extent[0], extent[1])
+        axis.set_ylim(extent[2], extent[3])
+        axis.set_title(f"{display[name]} − background")
+        axis.set_xlabel("longitude")
+    figure.colorbar(
+        increment_images[0], ax=axes[1, 1:], label="mean increment (mm/day)",
+        shrink=0.82,
+    )
+    withheld = np.asarray(dump["station_ids"]).astype(str)[eval_idx]
+    figure.suptitle(
+        f"CPC-v2 BMD/IMERG ingestion — fold {fold}; withheld: "
+        + ", ".join(withheld.tolist()),
+        fontsize=12,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(out_path, dpi=160)
+    plt.close(figure)
 
 
 def verdict(direct: dict) -> str:
@@ -145,7 +276,8 @@ def main() -> None:
         f"- Period: **{scope['start']} to {scope['end']}**",
         f"- Members: **{scope['members']}**; five disjoint BMD spatial folds",
         "- IMERG: **S04, 0.4-degree footprints, stride 1**, raw V07B",
-        "- Simultaneous gradient: spread gauges by 6 cells; do not re-spread IMERG",
+        "- Simultaneous gradient: gauges use spread 6 and gamma 0.01; "
+        "IMERG uses gamma 0.001 without re-spreading",
         f"- Day-block bootstrap: **{args.block_days} days**, "
         f"{args.n_resamples:,} resamples",
         "",
@@ -194,7 +326,8 @@ def main() -> None:
                 "error_corr_cells": 0.75, "bias_correction": False,
             },
             "gauge_configuration": {
-                "spread_cells": 6.0, "prior_temperature": 1.0,
+                "spread_cells": 6.0, "gamma": 1.0e-2,
+                "prior_temperature": 1.0,
             },
             "block_days": args.block_days,
             "n_resamples": args.n_resamples,
@@ -208,10 +341,22 @@ def main() -> None:
     out_json = Path(args.out_json)
     out_markdown = Path(args.out_markdown)
     out_plot = Path(args.out_plot)
-    for path in (out_json, out_markdown, out_plot):
+    fold_plot_dir = Path(args.fold_plot_dir or out_plot.parent / "fold_plots")
+    fold_plot_paths = [
+        fold_plot_dir / f"fold{item['fold']}_diagnostics.png" for item in folds
+    ]
+    output["artifacts"] = {
+        "pooled_plot": str(out_plot),
+        "fold_plots": [str(path) for path in fold_plot_paths],
+    }
+    for path in (out_json, out_markdown, out_plot, fold_plot_dir):
         path.parent.mkdir(parents=True, exist_ok=True)
+    fold_plot_dir.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(output, indent=2, allow_nan=False) + "\n")
     out_markdown.write_text("\n".join(lines) + "\n")
+
+    for item, path in zip(folds, fold_plot_paths):
+        plot_fold_diagnostics(item, names, path)
 
     display_names = [
         "background", "gauges only", "IMERG only", "simultaneous"
@@ -273,6 +418,7 @@ def main() -> None:
     print(f"\n[done] wrote {out_json}")
     print(f"[done] wrote {out_markdown}")
     print(f"[done] wrote {out_plot}")
+    print(f"[done] wrote {len(fold_plot_paths)} fold plots under {fold_plot_dir}")
 
 
 if __name__ == "__main__":
