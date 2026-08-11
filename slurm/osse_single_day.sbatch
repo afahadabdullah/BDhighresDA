@@ -53,6 +53,19 @@ export PYTHONPATH="$PWD/src"
 read -r -a LAUNCH <<< "${BDHIRES_LAUNCH:-}"
 run_step() { "${LAUNCH[@]+"${LAUNCH[@]}"}" "$@"; }
 
+# Attribute failures to hardware. A CUDA "invalid access of peer GPU memory
+# over nvlink or a hardware error" is a driver/device fault, not a Python bug,
+# and without the node name and device state in the log there is no way to tell
+# a bad node from a real regression on the next run.
+echo "node: $(hostname)   job: ${SLURM_JOB_ID:-none}"
+nvidia-smi --query-gpu=index,name,memory.total,memory.used,ecc.errors.uncorrected.volatile.total \
+    --format=csv 2>/dev/null || echo "(nvidia-smi unavailable)"
+# Reduces fragmentation on long multi-variant runs; harmless otherwise.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# Set CUDA_LAUNCH_BLOCKING=1 to make an async CUDA fault report at its true
+# call site. It costs speed, so it is opt-in.
+[[ -n "${CUDA_LAUNCH_BLOCKING:-}" ]] && echo "CUDA_LAUNCH_BLOCKING=$CUDA_LAUNCH_BLOCKING"
+
 DAY="${DAY:-2023-03-19}"
 CKPT="${OSSE_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${OSSE_CONFIG:-configs/da.yaml}"
@@ -94,6 +107,9 @@ for spec in $VARIANTS; do
     if [[ -s "$OUT/ensemble.npz" ]]; then
         echo ">>> $NAME already present, skipping"; continue
     fi
+    # One variant failing must not lose the others: each is an independent
+    # question, and a device fault on one is not evidence about the rest.
+    FAILED=0
     mkdir -p "$OUT"
     echo
     echo ">>> variant $NAME  spread=${SPREAD:-0} gamma=${GAMMA:-config} temp=${TEMP:-config}"
@@ -118,7 +134,13 @@ for spec in $VARIANTS; do
         --dump-network "$NETWORK" --dump-obs-error exact \
         --out-figure "$OUT/osse_overview.png" \
         --out-report "$OUT/osse_report.json" \
-        "${EXTRA[@]+"${EXTRA[@]}"}"
+        "${EXTRA[@]+"${EXTRA[@]}"}" || FAILED=1
+    if [[ "$FAILED" == "1" ]]; then
+        echo "!!! variant $NAME FAILED on $(hostname); continuing with the rest." >&2
+        echo "    If this is a CUDA device fault, retry elsewhere:" >&2
+        echo "      sbatch --exclude=$(hostname) slurm/osse_single_day.sbatch" >&2
+        rm -f "$OUT/ensemble.npz"
+    fi
 done
 
 echo
