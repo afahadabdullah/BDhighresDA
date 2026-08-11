@@ -29,7 +29,7 @@ guided sample costs roughly 2-3x an unguided one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
@@ -138,6 +138,12 @@ def guidance_grad(
             "around the guided sampler call; use torch.no_grad() only for "
             "UNGUIDED sampling, and .detach() the result instead."
         )
+    component_spreads = getattr(H, "component_spread_cells", None)
+    if component_spreads is not None and cfg.spread_cells:
+        raise ValueError(
+            "component-specific and whole-gradient spreading cannot be enabled together"
+        )
+
     with torch.enable_grad():
         x = x_t.detach().requires_grad_(True)
         u = model(x, t, cond)
@@ -146,9 +152,47 @@ def guidance_grad(
             x1_hat = x1_hat * mask + mask_fill * (1.0 - mask)
         if to_precip is not None:
             x1_hat = to_precip(x1_hat)
-        hx = H(x1_hat)
-        ll = obs_log_likelihood(y, hx, R, t, cfg).sum()
-        (grad,) = torch.autograd.grad(ll, x)
+        if component_spreads is None:
+            hx = H(x1_hat)
+            ll = obs_log_likelihood(y, hx, R, t, cfg).sum()
+            (grad,) = torch.autograd.grad(ll, x)
+        else:
+            # A simultaneous likelihood is additive across independent streams.
+            # Differentiate each term through the SAME denoised state so a gauge
+            # gradient can receive its measured spatial spreading without also
+            # blurring an IMERG block-average gradient that is already areal.
+            hx_parts = [operator(x1_hat) for operator in H.ops]
+            sizes = [part.shape[-1] for part in hx_parts]
+            if sum(sizes) != y.shape[-1]:
+                raise ValueError(
+                    f"component sizes {sizes} do not match {y.shape[-1]} observations"
+                )
+            y_parts = torch.split(y, sizes, dim=-1)
+            if R.ndim and R.shape[-1] == sum(sizes):
+                R_parts = torch.split(R, sizes, dim=-1)
+            else:
+                R_parts = (R,) * len(sizes)
+            gamma = cfg.gamma
+            if torch.is_tensor(gamma) and gamma.ndim and gamma.shape[-1] == sum(sizes):
+                gamma_parts = torch.split(gamma, sizes, dim=-1)
+            else:
+                gamma_parts = (gamma,) * len(sizes)
+
+            component_grads = []
+            for index, (hx, yy, rr, gg, spread) in enumerate(
+                zip(hx_parts, y_parts, R_parts, gamma_parts, component_spreads)
+            ):
+                component_cfg = replace(cfg, gamma=gg, spread_cells=0.0)
+                ll = obs_log_likelihood(yy, hx, rr, t, component_cfg).sum()
+                (component_grad,) = torch.autograd.grad(
+                    ll, x, retain_graph=index < len(hx_parts) - 1
+                )
+                if spread > 0.0:
+                    component_grad = spread_gradient(
+                        component_grad, spread, mask=mask
+                    )
+                component_grads.append(component_grad)
+            grad = torch.stack(component_grads).sum(dim=0)
 
     if cfg.spread_cells and cfg.spread_cells > 0.0:
         grad = spread_gradient(grad, cfg.spread_cells, mask=mask)

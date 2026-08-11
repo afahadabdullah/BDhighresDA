@@ -238,11 +238,34 @@ class CompositeObsOperator(torch.nn.Module):
     backward pass through the network regardless of how many observations there
     are, adding the ~4k IMERG footprints costs essentially nothing on top of the
     ~35 gauges.
+
+    ``component_spread_cells`` is optional and deliberately explicit.  When it
+    is present, :func:`bdhires.da.guidance.guidance_grad` differentiates each
+    additive likelihood term separately, applies the requested state-gradient
+    spreading to that component, and sums before clipping.  This permits point
+    gauges to use their measured spread without blurring an already-areal
+    satellite block gradient.  It costs one backward pass per stream.
     """
 
-    def __init__(self, operators: list[torch.nn.Module]):
+    def __init__(
+        self,
+        operators: list[torch.nn.Module],
+        component_spread_cells: list[float] | tuple[float, ...] | None = None,
+    ):
         super().__init__()
         self.ops = torch.nn.ModuleList(operators)
+        if component_spread_cells is not None:
+            if len(component_spread_cells) != len(operators):
+                raise ValueError(
+                    "component_spread_cells must have one value per operator"
+                )
+            if any(float(value) < 0.0 for value in component_spread_cells):
+                raise ValueError("component spread widths must be non-negative")
+            self.component_spread_cells = tuple(
+                float(value) for value in component_spread_cells
+            )
+        else:
+            self.component_spread_cells = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cat([op(x) for op in self.ops], dim=-1)

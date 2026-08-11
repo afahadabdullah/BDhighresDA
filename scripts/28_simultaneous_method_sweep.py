@@ -152,6 +152,7 @@ class Variant:
     prior_temperature: float | None = None  # None -> config value
     n_corrections: int | None = None
     guidance_spread_cells: float | None = None
+    gauge_component_spread_cells: float | None = None
     guidance_gamma: float | None = None
     ensrf_localization_km: float = 200.0
     note: str = ""
@@ -325,6 +326,22 @@ V2_GAUGES_REFINE = [
             note="EnSRF compact support above the core 150 km arm"),
 ]
 
+# CPC-v2 observation-ingestion triplet.  S04 was the earlier v1 ingestion
+# study's primary-score winner: 0.4-degree footprints, stride 1, and a
+# correlation length rescaled to the coarse observation grid.  The factor and
+# correlation length are config/file properties supplied by the launcher.  In
+# the simultaneous arm only the point-gauge component receives spread-6; the
+# IMERG block gradient is already areal and must not be blurred a second time.
+V2_INGESTION_S04 = [
+    V2_GAUGES_CORE[4],
+    Variant("v2_imerg_s04_t100", streams="imerg", prior_temperature=1.0,
+            imerg_stride=1,
+            note="best earlier IMERG scale: 0.4-degree S04"),
+    Variant("v2_simultaneous_s04_t100", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            note="joint likelihood: spread gauges only, preserve S04 footprints"),
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -347,10 +364,11 @@ GROUPS = {
     "v2_gauges_spread": V2_GAUGES_SPREAD,
     "v2_gauges_ensrf": V2_GAUGES_ENSRF,
     "v2_gauges_refine": V2_GAUGES_REFINE,
+    "v2_ingestion_s04": V2_INGESTION_S04,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
-        + V2_GAUGES_REFINE
+        + V2_GAUGES_REFINE + V2_INGESTION_S04
     ),
 }
 
@@ -560,6 +578,21 @@ def main() -> None:
         return
 
     variants = resolve_variants(args.group, args.variants)
+    for variant in variants:
+        if (
+            variant.gauge_component_spread_cells is not None
+            and variant.streams != "both"
+        ):
+            raise ValueError(
+                f"{variant.name}: gauge-component spreading requires both streams"
+            )
+        if (
+            variant.gauge_component_spread_cells is not None
+            and variant.guidance_spread_cells not in (None, 0.0)
+        ):
+            raise ValueError(
+                f"{variant.name}: choose component or whole-gradient spreading, not both"
+            )
     uses_imerg = any(variant.uses_imerg for variant in variants)
     if uses_imerg and not args.imerg:
         raise ValueError(
@@ -897,6 +930,14 @@ def main() -> None:
                 keep_now = (
                     keep & np.isfinite(satellite_observation) & np.isfinite(satellite_variance)
                 )
+                if not keep_now.any():
+                    raise RuntimeError(
+                        f"{variant.name}: no finite satellite observations on "
+                        f"{selected_times[day_position].astype('datetime64[D]')}"
+                    )
+                diagnostics.setdefault(variant.name, {}).setdefault(
+                    "satellite_valid_count", []
+                ).append(int(keep_now.sum()))
                 satellite_observation[~keep_now] = np.nan
                 satellite_variance[~keep_now] = 1.0
                 satellite_R = torch.from_numpy(satellite_variance).to(device)
@@ -932,7 +973,15 @@ def main() -> None:
                     satellite_R.shape, gamma / variant.imerg_weight, device=device
                 )
             else:
-                operator = combined_operator
+                if variant.gauge_component_spread_cells is None:
+                    operator = combined_operator
+                else:
+                    operator = CompositeObsOperator(
+                        [gauge_operator, satellite_operator],
+                        component_spread_cells=[
+                            variant.gauge_component_spread_cells, 0.0
+                        ],
+                    ).to(device)
                 y = torch.cat([gauge_y, satellite_y], dim=2)
                 R = torch.cat([gauge_R / variant.gauge_weight, satellite_R])
                 gamma_vector = torch.cat(
@@ -1048,6 +1097,8 @@ def main() -> None:
         analysis_mean = np.nanmean(members, axis=1)
         entry["domain_mean_mm"] = float(np.nanmean(analysis_mean))
         entry["wet_day_fraction"] = float(np.nanmean(analysis_mean >= 1.0))
+        increment = analysis_mean - background_mean
+        entry["max_abs_increment_mm"] = float(np.nanmax(np.abs(increment)))
         values, counts = increment_locality(
             analysis_mean, background_mean, distance_km, valid, locality_edges
         )
@@ -1063,6 +1114,15 @@ def main() -> None:
         }
         entry["spec"] = asdict(variant)
         results[variant.name] = entry
+        if variant.uses_imerg and not np.isfinite(members[:, :, valid]).all():
+            raise FloatingPointError(
+                f"{variant.name}: satellite-enabled analysis contains non-finite land values"
+            )
+        if variant.uses_imerg and entry["max_abs_increment_mm"] < 1.0e-6:
+            raise RuntimeError(
+                f"{variant.name}: satellite-enabled analysis is numerically identical "
+                "to the background; guidance is not using its observations"
+            )
         print(
             f"[score] {variant.name:34s} CRPS {entry.get('crps_mm', float('nan')):6.3f}  "
             f"bias {entry.get('mean_bias_mm', float('nan')):+7.3f}  "
@@ -1105,6 +1165,15 @@ def main() -> None:
         "variants": results,
         "ensrf_diagnostics": {
             name: payload.get("ensrf", []) for name, payload in diagnostics.items()
+        },
+        "satellite_diagnostics": {
+            name: {
+                "valid_observations_by_day": payload.get(
+                    "satellite_valid_count", []
+                )
+            }
+            for name, payload in diagnostics.items()
+            if payload.get("satellite_valid_count")
         },
     }
 

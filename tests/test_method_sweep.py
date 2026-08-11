@@ -46,6 +46,7 @@ def _load(stem: str):
 qm = _load("27_fit_imerg_bias_correction")
 summary = _load("29_summarize_method_sweep")
 v2_gauge_summary = _load("49_summarize_v2_gauge_sweep")
+v2_ingestion_summary = _load("50_summarize_v2_ingestion_triplet")
 
 
 # ---------------------------------------------------------------- quantile map
@@ -403,6 +404,32 @@ def test_v2_refinement_does_not_repeat_core_analysis_arms():
     core = {variant.name for variant in sweep.GROUPS["v2_gauges_core"]}
     refinement = {variant.name for variant in sweep.GROUPS["v2_gauges_refine"]}
     assert core.isdisjoint(refinement)
+
+
+@needs_sweep
+def test_v2_ingestion_triplet_has_exact_selected_streams():
+    variants = sweep.GROUPS["v2_ingestion_s04"]
+    assert [variant.streams for variant in variants] == ["gauges", "imerg", "both"]
+    gauges, imerg, simultaneous = variants
+    assert gauges.guidance_spread_cells == 6.0
+    assert gauges.prior_temperature == 1.0
+    assert imerg.imerg_stride == 1 and imerg.guidance_spread_cells is None
+    assert simultaneous.imerg_stride == 1
+    assert simultaneous.gauge_component_spread_cells == 6.0
+    assert simultaneous.guidance_spread_cells is None
+
+
+def test_ingestion_footprints_expand_exactly_to_model_grid():
+    coarse = np.arange(2 * 3 * 4).reshape(2, 3, 4)
+    expanded = v2_ingestion_summary.upsample_footprints(coarse, (6, 8))
+    assert expanded.shape == (2, 6, 8)
+    assert np.all(expanded[:, 0:2, 0:2] == coarse[:, 0, 0][:, None, None])
+
+
+def test_ingestion_verdict_uses_whole_interval():
+    assert v2_ingestion_summary.verdict({"ci_low": 0.1, "ci_high": 0.5}) == "satellite_helps"
+    assert v2_ingestion_summary.verdict({"ci_low": -0.5, "ci_high": -0.1}) == "satellite_hurts"
+    assert v2_ingestion_summary.verdict({"ci_low": -0.1, "ci_high": 0.2}) == "unresolved"
 
 
 @needs_sweep
