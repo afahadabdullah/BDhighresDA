@@ -23,10 +23,21 @@ pseudo-IMERG only, and simultaneous. Scoring is at withheld pseudo-gauges,
 with gridded diagnostics at the full field, at the $0.1^\circ$ footprints, and
 on the subgrid residual left after removing each field's own footprint mean.
 
-Because the observations are drawn from the nature run itself, the
-pseudo-satellite is close to ideal information: unbiased block means of the
-truth, on a grid the operator represents exactly. It should be easy to
-assimilate.
+Both observation types are drawn from the nature run and then perturbed. Under
+\texttt{--obs-error realistic}, which is what the arms below use, gauges receive
+\emph{white} noise of standard deviation
+$\sqrt{\sigma_{\mathrm{obs}}^2 + \mathrm{rep}^2} = \sqrt{0.10^2 + 0.25^2} =
+0.269$ in transformed units, and the pseudo-satellite receives a
+\emph{spatially correlated} error described in
+Section~\ref{sec:pseudo-satellite-defect} below. Under
+\texttt{--obs-error exact} neither is perturbed at all: observed values are the
+CHIRPS pseudo-data unchanged, and $R = 0.05$ is a numerical regulariser, since
+the likelihood variance $V(t) = R + \gamma(1-t)^2/t^2$ is singular as
+$t \to 1$.
+
+The distinction matters for reading the table. These are \emph{not} perfect
+observations, and the gauge arm's $+14\%$ is skill obtained despite a
+realistic error, not an upper bound.
 
 \subsection{The numbers}
 
@@ -117,47 +128,86 @@ exactly this: near-preserved correlation at aggregate scales, with a measurable
 loss at points where intensities vary most. That is the form the leading
 hypothesis below takes.
 
-\subsection{Leading hypothesis}
+\subsection{Cause, established from the code}
 
-The precipitation transform is nonlinear, so
-\[
-  T\!\left(\frac{1}{n}\sum_i x_i\right) \;\neq\; \frac{1}{n}\sum_i T(x_i).
-\]
-The assimilation uses \texttt{PhysicalBlockAverageObsOperator}, which averages
-in \emph{physical} space and transforms afterwards. If the pseudo-observations
-are instead constructed by averaging \emph{transformed} CHIRPS, then every
-footprint is compared against a quantity the operator never predicts, and the
-discrepancy is a function of the within-block intensity distribution: near zero
-for uniform light rain, large for heavy or spatially variable rain. That is an
-intensity-dependent distortion of exactly the form the previous paragraph
-requires, and it would be invisible in any check that only verified the
-footprint geometry.
+An earlier draft of this section proposed that the pseudo-observations were
+built by averaging \emph{transformed} CHIRPS while the operator averages in
+physical space, making $T(\overline{x})$ and $\overline{T(x)}$ inconsistent.
+\textbf{That hypothesis is wrong} and is recorded here only so it is not
+proposed again. \texttt{scripts/10\_osse.py} computes the pseudo-satellite truth
+as \texttt{block\_mean\_mm(truth, \ldots)} followed by
+\texttt{transform.forward(\ldots)} --- a physical-space mean, then the transform
+--- which is exactly what \texttt{PhysicalBlockAverageObsOperator} predicts. The
+two are consistent.
 
-Two weaker alternatives, kept because they have not been excluded:
+The actual cause is that \textbf{the correlation inflation applied to $R$ is
+also used to manufacture the observation error}. In sequence:
 
 \begin{enumerate}
-  \item \textbf{Units.} A pseudo-observation supplied in mm\,day$^{-1}$ where the
-    likelihood expects transformed units, or the reverse. This predicts a much
-    larger correlation loss than observed and is therefore unlikely, but it is
-    cheap to rule out.
-  \item \textbf{Observation error too small.} If $R$ for the pseudo-satellite is
-    set from a near-zero retrieval error --- reasonable, since the values come
-    from the truth --- while a transform mismatch introduces a large systematic
-    discrepancy, the analysis would be forced hard onto wrong values. This is
-    not an independent cause so much as the amplifier that turns a modest
-    inconsistency into a $146\%$ RMSE loss.
+  \item $R$ for the satellite block is built from the configured
+    $\sigma_{\mathrm{obs}} = 0.35$ and representativeness $0.10$, giving a
+    standard deviation of $\sqrt{0.35^2 + 0.10^2} = 0.364$ in transformed units.
+  \item It is then inflated in place by
+    $\max\!\left(1,\; 2\pi(\ell/s)^2\right)$ with correlation length
+    $\ell = 3$ cells and stride $s = 3$, i.e.\ by $6.28\times$ in variance:
+\begin{verbatim}
+if use_satellite and satellite_r_inflation != 1.0:
+    R[len(active_assim_idx):] *= satellite_r_inflation
+\end{verbatim}
+  \item The pseudo-IMERG product is then \emph{generated} by drawing from that
+    same inflated $R$, with spatial correlation imposed:
+\begin{verbatim}
+satellite_observed = perturb_observations(
+    satellite_truth_transformed, satellite_R, 1, corr_blocks=[...])
+\end{verbatim}
 \end{enumerate}
 
-\subsection{The test that discriminates}
+The synthetic satellite is therefore corrupted with a \emph{spatially
+correlated} error of standard deviation $0.364 \times \sqrt{6.28} = 0.91$
+transformed units, against the gauges' \emph{white} $0.269$. The pseudo-IMERG
+product carries roughly $3.4\times$ the gauge error, and because that error is
+correlated over $\sim\!30$~km it does not average away across footprints.
 
-For a sample of days, compute both $T(\overline{x})$ and $\overline{T(x)}$ over
-each $0.1^\circ$ block of CHIRPS and plot the difference against block-mean
-intensity. The hypothesis predicts a difference that is near zero for dry and
-light blocks and grows systematically with intensity and with within-block
-variance. If instead the difference is negligible at all intensities, the
-transform is not the cause and the units and $R$ paths should be examined next.
+This is a design error, not a tuning choice. The correlation inflation exists to
+\emph{down-weight} observations whose errors are not independent. Using it to
+build the observation means that asking for a more conservative $R$ makes the
+synthetic product worse, and the two effects are then counted twice: once in
+the data and once in the weight. An OSSE should generate the observation with
+its \emph{true} error and assimilate it under whatever $R$ is being tested.
 
-This requires no GPU time and no model run.
+\paragraph{This explains every feature of Table~\ref{tab:pseudo-satellite}.}
+A large correlated error displaces whole regions coherently, which destroys
+RMSE while leaving the broad pattern --- and hence $r$ --- largely intact. And
+it explains the one anomaly a magnitude-error story could not: subtracting each
+field's own $0.1^\circ$ footprint mean removes most of a footprint-scale
+correlated error, so the \emph{subgrid} residual is comparatively clean and its
+correlation \emph{improves} ($+0.038$), while everything at and above footprint
+scale collapses.
+
+\paragraph{The same mechanism, now seen twice.}
+This is the $\sqrt{R}$ pathology already established on real data, where stride
+1 at $0.1^\circ$ degraded CRPS by $+2.388~[+1.824, +2.956]$ because
+\texttt{perturb\_observations} draws with $\mathrm{sd} = \sqrt{R}$ and a
+$56.5\times$ inflation therefore multiplied the perturbation amplitude by
+$7.5$. It has now appeared in two independent code paths --- once when
+perturbing ensemble members, once when constructing a synthetic observation ---
+which makes it a property of how $R$ is used throughout this system rather than
+a local slip.
+
+\subsection{The fix, and how to confirm it}
+
+Generate the pseudo-observation from the \emph{uninflated} error and keep the
+inflation for the assimilation weight only. Concretely, pass the pre-inflation
+$R$ to \texttt{perturb\_observations} at the product-generation step while
+leaving the inflated $R$ in the likelihood.
+
+The confirmation is cheap and needs no GPU: re-run the satellite arm with
+\texttt{--obs-error exact}, which bypasses \texttt{perturb\_observations}
+entirely (\texttt{satellite\_observed = satellite\_truth\_transformed.copy()})
+and is already guarded by an invariant check against the same-day CHIRPS block
+mean. If the exact satellite arm improves on its background while the realistic
+one does not, the observation-generation path is confirmed as the cause and the
+operator, geometry and likelihood are all exonerated.
 
 \subsection{Consequence for the paper}
 

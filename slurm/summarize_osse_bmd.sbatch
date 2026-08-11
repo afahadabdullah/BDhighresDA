@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=bdhires-osse-gauges-figs
+#SBATCH --job-name=bdhires-osse-bmd-figs
 #SBATCH --partition=grace-cpuonly
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,8 +8,8 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%A.out
 
-# Figures for the gauges-only OSSE. CPU only: everything here reads the NPZ and
-# JSON the GPU array already wrote.
+# Figures for the BMD-geometry OSSE. CPU only: everything here reads the NPZ
+# and JSON the GPU array already wrote.
 
 set -euo pipefail
 module purge 2>/dev/null || true
@@ -22,9 +22,9 @@ unset PYTHONPATH
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$PWD/src"
 
-ROOT="${OSSE_GAUGE_ROOT:-data/processed/osse_gauges}"
-PRIMARY="${OSSE_GAUGE_PRIMARY:-gauges_realistic_bmd}"
-OUT="${OSSE_GAUGE_FIGURES:-docs/paper_figures_osse_gauges}"
+ROOT="${OSSE_BMD_ROOT:-data/processed/osse_bmd}"
+PRIMARY="${OSSE_BMD_PRIMARY:-simultaneous_exact_bmd}"
+OUT="${OSSE_BMD_FIGURES:-docs/paper_figures_osse}"
 
 # The tuning arm holds sixty configurations, not one, so it has no
 # downscaling.json and discover_arms will not pick it up. That is correct: it
@@ -45,7 +45,7 @@ echo "============================================================"
 echo " Gauges-only OSSE figures: $OUT"
 echo " Data behind every panel:  $OUT/data/*.csv"
 echo
-echo " The 60-combination tuning matrix is separate:"
+echo " The 60-combination tuning matrix, if arm 6 was run, is separate:"
 echo "   $ROOT/gauges_tune_bmd/osse_report.json"
 echo " Look for whether sigma_obs = 0.40 is near-optimal against a known"
 echo " truth. On real data it was among the worst, and the claim was that the"
