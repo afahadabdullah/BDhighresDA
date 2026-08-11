@@ -178,6 +178,16 @@ def spread_gradient(
     """
     if sigma_cells <= 0.0:
         return grad
+    # A convolution turns ONE non-finite element into non-finite EVERYWHERE
+    # within the kernel, and after two separable passes that is the whole
+    # domain. Satellite arms returned an analysis that was 100% NaN while the
+    # background was untouched, which is this failure exactly: a sharp
+    # likelihood over a few hundred block observations at R ~ 0.0025 produces
+    # an overflow at one footprint, and the blur then erases the field.
+    # Zeroing means "no correction here" -- the honest reading of a gradient
+    # that could not be evaluated -- rather than destroying every other cell's.
+    if not torch.isfinite(grad).all():
+        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
     radius = int(max(1, round(3.0 * float(sigma_cells))))
     offsets = torch.arange(
         -radius, radius + 1, device=grad.device, dtype=grad.dtype
