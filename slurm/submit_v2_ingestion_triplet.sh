@@ -35,16 +35,26 @@ for required in "$BMD_CKPT" "$BMD_CONFIG" "$BMD_STATIONS"; do
 done
 [[ -d "$BMD_DATA_DIR" ]] || { echo "ERROR: missing $BMD_DATA_DIR"; exit 1; }
 
-if [[ ! -s "$NATIVE" ]]; then
-    PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u scripts/43_subset_prepared_imerg.py \
-        --input "$ARCHIVE_GLOB" \
-        --start "$V2_INGEST_START" --end "$V2_INGEST_END" \
-        --out "$NATIVE" --report "${NATIVE%.nc}_qc.json"
-fi
-if [[ ! -s "$V2_INGEST_IMERG" ]]; then
-    PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u scripts/44_coarsen_imerg_observations.py \
-        --input "$NATIVE" --factor 8 --out "$V2_INGEST_IMERG"
-fi
+prepare_imerg_window() {
+    local window_start="$1"
+    local window_end="$2"
+    local native_out="$3"
+    local coarse_out="$4"
+
+    if [[ ! -s "$native_out" ]]; then
+        PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u scripts/43_subset_prepared_imerg.py \
+            --input "$ARCHIVE_GLOB" \
+            --start "$window_start" --end "$window_end" \
+            --out "$native_out" --report "${native_out%.nc}_qc.json"
+    fi
+    if [[ ! -s "$coarse_out" ]]; then
+        PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u scripts/44_coarsen_imerg_observations.py \
+            --input "$native_out" --factor 8 --out "$coarse_out"
+    fi
+}
+
+prepare_imerg_window \
+    "$V2_INGEST_START" "$V2_INGEST_END" "$NATIVE" "$V2_INGEST_IMERG"
 
 echo "Submitting CPC-v2 BMD/IMERG ingestion triplet"
 echo "  period: $V2_INGEST_START through $V2_INGEST_END"
@@ -73,9 +83,20 @@ if [[ "${V2_INGEST_AUTO_PREFLIGHT:-1}" == "1" ]]; then
     PREFLIGHT_ROOT="$V2_INGEST_ROOT/preflight"
     PREFLIGHT_END="${V2_INGEST_PREFLIGHT_END:-2022-05-02}"
     PREFLIGHT_MEMBERS="${V2_INGEST_PREFLIGHT_MEMBERS:-30}"
+    if [[ "$PREFLIGHT_END" < "$V2_INGEST_START" || "$PREFLIGHT_END" > "$V2_INGEST_END" ]]; then
+        echo "ERROR: preflight end $PREFLIGHT_END is outside the full run window"
+        exit 1
+    fi
+    PREFLIGHT_END_CLEAN="${PREFLIGHT_END//-/}"
+    PREFLIGHT_NATIVE="$SHARED_DIR/imerg_aligned_${START_CLEAN}_${PREFLIGHT_END_CLEAN}.nc"
+    PREFLIGHT_IMERG="$SHARED_DIR/imerg_0p4deg_${START_CLEAN}_${PREFLIGHT_END_CLEAN}.nc"
+    prepare_imerg_window \
+        "$V2_INGEST_START" "$PREFLIGHT_END" \
+        "$PREFLIGHT_NATIVE" "$PREFLIGHT_IMERG"
     PREFLIGHT_EXPORT="ALL,V2_INGEST_END=$PREFLIGHT_END"
     PREFLIGHT_EXPORT+=",V2_INGEST_MEMBERS=$PREFLIGHT_MEMBERS"
     PREFLIGHT_EXPORT+=",V2_INGEST_ROOT=$PREFLIGHT_ROOT"
+    PREFLIGHT_EXPORT+=",V2_INGEST_IMERG=$PREFLIGHT_IMERG"
     preflight_result="$(sbatch --parsable "$@" --array=0 \
         --export="$PREFLIGHT_EXPORT" \
         slurm/v2_ingestion_triplet.sbatch)"
@@ -94,6 +115,7 @@ summary_job="${summary_result%%;*}"
 
 if [[ -n "$preflight_job" ]]; then
     echo "submitted automatic fold-0 preflight: $preflight_job"
+    echo "preflight IMERG: $PREFLIGHT_IMERG"
 fi
 echo "submitted five-fold GPU array: $array_job"
 echo "submitted dependent pooled summary: $summary_job"

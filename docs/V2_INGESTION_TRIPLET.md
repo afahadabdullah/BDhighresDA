@@ -95,8 +95,11 @@ bash slurm/submit_v2_ingestion_triplet.sh
 The launcher submits a five-fold GPU array and a dependent CPU summary. Outputs
 are isolated at the path below. By default it first reproduces fold 0 through
 May 2 with all 30 members—the exact case that previously failed—and holds the
-full array on an `afterok` dependency. Set `V2_INGEST_AUTO_PREFLIGHT=0` only
-after an identical commit has already passed that preflight.
+full array on an `afterok` dependency. The preflight receives a dedicated
+May 1--2 S04 file; it does not reuse the May 1--10 file because the loader
+requires the observation dates to match the requested dates exactly. Set
+`V2_INGEST_AUTO_PREFLIGHT=0` only after an identical commit has already passed
+that preflight.
 
 ```text
 preflight -> five-fold array -> pooled summary
