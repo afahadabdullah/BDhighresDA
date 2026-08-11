@@ -60,6 +60,11 @@ END="${BMD_END:-2018-05-31}"
 BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:-0}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
+GAUGES_ONLY="${BMD_GAUGES_ONLY:-0}"
+if [[ "$GAUGES_ONLY" != "0" && "$GAUGES_ONLY" != "1" ]]; then
+    echo "ERROR: BMD_GAUGES_ONLY must be 0 or 1, got: $GAUGES_ONLY" >&2
+    exit 1
+fi
 # BMD_SET carries SEMICOLON-separated config overrides through to scripts/15 as
 # --set, so a multi-year run can use the tuned configuration without editing the
 # YAML. Editing it between submissions is how three arms of the 5-day sweep
@@ -101,21 +106,32 @@ EVALUATION="${BMD_EVALUATION:-data/processed/bmd_imerg_may2018_evaluation.json}"
 for required in "$RAINFALL" "$STATIONS" "$CKPT" "$CONFIG"; do
     [[ -f "$required" ]] || { echo "ERROR: required file not found: $required"; exit 1; }
 done
-[[ -d "$IMERG_DIR" ]] || { echo "ERROR: IMERG directory not found: $IMERG_DIR"; exit 1; }
+if [[ "$GAUGES_ONLY" == "0" ]]; then
+    [[ -d "$IMERG_DIR" ]] || { echo "ERROR: IMERG directory not found: $IMERG_DIR"; exit 1; }
+fi
 
 echo "BMD rainfall: $RAINFALL"
 echo "BMD stations: $STATIONS"
-echo "IMERG source directory: $IMERG_DIR"
-echo "IMERG source frequency: $IMERG_SOURCE_FREQUENCY"
+if [[ "$GAUGES_ONLY" == "1" ]]; then
+    echo "Observation mode: BMD gauges only (IMERG preparation and arms disabled)"
+else
+    echo "IMERG source directory: $IMERG_DIR"
+    echo "IMERG source frequency: $IMERG_SOURCE_FREQUENCY"
+fi
 echo "BMD accumulation end: ${BMD_ACCUMULATION_END_HOUR_UTC}:00 UTC"
 echo "Period: $START to $END"
 echo "Checkpoint background day offset: ${BACKGROUND_DAY_OFFSET}"
 echo "Checkpoint: $CKPT"
-echo "Members: $MEMBERS   Withhold: $WITHHOLD   IMERG min count: $IMERG_MIN_COUNT"
+echo "Members: $MEMBERS   Withhold: $WITHHOLD"
 echo "Holdout fold: $HOLDOUT_FOLD of $HOLDOUT_FOLDS"
-echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
+if [[ "$GAUGES_ONLY" == "0" ]]; then
+    echo "IMERG minimum half-hourly count: $IMERG_MIN_COUNT"
+    echo "Controlled IMERG: stride $IMERG_STRIDE   extra R $IMERG_R_MULTIPLIER"
+fi
 echo "NOTE: dates through 2018 are in checkpoint training; such runs are process tests, not final skill."
-echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
+if [[ "$GAUGES_ONLY" == "0" ]]; then
+    echo "NOTE: native IMERG V07B is not bias-corrected in this bounded experiment."
+fi
 
 if [[ "${BMD_REUSE_CONVERTED:-0}" == "1" || ( "$RAINFALL" == "$DAILY" && -s "$DAILY" ) ]]; then
     echo "Reusing prepared canonical station observations: $DAILY"
@@ -139,40 +155,44 @@ fi
 #
 # A missing QC sidecar is worth a warning, not a rebuild: the data file is what
 # the assimilation reads.
-if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" ]]; then
-    echo "Reusing validated IMERG preparation: $IMERG_PREPARED"
-    if [[ ! -s "$IMERG_QC" ]]; then
-        echo "    NOTE: no QC sidecar at $IMERG_QC; the data file is reused as-is."
+ASSIMILATION_SOURCE_ARGS=()
+if [[ "$GAUGES_ONLY" == "0" ]]; then
+    if [[ "$IMERG_REUSE_PREPARED" == "1" && -s "$IMERG_PREPARED" ]]; then
+        echo "Reusing validated IMERG preparation: $IMERG_PREPARED"
+        if [[ ! -s "$IMERG_QC" ]]; then
+            echo "    NOTE: no QC sidecar at $IMERG_QC; the data file is reused as-is."
+        fi
+    else
+        # Never regenerate a file that lives outside this task's own output root:
+        # concurrent array tasks would race on it. ROOT is exported by
+        # bmd_imerg_rotated_folds_eval.sbatch; when this script is run directly it
+        # is unset, and the guard is then skipped rather than aborting under set -u.
+        case "$IMERG_PREPARED" in
+            "${ROOT:-__none__}"/*) : ;;
+            *) if [[ -z "${ROOT:-}" ]]; then : ; else
+                   echo "ERROR: refusing to (re)generate $IMERG_PREPARED, which is"
+                   echo "  outside this task's root $ROOT. Concurrent array tasks"
+                   echo "  would race to write it. Either set IMERG_REUSE_PREPARED=1"
+                   echo "  so it is reused, or point IMERG_PREPARED inside \$ROOT."
+                   exit 1
+               fi ;;
+        esac
+        EXTRA_FLAGS=()
+        if [[ "${IMERG_ALLOW_MISSING:-0}" == "1" ]]; then
+            EXTRA_FLAGS+=("--allow-missing")
+        fi
+        run_step "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
+            --input "$IMERG_DIR" \
+            --source-frequency "$IMERG_SOURCE_FREQUENCY" \
+            --start "$START" \
+            --end "$END" \
+            --min-count "$IMERG_MIN_COUNT" \
+            --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
+            --out "$IMERG_PREPARED" \
+            --report "$IMERG_QC" \
+            "${EXTRA_FLAGS[@]}"
     fi
-else
-    # Never regenerate a file that lives outside this task's own output root:
-    # concurrent array tasks would race on it. ROOT is exported by
-    # bmd_imerg_rotated_folds_eval.sbatch; when this script is run directly it
-    # is unset, and the guard is then skipped rather than aborting under set -u.
-    case "$IMERG_PREPARED" in
-        "${ROOT:-__none__}"/*) : ;;
-        *) if [[ -z "${ROOT:-}" ]]; then : ; else
-               echo "ERROR: refusing to (re)generate $IMERG_PREPARED, which is"
-               echo "  outside this task's root $ROOT. Concurrent array tasks"
-               echo "  would race to write it. Either set IMERG_REUSE_PREPARED=1"
-               echo "  so it is reused, or point IMERG_PREPARED inside \$ROOT."
-               exit 1
-           fi ;;
-    esac
-    EXTRA_FLAGS=()
-    if [[ "${IMERG_ALLOW_MISSING:-0}" == "1" ]]; then
-        EXTRA_FLAGS+=("--allow-missing")
-    fi
-    run_step "$PYTHON_BIN" -u scripts/08_prepare_imerg_observations.py \
-        --input "$IMERG_DIR" \
-        --source-frequency "$IMERG_SOURCE_FREQUENCY" \
-        --start "$START" \
-        --end "$END" \
-        --min-count "$IMERG_MIN_COUNT" \
-        --accumulation-end-hour-utc "$BMD_ACCUMULATION_END_HOUR_UTC" \
-        --out "$IMERG_PREPARED" \
-        --report "$IMERG_QC" \
-        "${EXTRA_FLAGS[@]}"
+    ASSIMILATION_SOURCE_ARGS+=(--imerg "$IMERG_PREPARED")
 fi
 
 
@@ -180,7 +200,7 @@ run_step "$PYTHON_BIN" -u scripts/15_bmd_month_example.py \
     --config "$CONFIG" \
     --ckpt "$CKPT" \
     --stations "$DAILY" \
-    --imerg "$IMERG_PREPARED" \
+    "${ASSIMILATION_SOURCE_ARGS[@]+"${ASSIMILATION_SOURCE_ARGS[@]}"}" \
     --start "$START" \
     --end "$END" \
     --background-day-offset "$BACKGROUND_DAY_OFFSET" \
@@ -213,9 +233,15 @@ if ! run_step "$PYTHON_BIN" -u scripts/16_plot_bmd_month_example.py \
     echo "  are what scripts/42 and 45 read. Continuing so the summary runs." >&2
 fi
 
-echo "BMD + IMERG experiment complete for $START through $END."
+if [[ "$GAUGES_ONLY" == "1" ]]; then
+    echo "BMD gauges-only experiment complete for $START through $END."
+else
+    echo "BMD + IMERG experiment complete for $START through $END."
+fi
 echo "Metrics: $REPORT"
-echo "IMERG QC: $IMERG_QC"
+if [[ "$GAUGES_ONLY" == "0" ]]; then
+    echo "IMERG QC: $IMERG_QC"
+fi
 echo "Diagnostics: $DIAGNOSTICS"
 echo "Rainfall-event evaluation: $EVENTS"
 echo "Station-collocated product comparison: $STATION_COMPARISON"

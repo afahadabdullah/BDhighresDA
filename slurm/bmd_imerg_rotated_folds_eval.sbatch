@@ -37,6 +37,7 @@ export BACKGROUND_DAY_OFFSET="-1"
 export BMD_HOLDOUT_FOLDS="5"
 export BMD_HOLDOUT_FOLD="$FOLD"
 export BMD_MEMBERS="${BMD_MEMBERS:-16}"
+export BMD_GAUGES_ONLY="${BMD_GAUGES_ONLY:-0}"
 export BMD_RAINFALL="${PREFIX}_bmd.csv"
 export BMD_STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 START_CLEAN="${BMD_START//-/}"
@@ -86,8 +87,16 @@ if [[ ! -s "$BMD_DAILY" ]]; then
         --report "$BMD_QC_REPORT"
 fi
 
-echo "Real BMD + IMERG evaluation, spatial fold $((FOLD + 1))/5"
+if [[ "$BMD_GAUGES_ONLY" == "1" ]]; then
+    echo "Real BMD gauges-only evaluation, spatial fold $((FOLD + 1))/5"
+else
+    echo "Real BMD + IMERG evaluation, spatial fold $((FOLD + 1))/5"
+fi
 echo "Period: $BMD_START to $BMD_END ($LABEL)"
 echo "Members: $BMD_MEMBERS"
-echo "Products: background | gauges only | IMERG only | simultaneous"
+if [[ "$BMD_GAUGES_ONLY" == "1" ]]; then
+    echo "Products: checkpoint background | BMD-gauge analysis"
+else
+    echo "Products: background | gauges only | IMERG only | simultaneous"
+fi
 exec bash slurm/bmd_imerg_example.sbatch

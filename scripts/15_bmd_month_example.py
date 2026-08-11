@@ -1139,6 +1139,9 @@ def main() -> None:
         # indistinguishable from one where it did, and the only clue is that two
         # arms score identically. Recorded as fixed-width Unicode to keep the NPZ
         # loadable with allow_pickle=False.
+        checkpoint=np.asarray(str(args.ckpt)),
+        checkpoint_data=np.asarray(data_zarr),
+        checkpoint_stats=np.asarray(data_stats),
         config_path=np.asarray(str(args.config)),
         config_overrides=np.asarray(config_overrides, dtype="U200"),
         config_effective=np.asarray(json.dumps({
