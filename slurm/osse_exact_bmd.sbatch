@@ -54,6 +54,10 @@
 #   8  gauges_tune_exact_nbr     the same, sweeping the ingestion settings
 #   9  gauges_exact_spread_ref   exact gauges, ISOLATED holdout, kept as the
 #                                honest comparator for arm 7
+#   --- guidance spreading, the bullseye fix (ARRAY=10-12) ------------------
+#  10  gauges_exact_nbr_s6       spread  6 cells (~33 km)
+#  11  gauges_exact_nbr_s12      spread 12 cells (~66 km)
+#  12  gauges_exact_nbr_s20      spread 20 cells (~110 km)
 #
 # WHY ARMS 7-9
 # spread_holdout seeds at the station farthest from the centroid and then
@@ -154,6 +158,9 @@ case "$SLURM_ARRAY_TASK_ID" in
     7) SET=("gauges_exact_nbr"           "gauges"      "exact"     1 0 0) ;;
     8) SET=("gauges_tune_exact_nbr"      "gauges"      "exact"     1 0 1) ;;
     9) SET=("gauges_exact_spread_ref"    "gauges"      "exact"     1 0 0) ;;
+    10) SET=("gauges_exact_nbr_s6"       "gauges"      "exact"     1 0 0) ;;
+    11) SET=("gauges_exact_nbr_s12"      "gauges"      "exact"     1 0 0) ;;
+    12) SET=("gauges_exact_nbr_s20"      "gauges"      "exact"     1 0 0) ;;
     *) echo "ERROR: unknown task $SLURM_ARRAY_TASK_ID"; exit 2 ;;
 esac
 LABEL="${SET[0]}"; MODE="${SET[1]}"; ERROR="${SET[2]}"
@@ -163,13 +170,27 @@ STRIDE="${SET[3]}"; CORRCTL="${SET[4]}"; TUNE="${SET[5]}"
 # unrestricted comparator that keeps arm 7 honest.
 HOLDOUT="${OSSE_BMD_HOLDOUT:-spread}"
 case "$SLURM_ARRAY_TASK_ID" in
-    7|8) HOLDOUT="neighbored" ;;
+    7|8|10|11|12) HOLDOUT="neighbored" ;;
+esac
+
+# Gaussian spreading of the guidance gradient, in grid cells (~5.5 km each).
+# Arms 10-12 are the reason this exists: the OSSE analyses put bright spots on
+# individual gauges and left the field between them untouched, because a
+# bilinear operator's gradient reaches only 4 cells and the network's own
+# Jacobian carries it no further. gamma, sigma_obs and prior_temperature all
+# scale that correction; none of them gives it spatial extent, so the tuning
+# arm cannot fix this and a separate axis is needed.
+SPREAD_CELLS="${OSSE_BMD_SPREAD_CELLS:-0}"
+case "$SLURM_ARRAY_TASK_ID" in
+    10) SPREAD_CELLS=6 ;;    # ~33 km
+    11) SPREAD_CELLS=12 ;;   # ~66 km
+    12) SPREAD_CELLS=20 ;;   # ~110 km, approaching the 146 km variogram range
 esac
 NEIGHBOR_KM="${OSSE_BMD_NEIGHBOR_KM:-75}"
 MAX_GAP_DEG="${OSSE_BMD_MAX_GAP_DEG:-200}"
 
 case "$SLURM_ARRAY_TASK_ID" in
-    7|8|9) MEMBERS="$MEMBERS_INGESTION" ;;
+    7|8|9|10|11|12) MEMBERS="$MEMBERS_INGESTION" ;;
 esac
 
 OUT="$ROOT/$LABEL"
@@ -181,6 +202,7 @@ FOOTPRINT_DEG="$(awk -v f="$FACTOR" 'BEGIN{printf "%.2f", f*0.05}')"
 echo "  network=$NETWORK ($CATALOG) footprint factor=$FACTOR (= $FOOTPRINT_DEG deg)"
 echo "  window=$START..$END days=$DAYS members=$MEMBERS withhold=$WITHHOLD seed=$SEED"
 echo "  holdout=$HOLDOUT (neighbour <= ${NEIGHBOR_KM} km, bearing gap <= ${MAX_GAP_DEG} deg)"
+echo "  guidance spread=${SPREAD_CELLS} cells (~$(awk -v c="$SPREAD_CELLS" 'BEGIN{printf "%.0f", c*5.5}') km)"
 if [[ "$TUNE" == "1" ]]; then
     COMBOS=60   # gamma(3) x sigma_obs(4) x prior_temperature(5), configs/da.yaml
     WORK=$(( TUNE_DAYS * COMBOS * MEMBERS ))
@@ -219,6 +241,7 @@ run_step "$PYTHON_BIN" -u scripts/10_osse.py \
     --holdout-layout "$HOLDOUT" \
     --holdout-neighbor-km "$NEIGHBOR_KM" \
     --holdout-max-gap-deg "$MAX_GAP_DEG" \
+    --guidance-spread-cells "$SPREAD_CELLS" \
     --withhold "$WITHHOLD" \
     --seed "$SEED" \
     --obs-error "$ERROR" \

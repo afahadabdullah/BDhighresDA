@@ -246,6 +246,15 @@ def parse_args() -> argparse.Namespace:
              "interior; 200 keeps a workable pool while still excluding the "
              "clearly peripheral (the old spread holdout reached 322).",
     )
+    parser.add_argument(
+        "--guidance-spread-cells",
+        type=float,
+        default=None,
+        help="override guidance.spread_cells: Gaussian spreading of the "
+             "likelihood gradient in grid cells (1 cell ~ 5.5 km). Without it "
+             "a point gauge only touches the 4 cells a bilinear operator "
+             "reaches, and the correction does not propagate.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
     parser.add_argument("--out-report", default="data/processed/osse.json")
@@ -764,7 +773,17 @@ def main() -> None:
     base_sampler = replace(
         SamplerConfig(**config["sampler"]), mask_fill=dataset.mask_fill
     )
+    if args.guidance_spread_cells is not None:
+        config["guidance"]["spread_cells"] = float(args.guidance_spread_cells)
     base_guidance = GuidanceConfig(**config["guidance"])
+    if base_guidance.spread_cells:
+        print(
+            f"[osse] guidance gradient spread over {base_guidance.spread_cells:g} "
+            f"cells (~{base_guidance.spread_cells * 5.5:.0f} km). This asserts a "
+            f"broader background covariance than the network implies and is an "
+            f"APPROXIMATION to exact posterior guidance; report it as one.",
+            flush=True,
+        )
 
     if args.tune:
         combinations = [
@@ -1532,6 +1551,7 @@ def main() -> None:
         "holdout_layout": args.holdout_layout,
         "holdout_neighbor_km": float(args.holdout_neighbor_km),
         "holdout_max_gap_deg": float(args.holdout_max_gap_deg),
+        "guidance_spread_cells": float(base_guidance.spread_cells),
         "bmd_station_catalog": bmd_station_source,
         "mode": "tuning" if args.tune else "network sweep",
         "note": (

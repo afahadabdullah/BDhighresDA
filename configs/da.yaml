@@ -81,6 +81,16 @@ guidance:
   clip_norm: 200.0              # ~3.5k dense IMERG obs give a much larger gradient
                                 # norm than 35 gauges alone
   huber_delta: null             # ~3.0 for robustness to gauge/satellite outliers
+  spread_cells: 0.0             # Gaussian spreading of the guidance gradient,
+                                # in grid cells (1 cell ~ 5.5 km). A point gauge
+                                # enters through a bilinear operator, so without
+                                # this the likelihood gradient touches only the
+                                # 4 cells around the station and the correction
+                                # never propagates: OSSE analyses show bullseyes
+                                # at gauges with subgrid correlation 0.03.
+                                # The measured variogram range is ~146 km, so
+                                # 6-12 cells (33-66 km) is physically motivated.
+                                # 0.0 = off, which reproduces every earlier run.
 
 ensemble:
   members: 16
