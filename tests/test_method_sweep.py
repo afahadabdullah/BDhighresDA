@@ -45,6 +45,7 @@ def _load(stem: str):
 
 qm = _load("27_fit_imerg_bias_correction")
 summary = _load("29_summarize_method_sweep")
+v2_gauge_summary = _load("49_summarize_v2_gauge_sweep")
 
 
 # ---------------------------------------------------------------- quantile map
@@ -311,6 +312,27 @@ def test_bootstrap_tolerates_missing_pairs():
     assert np.isfinite(mean) and np.isfinite(low) and np.isfinite(high)
 
 
+def test_v2_fold_summary_uses_the_same_fair_crps_definition():
+    rng = np.random.default_rng(81)
+    members = rng.gamma(0.7, 5.0, size=(7, 12, 9))
+    truth = rng.gamma(0.8, 4.0, size=(7, 9))
+    first = summary.crps_per_sample(members, truth)
+    second = v2_gauge_summary.crps_per_sample(members, truth)
+    assert np.allclose(first, second)
+
+
+def test_v2_fold_summary_blocks_all_stations_from_one_day_together():
+    # A coherent event affects every station on each day. Treating the 20
+    # stations as independent would make this interval spuriously narrow.
+    daily = np.linspace(-1.0, 1.0, 12)
+    difference = np.repeat(daily[:, None], 20, axis=1)
+    result = v2_gauge_summary.circular_block_bootstrap(
+        difference, block_days=3, n_resamples=1000, seed=0
+    )
+    assert result["ci_low"] < 0 < result["ci_high"]
+    assert result["block_days"] == 3
+
+
 # ------------------------------------------------------- torch-dependent parts
 #
 # Script 28 imports torch at module scope, so on a machine without it the tests
@@ -361,6 +383,16 @@ def test_two_step_variants_request_both_streams():
     for variant in sweep.GROUPS["all"]:
         if variant.algorithm == "twostep_ensrf":
             assert variant.uses_imerg and variant.uses_gauges, variant.name
+
+
+@needs_sweep
+def test_v2_gauge_groups_need_no_satellite_and_ensrf_uses_gauges():
+    for group in ("v2_gauges_core", "v2_gauges_spread", "v2_gauges_ensrf"):
+        variants = sweep.resolve_variants(group, None)
+        assert not any(variant.uses_imerg for variant in variants)
+        for variant in variants:
+            if variant.algorithm == "ensrf":
+                assert variant.streams == "gauges"
 
 
 @needs_sweep

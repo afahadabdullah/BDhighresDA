@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Short-window sweep over ways of assimilating IMERG and BMD gauges together.
+"""Short-window sweep over ways of assimilating BMD gauges and optional IMERG.
 
 Purpose
 -------
@@ -51,6 +51,11 @@ What each variant tests
                          (src/bdhires/ensrf.py).  Gaspari-Cohn tapering should
                          spread each gauge increment over a meteorological scale
                          instead of the discs that joint guidance leaves behind.
+
+The ``v2_gauges_*`` groups are a separate, gauges-only tournament for the CPC-v2
+checkpoint.  They compare likelihood guidance (spread/no-spread and matched/
+tempered prior) with a localized EnSRF applied to the *same saved background
+ensemble*.  No satellite file is needed for those groups.
 
 Usage
 -----
@@ -137,7 +142,7 @@ class Variant:
 
     name: str
     streams: str = "both"          # none | gauges | imerg | both
-    algorithm: str = "joint"       # joint | twostep_ensrf
+    algorithm: str = "joint"       # joint | ensrf | twostep_ensrf
     bias_correct: bool = False
     imerg_stride: int | None = None        # None -> command-line default
     imerg_r_multiplier: float = 1.0
@@ -146,6 +151,7 @@ class Variant:
     huber_delta: float | None = None
     prior_temperature: float | None = None  # None -> config value
     n_corrections: int | None = None
+    guidance_spread_cells: float | None = None
     ensrf_localization_km: float = 200.0
     note: str = ""
 
@@ -222,13 +228,85 @@ TWOSTEP = [
             ensrf_localization_km=400.0),
 ]
 
+# Gauges-only CPC-v2 tournament.  ``core`` is a compact method comparison, not
+# a hyperparameter fishing expedition: the four guided arms form a 2x2
+# factorial (temperature 1.0/1.25 x spread 0/6), and EnSRF is the genuinely
+# different covariance-based update.  The follow-up groups should only be run
+# after core identifies which mechanism is worth resolving more finely.
+V2_GAUGES_CORE = [
+    CORE[0],
+    Variant("guided_s0_t125", streams="gauges", prior_temperature=1.25,
+            guidance_spread_cells=0.0,
+            note="current v2 control: tempered prior and point guidance"),
+    Variant("guided_s6_t125", streams="gauges", prior_temperature=1.25,
+            guidance_spread_cells=6.0,
+            note="measured v2 spread-6 candidate (~33 km Gaussian sigma)"),
+    Variant("guided_s0_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=0.0,
+            note="isolates analysis tempering from spatial spreading"),
+    Variant("guided_s6_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0,
+            note="spread-6 with the analysis temperature matched to background"),
+    Variant("ensrf_loc150", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=150.0,
+            note="localized EnSRF on the exact v2 background; support ~variogram range"),
+]
+
+V2_GAUGES_SPREAD = [
+    CORE[0],
+    Variant("guided_s0_t125", streams="gauges", prior_temperature=1.25,
+            guidance_spread_cells=0.0,
+            note="current v2 operational comparator"),
+    Variant("guided_s0_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=0.0),
+    Variant("guided_s3_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=3.0,
+            note="intermediate spread (~17 km Gaussian sigma)"),
+    Variant("guided_s6_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0),
+    Variant("guided_s12_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=12.0,
+            note="broad-spread sensitivity, not a production default"),
+]
+
+V2_GAUGES_ENSRF = [
+    CORE[0],
+    Variant("guided_s0_t125", streams="gauges", prior_temperature=1.25,
+            guidance_spread_cells=0.0,
+            note="current v2 operational comparator"),
+    Variant("ensrf_loc75", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=75.0),
+    Variant("ensrf_loc150", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=150.0),
+    Variant("ensrf_loc300", streams="gauges", algorithm="ensrf",
+            ensrf_localization_km=300.0),
+]
+
+
+def _unique_variants(variants: list[Variant]) -> list[Variant]:
+    """De-duplicate catalogue unions by name while preserving first occurrence."""
+    seen: set[str] = set()
+    unique = []
+    for variant in variants:
+        if variant.name in seen:
+            continue
+        seen.add(variant.name)
+        unique.append(variant)
+    return unique
+
 GROUPS = {
     "core": CORE,
     "tempering": TEMPERING,
     "bias": BIAS,
     "weighting": WEIGHTING,
     "twostep": TWOSTEP,
-    "all": CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP,
+    "v2_gauges_core": V2_GAUGES_CORE,
+    "v2_gauges_spread": V2_GAUGES_SPREAD,
+    "v2_gauges_ensrf": V2_GAUGES_ENSRF,
+    "all": _unique_variants(
+        CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
+        + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
+    ),
 }
 
 
@@ -264,7 +342,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/da.yaml")
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--stations", required=True, help="canonical BMD daily CSV")
-    parser.add_argument("--imerg", required=True, help="prepared IMERG NetCDF from script 08")
+    parser.add_argument(
+        "--imerg", default=None,
+        help="prepared IMERG NetCDF from script 08; omitted for v2_gauges_* groups",
+    )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="KEY.PATH=VALUE",
+        help="repeatable config override; unknown keys fail loudly",
+    )
     parser.add_argument("--start", default="2024-05-01")
     parser.add_argument("--end", default="2024-05-05")
     parser.add_argument("--background-day-offset", type=int, default=-1)
@@ -430,13 +515,19 @@ def main() -> None:
         return
 
     variants = resolve_variants(args.group, args.variants)
+    uses_imerg = any(variant.uses_imerg for variant in variants)
+    if uses_imerg and not args.imerg:
+        raise ValueError(
+            f"group {args.group!r} contains satellite arms; provide --imerg or "
+            "select one of the v2_gauges_* groups"
+        )
     if any(v.bias_correct for v in variants) and not args.imerg_qm:
         raise ValueError(
             "the selected variants include bias-corrected arms but --imerg-qm was "
             "not given. Fit one with scripts/27_fit_imerg_bias_correction.py first."
         )
-
     config = yaml.safe_load(Path(args.config).read_text())
+    config_overrides = _bmd.apply_config_overrides(config, args.set)
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     training_config = checkpoint["cfg"]
     training_data = training_config["data"]
@@ -510,14 +601,22 @@ def main() -> None:
         flush=True,
     )
     print(f"[sweep] variants: {', '.join(v.name for v in variants)}", flush=True)
+    print(
+        f"[sweep] checkpoint-bound data: {data_zarr} | {data_stats} | "
+        f"transform={transform.kind} | channels={selected_channels or 'all'}",
+        flush=True,
+    )
 
     imerg_config = config["observations"]["imerg"]
     imerg_factor = int(imerg_config.get("factor", 2))
-    imerg = load_prepared_imerg(args.imerg, selected_times, grid, imerg_factor)
-    raw_imerg_mm = imerg["precipitation"].copy()
+    imerg = None
+    raw_imerg_mm = None
+    if uses_imerg:
+        imerg = load_prepared_imerg(args.imerg, selected_times, grid, imerg_factor)
+        raw_imerg_mm = imerg["precipitation"].copy()
 
     corrected_imerg_mm, qm_meta = None, None
-    if args.imerg_qm:
+    if args.imerg_qm and uses_imerg:
         evaluation_year = int(str(selected_times[0].astype("datetime64[Y]")))
         corrected_imerg_mm, qm_meta = load_and_apply_qm(
             args.imerg_qm, evaluation_year, raw_imerg_mm, selected_times
@@ -582,18 +681,27 @@ def main() -> None:
     gauge_operator = PhysicalBilinearObsOperator(
         grid, stations.lat[assim_idx], stations.lon[assim_idx], transform, valid=valid
     ).to(device)
-    satellite_operator = PhysicalBlockAverageObsOperator(
-        imerg_factor, transform, valid=valid
-    ).to(device)
-    combined_operator = CompositeObsOperator([gauge_operator, satellite_operator]).to(device)
-    land_footprints = (
-        satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
-    )
-    coarse_shape = raw_imerg_mm.shape[1:]
+    satellite_operator = None
+    combined_operator = None
+    land_footprints = None
+    coarse_shape = None
+    if uses_imerg:
+        satellite_operator = PhysicalBlockAverageObsOperator(
+            imerg_factor, transform, valid=valid
+        ).to(device)
+        combined_operator = CompositeObsOperator(
+            [gauge_operator, satellite_operator]
+        ).to(device)
+        land_footprints = (
+            satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
+        )
+        coarse_shape = raw_imerg_mm.shape[1:]
     error_corr_cells = float(imerg_config.get("error_corr_cells", 0.0))
 
     def satellite_setup(variant: Variant):
         """Thinning mask and correlation inflation for one variant."""
+        if land_footprints is None or coarse_shape is None:
+            raise ValueError(f"{variant.name}: satellite setup requested without --imerg")
         stride = variant.imerg_stride or args.imerg_stride
         thinning = np.zeros(coarse_shape, dtype=bool)
         offset = stride // 2
@@ -612,6 +720,14 @@ def main() -> None:
     shape = (n_days, args.members, grid.nlat, grid.nlon)
     for variant in variants:
         fields[variant.name] = np.full(shape, np.nan, dtype=np.float32)
+
+    chirps = np.full((n_days, grid.nlat, grid.nlon), np.nan, dtype=np.float32)
+    condition = np.full_like(chirps, np.nan)
+    cpc_full_index = (
+        dataset.all_cond_channels.index("cpc_precip")
+        if "cpc_precip" in dataset.all_cond_channels
+        else None
+    )
 
     started = walltime.time()
     for day_position, data_index in enumerate(selected):
@@ -646,6 +762,10 @@ def main() -> None:
             guidance = base_guidance
             if variant.huber_delta is not None:
                 guidance = replace(guidance, huber_delta=variant.huber_delta)
+            if variant.guidance_spread_cells is not None:
+                guidance = replace(
+                    guidance, spread_cells=variant.guidance_spread_cells
+                )
 
             # --- unguided background ------------------------------------------------
             if variant.streams == "none":
@@ -661,6 +781,38 @@ def main() -> None:
                         to_precip=lambda x, b=base: residual.decode(x, b),
                     )
                 fields[variant.name][day_position] = decode(generated)
+                continue
+
+            # --- gauges-only localized EnSRF ---------------------------------------
+            # The background arm is deliberately first in every resolved group, so
+            # this reuses its exact ensemble rather than paying for another draw or
+            # introducing a seed/temperature confound.
+            if variant.algorithm == "ensrf":
+                if variant.streams != "gauges":
+                    raise ValueError(
+                        f"{variant.name}: algorithm='ensrf' requires streams='gauges'"
+                    )
+                background_ensemble = fields["background"][day_position]
+                if not np.isfinite(background_ensemble[:, valid]).all():
+                    raise RuntimeError(
+                        f"{variant.name}: background must be generated before EnSRF"
+                    )
+                updated, ensrf_diagnostic = localized_serial_ensrf(
+                    ensemble_mm=background_ensemble,
+                    observations_mm=gauge_mm[day_position, assim_idx],
+                    station_lat=stations.lat[assim_idx],
+                    station_lon=stations.lon[assim_idx],
+                    grid=grid,
+                    transform=transform,
+                    valid=valid,
+                    observation_variance=gauge_variance / variant.gauge_weight,
+                    localization_km=variant.ensrf_localization_km,
+                    seed=day_seed + 3_000_000,
+                )
+                fields[variant.name][day_position] = updated
+                diagnostics.setdefault(variant.name, {}).setdefault("ensrf", []).append(
+                    ensrf_diagnostic
+                )
                 continue
 
             # --- satellite observation vector for this variant ----------------------
@@ -815,6 +967,14 @@ def main() -> None:
             f"({elapsed / (day_position + 1):.0f} s/day)",
             flush=True,
         )
+        observation_store_index = int(observation_selected[day_position])
+        chirps[day_position] = np.asarray(
+            dataset.z["target"][observation_store_index][slices]
+        )
+        if cpc_full_index is not None:
+            condition[day_position] = np.asarray(
+                dataset.z["cond"][int(data_index)][cpc_full_index][slices]
+            )
 
     # ---------------------------------------------------------------- scoring
     distance_km = distance_to_nearest_station(
@@ -871,7 +1031,12 @@ def main() -> None:
             "members": args.members,
             "background_day_offset": args.background_day_offset,
             "checkpoint": args.ckpt,
+            "checkpoint_data": data_zarr,
+            "checkpoint_stats": data_stats,
+            "precip_transform": transform.to_dict(),
             "config": args.config,
+            "config_overrides": config_overrides,
+            "group": args.group,
             "holdout_fold": args.holdout_fold,
             "holdout_folds": args.holdout_folds,
             "n_assimilated_stations": int(len(assim_idx)),
@@ -913,9 +1078,11 @@ def main() -> None:
         distance_km=distance_km,
         valid=valid,
         variant_names=np.asarray([v.name for v in variants], dtype=str),
-        raw_imerg_mm=raw_imerg_mm,
+        chirps=chirps,
+        condition=condition,
         **{f"station_{name}": values for name, values in station_ensembles.items()},
         **{f"meanfield_{name}": np.nanmean(fields[name], axis=1) for name in fields},
+        **({"raw_imerg_mm": raw_imerg_mm} if raw_imerg_mm is not None else {}),
     )
     print(f"[sweep] wrote {out_path}", flush=True)
 
