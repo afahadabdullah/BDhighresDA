@@ -256,6 +256,18 @@ def parse_args() -> argparse.Namespace:
              "reaches, and the correction does not propagate.",
     )
     parser.add_argument(
+        "--satellite-sigma",
+        type=float,
+        default=None,
+        help="observation sigma for the pseudo-satellite in the exact/perfect "
+             "case, overriding the hardcoded 0.05. That value was chosen so the "
+             "likelihood would not explode with ~34 GAUGES; with a few hundred "
+             "block observations the aggregate gradient is far larger, "
+             "clip_norm turns it into a pure direction with no magnitude, and "
+             "the analysis diverges -- observed at 55x sigma misfit against "
+             "observations accurate to 8e-06 mm/day.",
+    )
+    parser.add_argument(
         "--satellite-source",
         choices=["truth", "cpc"],
         default="truth",
@@ -1054,7 +1066,11 @@ def main() -> None:
                         )
                     )
                     if error_name in {"perfect", "exact"}:
-                        satellite_sigma, satellite_repr = 0.05, 0.0
+                        satellite_sigma = (
+                            0.05 if args.satellite_sigma is None
+                            else float(args.satellite_sigma)
+                        )
+                        satellite_repr = 0.0
                     else:
                         satellite_sigma = float(satellite_cfg["sigma_obs"])
                         satellite_repr = float(

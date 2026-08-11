@@ -130,6 +130,7 @@ for spec in $VARIANTS; do
         # only down-weight perfect information.
         EXTRA+=(--satellite-factor "$SATFAC" --satellite-stride 1
                 --satellite-source "$SATSRC")
+        [[ -n "${SATSIG:-}" ]] && EXTRA+=(--satellite-sigma "$SATSIG")
         # A factor that does not divide the grid needs an explicit window.
         # 128 / 10 = 12.8, so the 0.5-degree CPC footprint requires cropping to
         # 120 and gives up the northern and eastern 0.4-degree strip. The crop
