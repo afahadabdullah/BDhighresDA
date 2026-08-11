@@ -780,16 +780,29 @@ def main() -> None:
             flush=True,
         )
 
-    base_sampler = replace(
-        SamplerConfig(**config["sampler"]), mask_fill=dataset.mask_fill
-    )
+    # Overrides must be applied BEFORE the configs are constructed. They were
+    # not: base_sampler was built first, so --prior-temperature mutated a dict
+    # nobody read again and the temp15 arm came out bit-identical to base --
+    # which reads as "temperature does nothing" rather than "the flag did
+    # nothing". The guidance overrides happened to sit on the right side of
+    # GuidanceConfig and did work, which made the failure harder to spot.
     if args.guidance_spread_cells is not None:
         config["guidance"]["spread_cells"] = float(args.guidance_spread_cells)
     if args.guidance_gamma is not None:
         config["guidance"]["gamma"] = float(args.guidance_gamma)
     if args.prior_temperature is not None:
         config["sampler"]["prior_temperature"] = float(args.prior_temperature)
+
+    base_sampler = replace(
+        SamplerConfig(**config["sampler"]), mask_fill=dataset.mask_fill
+    )
     base_guidance = GuidanceConfig(**config["guidance"])
+    print(
+        f"[osse] sampler prior_temperature={base_sampler.prior_temperature:g}, "
+        f"guidance gamma={base_guidance.gamma:g}, "
+        f"spread_cells={base_guidance.spread_cells:g}",
+        flush=True,
+    )
     if base_guidance.spread_cells:
         print(
             f"[osse] guidance gradient spread over {base_guidance.spread_cells:g} "
