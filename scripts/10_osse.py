@@ -255,6 +255,16 @@ def parse_args() -> argparse.Namespace:
              "a point gauge only touches the 4 cells a bilinear operator "
              "reaches, and the correction does not propagate.",
     )
+    parser.add_argument(
+        "--guidance-gamma", type=float, default=None,
+        help="override guidance.gamma without going through --tune",
+    )
+    parser.add_argument(
+        "--prior-temperature", type=float, default=None,
+        help="override sampler.prior_temperature without going through --tune. "
+             "Raising it widens the prior ensemble, which is the other candidate "
+             "for a background too smooth to carry an increment.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out-figure", default="data/processed/osse.png")
     parser.add_argument("--out-report", default="data/processed/osse.json")
@@ -775,6 +785,10 @@ def main() -> None:
     )
     if args.guidance_spread_cells is not None:
         config["guidance"]["spread_cells"] = float(args.guidance_spread_cells)
+    if args.guidance_gamma is not None:
+        config["guidance"]["gamma"] = float(args.guidance_gamma)
+    if args.prior_temperature is not None:
+        config["sampler"]["prior_temperature"] = float(args.prior_temperature)
     base_guidance = GuidanceConfig(**config["guidance"])
     if base_guidance.spread_cells:
         print(
