@@ -61,7 +61,7 @@ echo "node: $(hostname)   job: ${SLURM_JOB_ID:-none}"
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,ecc.errors.uncorrected.volatile.total \
     --format=csv 2>/dev/null || echo "(nvidia-smi unavailable)"
 # Reduces fragmentation on long multi-variant runs; harmless otherwise.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 # Set CUDA_LAUNCH_BLOCKING=1 to make an async CUDA fault report at its true
 # call site. It costs speed, so it is opt-in.
 [[ -n "${CUDA_LAUNCH_BLOCKING:-}" ]] && echo "CUDA_LAUNCH_BLOCKING=$CUDA_LAUNCH_BLOCKING"
@@ -77,6 +77,7 @@ HOLDOUT="${DAY_HOLDOUT:-neighbored}"
 NEIGHBOR_KM="${DAY_NEIGHBOR_KM:-75}"
 MAX_GAP_DEG="${DAY_MAX_GAP_DEG:-200}"
 CATALOG="${OSSE_BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
+GRID="${DAY_GRID:-128}"          # fine-grid side length, for the crop arithmetic
 ROOT="${DAY_ROOT:-data/processed/osse_day_${DAY//-/}}"
 [[ -s "$CATALOG" ]] || { echo "ERROR: no catalogue at $CATALOG"; exit 1; }
 
@@ -129,6 +130,17 @@ for spec in $VARIANTS; do
         # only down-weight perfect information.
         EXTRA+=(--satellite-factor "$SATFAC" --satellite-stride 1
                 --satellite-source "$SATSRC")
+        # A factor that does not divide the grid needs an explicit window.
+        # 128 / 10 = 12.8, so the 0.5-degree CPC footprint requires cropping to
+        # 120 and gives up the northern and eastern 0.4-degree strip. The crop
+        # starts at 0 so the footprints tile from the grid origin; an offset
+        # window would nest differently from every other factor.
+        CROPSZ=$(( (GRID / SATFAC) * SATFAC ))
+        if [[ "$CROPSZ" -ne "$GRID" ]]; then
+            echo "    crop: ${GRID}x${GRID} is not divisible by $SATFAC; using 0..$CROPSZ"
+            echo "          (drops the outer $(( GRID - CROPSZ )) cells = $(awk -v n=$(( GRID - CROPSZ )) 'BEGIN{printf "%.2f", n*0.05}') deg on N and E)"
+            EXTRA+=(--satellite-crop 0 "$CROPSZ" 0 "$CROPSZ")
+        fi
     fi
 
     run_step "$PYTHON_BIN" -u scripts/10_osse.py \
