@@ -17,10 +17,15 @@ export BMD_DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 export BMD_STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 export BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:--1}"
 
-export V2_CONFIRM_NATIVE_2021="${V2_CONFIRM_NATIVE_2021:-data/processed/bmd_imerg_eval_2021_may_sep/imerg_aligned_20210501_20210930.nc}"
-export V2_CONFIRM_NATIVE_2022="${V2_CONFIRM_NATIVE_2022:-data/processed/bmd_imerg_eval_2022_may_sep/imerg_aligned_20220501_20220930.nc}"
-export V2_CONFIRM_NATIVE_2023="${V2_CONFIRM_NATIVE_2023:-data/processed/bmd_imerg_eval_2023_may_sep/imerg_aligned_20230501_20230930.nc}"
-export V2_CONFIRM_NATIVE_2024="${V2_CONFIRM_NATIVE_2024:-data/processed/bmd_imerg_eval_2024_may_jun/imerg_aligned_20240501_20240630.nc}"
+# Resolve every period from the authoritative prepared monthly archive.  Do not
+# trust the old bmd_imerg_eval seasonal filenames: the 2024 file named through
+# June 30 was later discovered to contain only May 1-10.  Script 43 screens the
+# archive lazily and validates the actual time coordinates and BMD window.
+export V2_CONFIRM_ARCHIVE_GLOB="${V2_CONFIRM_ARCHIVE_GLOB:-data/processed/imerg_bd_aligned_*.nc}"
+export V2_CONFIRM_NATIVE_2021="${V2_CONFIRM_NATIVE_2021:-$V2_CONFIRM_ARCHIVE_GLOB}"
+export V2_CONFIRM_NATIVE_2022="${V2_CONFIRM_NATIVE_2022:-$V2_CONFIRM_ARCHIVE_GLOB}"
+export V2_CONFIRM_NATIVE_2023="${V2_CONFIRM_NATIVE_2023:-$V2_CONFIRM_ARCHIVE_GLOB}"
+export V2_CONFIRM_NATIVE_2024="${V2_CONFIRM_NATIVE_2024:-$V2_CONFIRM_ARCHIVE_GLOB}"
 
 if [[ -n "${V2_CONFIRM_PREP_PYTHON:-}" ]]; then
     PREP_PYTHON="$V2_CONFIRM_PREP_PYTHON"
@@ -56,20 +61,26 @@ for index in 0 1 2 3; do
     source_native="${NATIVE_FILES[$index]}"
     native="$V2_CONFIRM_ROOT/imerg_native/${LABELS[$index]}.nc"
     coarse="$V2_CONFIRM_ROOT/imerg_s04/${LABELS[$index]}.nc"
-    [[ -s "$source_native" ]] || {
-        echo "ERROR: prepared native IMERG source missing: $source_native" >&2
-        echo "Set V2_CONFIRM_NATIVE_20XX to the matching BMD-aligned seasonal file." >&2
-        exit 1
-    }
     # This is deliberately not a filename-only check. Script 43 validates the
     # BMD 03:00-03:00 accumulation, units, variables, and every exact date,
     # preventing a queued seasonal array from discovering a bad time axis.
     if [[ ! -s "$native" ]]; then
-        PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u \
+        if ! PYTHONPATH="$PWD/src" "$PREP_PYTHON" -u \
             scripts/43_subset_prepared_imerg.py \
             --input "$source_native" \
             --start "${STARTS[$index]}" --end "${ENDS[$index]}" \
-            --out "$native" --report "${native%.nc}_qc.json"
+            --out "$native" --report "${native%.nc}_qc.json"; then
+            echo >&2
+            echo "ERROR: the prepared IMERG archive does not cover ${STARTS[$index]}..${ENDS[$index]}." >&2
+            echo "No GPU jobs were submitted. For the missing May-June 2024 archive, run:" >&2
+            echo >&2
+            echo "  IMERG_START_YEAR=2024 IMERG_END_YEAR=2024 \\" >&2
+            echo "    sbatch --array=4-5%2 --export=ALL,IMERG_START_YEAR=2024,IMERG_END_YEAR=2024 \\" >&2
+            echo "    slurm/download_imerg_halfhourly_2021_2024.sbatch" >&2
+            echo >&2
+            echo "After those two monthly jobs finish successfully, rerun this launcher." >&2
+            exit 1
+        fi
     else
         echo "Reusing $native"
     fi

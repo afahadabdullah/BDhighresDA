@@ -51,6 +51,17 @@ def test_frozen_archive_catalogue_matches_summary_methods():
     ]
 
 
+def test_launcher_uses_monthly_archive_not_mislabeled_2024_seasonal_file():
+    launcher = (ROOT / "slurm" / "submit_v2_confirmatory_2021_2024.sh").read_text()
+    assert "data/processed/imerg_bd_aligned_*.nc" in launcher
+    assert (
+        "data/processed/bmd_imerg_eval_2024_may_jun/"
+        "imerg_aligned_20240501_20240630.nc"
+    ) not in launcher
+    assert "scripts/43_subset_prepared_imerg.py" in launcher
+    assert "--array=4-5%2" in launcher
+
+
 def test_selection_dates_and_may_2022_are_excluded_only_from_primary_scores():
     dates = np.asarray(
         ["2022-05-01", "2022-05-10", "2022-05-11", "2022-06-01"],

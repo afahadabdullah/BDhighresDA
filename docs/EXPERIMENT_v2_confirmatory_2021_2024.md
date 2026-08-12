@@ -51,7 +51,8 @@ bash slurm/submit_v2_confirmatory_2021_2024.sh
 ```
 
 The launcher first makes one exact 0.4-degree S04 IMERG file per period from
-the existing BMD-aligned seasonal files. It then submits one array:
+the authoritative `data/processed/imerg_bd_aligned_*.nc` monthly archive. It
+validates actual dates instead of trusting filenames, then submits one array:
 
 - tasks 0–19: four periods × five held-out-station folds;
 - tasks 20–23: four all-station gridded analyses;
@@ -73,7 +74,21 @@ tail -f logs/bdhires-v2-confirm-<ARRAY_JOB_ID>_*.out
 
 Defaults can be overridden with environment variables, including
 `V2_CONFIRM_ROOT`, `V2_CONFIRM_MEMBERS`, `BMD_CKPT`, `BMD_DATA_DIR`, and
+`V2_CONFIRM_ARCHIVE_GLOB`. Period-specific overrides remain available as
 `V2_CONFIRM_NATIVE_2021` through `V2_CONFIRM_NATIVE_2024`.
+
+If the monthly archive does not yet cover May–June 2024, prepare only those two
+months (array indices 4 and 5 in a 2024-only array):
+
+```bash
+IMERG_START_YEAR=2024 IMERG_END_YEAR=2024 \
+  sbatch --array=4-5%2 \
+  --export=ALL,IMERG_START_YEAR=2024,IMERG_END_YEAR=2024 \
+  slurm/download_imerg_halfhourly_2021_2024.sbatch
+```
+
+After both monthly jobs succeed, rerun the confirmation launcher. The 2021–23
+native and S04 files already completed under `V2_CONFIRM_ROOT` are reused.
 
 ## Outputs and comparison directory
 
