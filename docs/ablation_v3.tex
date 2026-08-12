@@ -7,6 +7,8 @@
 %   runs/prior_h100_cpc_v3/validation/history.jsonl           (A1)
 %   runs/prior_h100_cpc_v3_hurdle/validation/history.jsonl    (A2)
 %   runs/prior_h100_cpc_v3_absolute/validation/history.jsonl  (A3)
+%   data/processed/v2_ingestion_triplet/ing2022_s04_g010_sqrtfix/
+%     v1_vs_v2/v1_vs_v2_selection.{json,md}                   (V1--V2 DA)
 % ---------------------------------------------------------------------------
 
 \section{Ablation: components of the prior redesign}
@@ -153,6 +155,116 @@ Ep & CRPS & werr & sprd & $r$ & CRPS & werr & sprd & $r$ & CRPS & werr & sprd & 
 \hline
 \end{tabular}
 \end{table}
+
+\subsection{Later matched CPC V1--V2 DA ablation: a better background, but
+similar analyses}
+\label{sec:ablation-v1-v2-da}
+
+The subsequent real-BMD experiment provides an important complement to the
+training diagnostics above. To avoid version ambiguity, ``CPC V1'' in this
+subsection denotes the operational checkpoint using \texttt{log1p}
+precipitation transforms, and ``CPC V2'' denotes the later checkpoint using
+square-root transforms; neither label refers to arms A1--A4. The comparison
+uses 2022-05-01 through 2022-05-10, 38 BMD stations, five exhaustive spatial
+folds, and 30 members. Each station is withheld exactly once. V1 and V2 are
+aligned by station ID and date, and the uncertainty intervals use 10,000
+paired circular-bootstrap resamples in three-day blocks, keeping all stations
+from one weather day together.
+
+This is a matched \emph{checkpoint-package} comparison, not a transform-only
+experiment. Relative to V1, V2 changes the CHIRPS and CPC precipitation
+transforms from \texttt{log1p} to \texttt{sqrt}, but also adds multiscale CPC
+conditioning, weak coarse-consistency losses, wet-day/crop oversampling, and a
+broader validation selection. The result is therefore consistent with a
+benefit from the square-root formulation, but the gain cannot be attributed to
+that transform alone.
+
+\begin{table}[htbp]
+\centering
+\caption{Matched CPC V1--V2 performance at withheld BMD gauges. CRPS and MAE
+are in mm~day$^{-1}$. V2 uses its selected spread-6, $\gamma=0.01$ gauge
+guidance, while V1 retains the previously reported DA configuration. The
+simultaneous rows use gauges plus the same S04 IMERG observation scale.}
+\label{tab:ablation-v1-v2-da}
+\small
+\begin{tabular}{lrrrrrr}
+\hline
+Method & CRPS & MAE dry & MAE wet & Bias & Corr. & Cov.$_{90}$ \\
+\hline
+V1 background          & 7.547 & 10.38 & 17.63 & $+8.37$ & 0.362 & 0.81 \\
+V2 background          & 5.915 &  7.01 & 13.73 & $+2.87$ & 0.400 & 0.94 \\
+\hline
+V1 gauges              & 4.961 &  4.10 & 11.86 & $+0.62$ & 0.537 & 0.58 \\
+V2 gauges              & 4.872 &  4.12 & 11.76 & $+0.56$ & 0.540 & 0.77 \\
+\hline
+V1 simultaneous S04    & 4.768 &  4.10 & 12.19 & $+2.16$ & 0.565 & 0.64 \\
+V2 simultaneous S04    & \textbf{4.626} & 2.90 & 11.86 & $+0.47$ & 0.569 & 0.84 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Paired fair-CRPS contrasts from the matched CPC V1--V2 experiment.
+$\Delta=\mathrm{CRPS}(\mathrm{reference})-
+\mathrm{CRPS}(\mathrm{candidate})$, so positive values favour the candidate.
+Intervals crossing zero are reported as unresolved rather than wins.}
+\label{tab:ablation-v1-v2-paired}
+\small
+\begin{tabular}{lrrl}
+\hline
+Candidate versus reference & $\Delta$ & 95\% interval & Decision \\
+\hline
+V2 background versus V1 background & $+1.632$ & $[+0.875,+2.476]$ & V2 better \\
+V2 gauges versus V1 gauges & $+0.089$ & $[-0.108,+0.280]$ & unresolved \\
+V2 simultaneous versus V1 simultaneous & $+0.142$ & $[-0.015,+0.301]$ & unresolved \\
+V2 simultaneous versus V1 gauges & $+0.335$ & $[-0.057,+0.673]$ & unresolved \\
+V2 gauges versus V2 background & $+1.043$ & $[+0.637,+1.542]$ & DA better \\
+V2 simultaneous versus V2 gauges & $+0.246$ & $[-0.012,+0.457]$ & unresolved \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{The dominant V1--V2 difference is in the unassimilated prior.}
+V2 reduces background CRPS by $1.632$~mm~day$^{-1}$, or $21.6\%$ relative to
+V1, with a paired interval wholly above zero. The improvement is not confined
+to one score: background bias falls from $+8.37$ to $+2.87$~mm~day$^{-1}$,
+dry MAE from $10.38$ to $7.01$, wet MAE from $17.63$ to $13.73$, and
+correlation rises from $0.362$ to $0.400$. Thus the V2 training package
+materially improves the state \emph{before} any BMD or IMERG observation is
+assimilated. This is the cleanest evidence that the prior redesign worked.
+
+\paragraph{Assimilation compresses the checkpoint gap.}
+After gauge assimilation, the V1--V2 CRPS difference shrinks from $1.632$ to
+$0.089$~mm~day$^{-1}$; after simultaneous gauge--IMERG assimilation it is
+$0.142$~mm~day$^{-1}$. Both paired intervals include zero, while correlations
+are nearly identical (0.537 versus 0.540 for gauges and 0.565 versus 0.569 for
+simultaneous). The absolute DA increment is consequently much larger for the
+weaker V1 prior: gauges reduce V1 CRPS by $2.586$~mm~day$^{-1}$ but V2 CRPS by
+$1.043$; simultaneous assimilation reduces them by $2.779$ and $1.289$,
+respectively. The observations and likelihood therefore pull two unequal
+backgrounds toward a similar observation-constrained analysis.
+
+That convergence should not be read as evidence that prior quality is
+irrelevant. First, V2 reaches the same analysis quality with substantially less
+correction from the background, reducing dependence on sparse observations.
+Second, the V2 simultaneous point estimate is the best of the six methods and
+retains meaningful secondary advantages even though its CRPS gain over V1 is
+unresolved: bias is $+0.47$ rather than $+2.16$~mm~day$^{-1}$, dry MAE is
+$2.90$ rather than $4.10$, and 90\% coverage is $0.84$ rather than $0.64$.
+Third, the V2 background is the field available away from observation
+influence, so its improvement matters directly for spatial completeness even
+when scores at withheld gauges converge.
+
+\paragraph{Interpretation for the transform ablation.}
+The defensible conclusion is two-part: the square-root-based V2 \emph{package}
+produces a decisively better background, whereas the present DA configurations
+take V1 and V2 to statistically indistinguishable withheld-gauge CRPS. This
+suggests that the main practical value of V2 is improved prior quality rather
+than a new DA response. It does \emph{not} establish that \texttt{sqrt} alone
+is superior to \texttt{log1p}; isolating that causal claim requires retraining
+an otherwise identical V2 configuration with only the precipitation transform
+changed, followed by the same matched-fold background and DA evaluation.
 
 
 \subsection{Findings}
@@ -355,6 +467,14 @@ practical reason the wet-frequency defect matters.
 \subsection{Limitations}
 
 \begin{enumerate}
+  \item \textbf{The CPC V1--V2 result is neither transform-isolated nor an
+    independent confirmation.} V2 changes the precipitation transform together
+    with multiscale conditioning, loss terms and sampling, and the same
+    2022-05-01--10 window was used to select its DA configuration. The paired
+    intervals therefore describe sampling uncertainty conditional on those
+    selected configurations; they do not include model-selection uncertainty.
+    A frozen multi-season comparison is required before generalising the
+    $21.6\%$ background gain beyond this development window.
   \item \textbf{The confound in F6 is untrained but tested.} No arm was trained
     with $\texttt{cond\_dropout}=0.0$, so the redesign is not cleanly separated
     from that change at training time. The sampling-side probe in F6 rejects it
