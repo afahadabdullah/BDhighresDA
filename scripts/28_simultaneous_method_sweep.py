@@ -109,6 +109,7 @@ from bdhires.transforms import (  # noqa: E402
     ResidualSpec,
     load_climatology,
 )
+from bdhires.zarr_output import write_physical_ensemble_zarr  # noqa: E402
 
 # Reuse the IMERG loader and the variance conversion from the production script
 # rather than reimplementing them, so the two paths cannot silently diverge.
@@ -417,6 +418,30 @@ V2_SIMULTANEOUS_REFINE = [
             note="operational sensitivity: 100 Heun steps with two correctors"),
 ]
 
+# Frozen long-period confirmation set.  These are not another tuning grid: the
+# two candidates were selected on 2022-05-01..10, and the long-period summary
+# excludes those ten days from its primary confirmatory scores.  The selected
+# gauges-only method and the pre-existing simultaneous S04 method are retained
+# as explicit benchmarks.
+V2_CONFIRMATORY = [
+    Variant("guided_s6_g010_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, guidance_gamma=1.0e-2,
+            note="frozen gauges-only benchmark"),
+    Variant("v2_simultaneous_s04_t100", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="frozen pre-existing simultaneous S04 benchmark"),
+    Variant("v2_simul_s04_ig010", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-2,
+            note="primary frozen candidate: gamma 0.01 for both streams"),
+    Variant("v2_simul_s04_huber3", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="secondary frozen candidate: robust joint likelihood"),
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -441,10 +466,12 @@ GROUPS = {
     "v2_gauges_refine": V2_GAUGES_REFINE,
     "v2_ingestion_s04": V2_INGESTION_S04,
     "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
+    "v2_confirmatory": V2_CONFIRMATORY,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
+        + V2_CONFIRMATORY
     ),
 }
 
@@ -497,6 +524,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--withhold", type=float, default=0.2)
     parser.add_argument("--holdout-folds", type=int, default=5)
     parser.add_argument("--holdout-fold", type=int, default=0)
+    parser.add_argument(
+        "--assimilate-all-stations", action="store_true",
+        help=(
+            "assimilate every eligible station and skip withheld-gauge scoring; "
+            "use only for a production gridded analysis, never skill evaluation"
+        ),
+    )
     parser.add_argument("--imerg-stride", type=int, default=3)
     parser.add_argument("--imerg-r-multiplier", type=float, default=1.0)
     parser.add_argument(
@@ -510,6 +544,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=202405)
     parser.add_argument("--out", default="data/processed/sweep_may2024.npz")
     parser.add_argument("--report", default="data/processed/sweep_may2024.json")
+    parser.add_argument(
+        "--fields-zarr", default=None,
+        help=(
+            "optional xarray-compatible Zarr store containing every physical "
+            "ensemble field and matched CPC/CHIRPS/IMERG/gauge inputs"
+        ),
+    )
     parser.add_argument(
         "--list-variants", action="store_true", help="print the catalogue and exit"
     )
@@ -758,7 +799,9 @@ def main() -> None:
     )
     if len(stations) < 5:
         raise ValueError(f"only {len(stations)} stations survive coverage filtering")
-    if args.holdout_folds > 1:
+    if args.assimilate_all_stations:
+        eval_idx = np.asarray([], dtype=np.int64)
+    elif args.holdout_folds > 1:
         eval_idx = spread_folds(stations.lat, stations.lon, args.holdout_folds)[
             args.holdout_fold
         ]
@@ -1300,43 +1343,48 @@ def main() -> None:
             flush=True,
         )
 
+    scope = {
+        "start": str(selected_times[0].astype("datetime64[D]")),
+        "end": str(selected_times[-1].astype("datetime64[D]")),
+        "n_days": n_days,
+        "members": args.members,
+        "background_day_offset": args.background_day_offset,
+        "checkpoint": args.ckpt,
+        "checkpoint_data": data_zarr,
+        "checkpoint_stats": data_stats,
+        "precip_transform": transform.to_dict(),
+        "config": args.config,
+        "config_overrides": config_overrides,
+        "group": args.group,
+        "assimilate_all_stations": bool(args.assimilate_all_stations),
+        "holdout_fold": args.holdout_fold,
+        "holdout_folds": args.holdout_folds,
+        "n_assimilated_stations": int(len(assim_idx)),
+        "n_withheld_stations": int(len(eval_idx)),
+        "withheld_station_days": int(np.isfinite(withheld_observed).sum()),
+        "imerg_stride_default": args.imerg_stride,
+        "imerg_r_multiplier_default": args.imerg_r_multiplier,
+        "imerg_bias_correction": qm_meta,
+        "analysis_sampler_n_steps": int(base_sampler.n_steps),
+        "analysis_sampler_n_corrections": int(base_sampler.n_corrections),
+        "analysis_sampler_heun": bool(base_sampler.heun),
+        "background_sampler_n_steps": int(base_background_sampler.n_steps),
+        "background_sampler_n_corrections": int(
+            base_background_sampler.n_corrections
+        ),
+        "seed": args.seed,
+        "caveat": (
+            "This all-station run is a gridded production product and cannot "
+            "verify gauge skill because every eligible station enters the "
+            "likelihood. Use the matched withheld-fold files for evaluation."
+            if args.assimilate_all_stations else
+            "Withheld gauges are independent of the likelihood. When this "
+            "period includes configuration-selection dates, exclude those "
+            "dates from confirmatory claims."
+        ),
+    }
     report = {
-        "scope": {
-            "start": str(selected_times[0].astype("datetime64[D]")),
-            "end": str(selected_times[-1].astype("datetime64[D]")),
-            "n_days": n_days,
-            "members": args.members,
-            "background_day_offset": args.background_day_offset,
-            "checkpoint": args.ckpt,
-            "checkpoint_data": data_zarr,
-            "checkpoint_stats": data_stats,
-            "precip_transform": transform.to_dict(),
-            "config": args.config,
-            "config_overrides": config_overrides,
-            "group": args.group,
-            "holdout_fold": args.holdout_fold,
-            "holdout_folds": args.holdout_folds,
-            "n_assimilated_stations": int(len(assim_idx)),
-            "n_withheld_stations": int(len(eval_idx)),
-            "withheld_station_days": int(np.isfinite(withheld_observed).sum()),
-            "imerg_stride_default": args.imerg_stride,
-            "imerg_r_multiplier_default": args.imerg_r_multiplier,
-            "imerg_bias_correction": qm_meta,
-            "analysis_sampler_n_steps": int(base_sampler.n_steps),
-            "analysis_sampler_n_corrections": int(base_sampler.n_corrections),
-            "analysis_sampler_heun": bool(base_sampler.heun),
-            "background_sampler_n_steps": int(base_background_sampler.n_steps),
-            "background_sampler_n_corrections": int(
-                base_background_sampler.n_corrections
-            ),
-            "seed": args.seed,
-            "caveat": (
-                "A window this short cannot adjudicate CRPS differences of a few "
-                "percent. Use it to screen bias, wet-day frequency, increment "
-                "locality and stability; promote at most two arms to the full "
-                "multi-year run."
-            ),
-        },
+        "scope": scope,
         "variants": results,
         "ensrf_diagnostics": {
             name: payload.get("ensrf", []) for name, payload in diagnostics.items()
@@ -1385,6 +1433,32 @@ def main() -> None:
         **({"raw_imerg_mm": raw_imerg_mm} if raw_imerg_mm is not None else {}),
     )
     print(f"[sweep] wrote {out_path}", flush=True)
+
+    if args.fields_zarr:
+        if not args.assimilate_all_stations:
+            raise ValueError(
+                "--fields-zarr is reserved for --assimilate-all-stations; "
+                "saving fold-specific grids would create five incompatible "
+                "production products"
+            )
+        write_physical_ensemble_zarr(
+            args.fields_zarr,
+            fields=fields,
+            method_specs={variant.name: asdict(variant) for variant in variants},
+            selected_times=selected_times,
+            grid=grid,
+            valid=valid,
+            condition=condition,
+            chirps=chirps,
+            raw_imerg_mm=raw_imerg_mm,
+            imerg_factor=imerg_factor,
+            station_ids=np.asarray(stations.ids, dtype=str),
+            station_lat=stations.lat,
+            station_lon=stations.lon,
+            gauge_mm=gauge_mm,
+            assim_idx=assim_idx,
+            scope=scope,
+        )
 
 
 if __name__ == "__main__":
