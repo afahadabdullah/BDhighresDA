@@ -121,6 +121,7 @@ _spec.loader.exec_module(_bmd)
 load_prepared_imerg = _bmd.load_prepared_imerg
 transformed_imerg_variance = _bmd.transformed_imerg_variance
 sample_at_stations = _bmd.sample_at_stations
+coarse_footprint_grid = _bmd.coarse_footprint_grid
 
 _qm_spec = importlib.util.spec_from_file_location(
     "_imerg_qm", _MODULE_DIR / "27_fit_imerg_bias_correction.py"
@@ -148,8 +149,10 @@ class Variant:
     imerg_r_multiplier: float = 1.0
     gauge_weight: float = 1.0              # likelihood weight, 1 = production
     imerg_weight: float = 1.0
+    imerg_min_gauge_distance_km: float | None = None
     huber_delta: float | None = None
     prior_temperature: float | None = None  # None -> config value
+    n_steps: int | None = None
     n_corrections: int | None = None
     guidance_spread_cells: float | None = None
     gauge_component_spread_cells: float | None = None
@@ -347,6 +350,73 @@ V2_INGESTION_S04 = [
             note="joint likelihood: selected gauge gamma/spread plus S04 IMERG"),
 ]
 
+# CPC-v2 simultaneous-ingestion refinement.  This group deliberately omits the
+# already completed gauges-only and operational simultaneous arms; script 53
+# reads those controls from ``v2_ingestion_s04`` and pairs them with these new
+# folds.  Each arm changes one mechanism.  The no-corrector n25/n50/n100 trio
+# isolates ODE discretisation: changing n_steps with two correctors per level
+# would also change the number of Langevin updates and would not be an ODE test.
+V2_SIMULTANEOUS_REFINE = [
+    Variant("v2_simul_s04_iw050", streams="both", prior_temperature=1.0,
+            imerg_stride=1, imerg_weight=0.50,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="half-strength IMERG likelihood; gauge method fixed"),
+    Variant("v2_simul_s04_iw075", streams="both", prior_temperature=1.0,
+            imerg_stride=1, imerg_weight=0.75,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="three-quarter-strength IMERG likelihood"),
+    Variant("v2_simul_s04_ig003", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=3.0e-3,
+            note="softer early-time IMERG guidance"),
+    Variant("v2_simul_s04_ig010", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-2,
+            note="IMERG early-time softness matched to gauges"),
+    Variant("v2_simul_s04_gw125", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_weight=1.25,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="25% stronger gauge authority in the joint likelihood"),
+    Variant("v2_simul_s04_huber3", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="robust joint cost for gauge or retrieval outliers"),
+    Variant("v2_simul_s04_gap050", streams="both", prior_temperature=1.0,
+            imerg_stride=1, imerg_min_gauge_distance_km=50.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="IMERG fills only locations at least 50 km from an assimilated gauge"),
+    Variant("v2_simul_s04_gap100", streams="both", prior_temperature=1.0,
+            imerg_stride=1, imerg_min_gauge_distance_km=100.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="more conservative 100 km gauge-exclusion radius"),
+    Variant("v2_simul_s04_nc0_n025", streams="both", prior_temperature=1.0,
+            imerg_stride=1, n_steps=25, n_corrections=0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="ODE convergence: 25 Heun steps, no Langevin correctors"),
+    Variant("v2_simul_s04_nc0_n050", streams="both", prior_temperature=1.0,
+            imerg_stride=1, n_steps=50, n_corrections=0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="ODE convergence: 50 Heun steps, no Langevin correctors"),
+    Variant("v2_simul_s04_nc0_n100", streams="both", prior_temperature=1.0,
+            imerg_stride=1, n_steps=100, n_corrections=0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="ODE convergence: 100 Heun steps, no Langevin correctors"),
+    Variant("v2_simul_s04_n100", streams="both", prior_temperature=1.0,
+            imerg_stride=1, n_steps=100,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="operational sensitivity: 100 Heun steps with two correctors"),
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -370,10 +440,11 @@ GROUPS = {
     "v2_gauges_ensrf": V2_GAUGES_ENSRF,
     "v2_gauges_refine": V2_GAUGES_REFINE,
     "v2_ingestion_s04": V2_INGESTION_S04,
+    "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
-        + V2_GAUGES_REFINE + V2_INGESTION_S04
+        + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
     ),
 }
 
@@ -584,6 +655,26 @@ def main() -> None:
 
     variants = resolve_variants(args.group, args.variants)
     for variant in variants:
+        if variant.n_steps is not None and variant.n_steps < 2:
+            raise ValueError(f"{variant.name}: n_steps must be at least 2")
+        if variant.n_corrections is not None and variant.n_corrections < 0:
+            raise ValueError(f"{variant.name}: n_corrections cannot be negative")
+        if variant.gauge_weight <= 0.0 or variant.imerg_weight <= 0.0:
+            raise ValueError(f"{variant.name}: likelihood weights must be positive")
+        if (
+            variant.imerg_min_gauge_distance_km is not None
+            and not variant.uses_imerg
+        ):
+            raise ValueError(
+                f"{variant.name}: IMERG gauge exclusion requires a satellite stream"
+            )
+        if (
+            variant.imerg_min_gauge_distance_km is not None
+            and variant.imerg_min_gauge_distance_km < 0.0
+        ):
+            raise ValueError(
+                f"{variant.name}: IMERG gauge exclusion distance cannot be negative"
+            )
         if (
             variant.gauge_component_spread_cells is not None
             and variant.streams != "both"
@@ -768,6 +859,7 @@ def main() -> None:
     combined_operator = None
     land_footprints = None
     coarse_shape = None
+    coarse_distance_to_gauge_km = None
     if uses_imerg:
         satellite_operator = PhysicalBlockAverageObsOperator(
             imerg_factor, transform, valid=valid
@@ -779,6 +871,15 @@ def main() -> None:
             satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
         )
         coarse_shape = raw_imerg_mm.shape[1:]
+        footprint_grid = coarse_footprint_grid(grid, imerg_factor)
+        if footprint_grid.shape != coarse_shape:
+            raise ValueError(
+                f"operator footprint grid {footprint_grid.shape} disagrees with "
+                f"IMERG data {coarse_shape}"
+            )
+        coarse_distance_to_gauge_km = distance_to_nearest_station(
+            footprint_grid, stations.lat[assim_idx], stations.lon[assim_idx]
+        ).reshape(-1)
     error_corr_cells = float(imerg_config.get("error_corr_cells", 0.0))
 
     def satellite_setup(variant: Variant):
@@ -790,6 +891,8 @@ def main() -> None:
         offset = stride // 2
         thinning[offset::stride, offset::stride] = True
         keep = land_footprints & thinning.reshape(-1)
+        if variant.imerg_min_gauge_distance_km is not None:
+            keep &= coarse_distance_to_gauge_km >= variant.imerg_min_gauge_distance_km
         inflation = max(1.0, 2.0 * np.pi * (error_corr_cells / stride) ** 2) * (
             args.imerg_r_multiplier * variant.imerg_r_multiplier
         )
@@ -840,6 +943,8 @@ def main() -> None:
             sampler = replace(sampler, seed=day_seed)
             if variant.prior_temperature is not None:
                 sampler = replace(sampler, prior_temperature=variant.prior_temperature)
+            if variant.n_steps is not None:
+                sampler = replace(sampler, n_steps=variant.n_steps)
             if variant.n_corrections is not None:
                 sampler = replace(sampler, n_corrections=variant.n_corrections)
             guidance = base_guidance
@@ -949,18 +1054,18 @@ def main() -> None:
                     )
                 else:
                     sigma_floor = float(imerg_config["sigma_obs"])
-                satellite_variance = transformed_imerg_variance(
+                satellite_base_variance = transformed_imerg_variance(
                     satellite_mm,
                     satellite_error_mm,
                     transform,
                     sigma_floor=sigma_floor,
                     representativeness=float(imerg_config["representativeness"]),
                 )
-                satellite_variance = (
-                    satellite_variance * np.float32(inflation) / np.float32(variant.imerg_weight)
-                )
+                satellite_base_variance *= np.float32(inflation)
                 keep_now = (
-                    keep & np.isfinite(satellite_observation) & np.isfinite(satellite_variance)
+                    keep
+                    & np.isfinite(satellite_observation)
+                    & np.isfinite(satellite_base_variance)
                 )
                 if not keep_now.any():
                     raise RuntimeError(
@@ -971,17 +1076,23 @@ def main() -> None:
                     "satellite_valid_count", []
                 ).append(int(keep_now.sum()))
                 satellite_observation[~keep_now] = np.nan
-                satellite_variance[~keep_now] = 1.0
-                satellite_R = torch.from_numpy(satellite_variance).to(device)
+                satellite_base_variance[~keep_now] = 1.0
+                # Perturb from the physical observation-error model.  A
+                # likelihood weight changes the posterior cost, not the
+                # instrument that generated the observation draw.  Gauge
+                # weighting already follows this convention.
                 satellite_perturbed = perturb_observations(
                     satellite_observation,
-                    satellite_R,
+                    satellite_base_variance,
                     args.members,
                     seed=day_seed + 2_000_000,
                     corr_blocks=[(0, coarse_shape[0], coarse_shape[1], error_corr_cells)],
                 ).astype(np.float32)
                 satellite_perturbed[:, ~np.isfinite(satellite_observation)] = np.nan
                 satellite_y = torch.from_numpy(satellite_perturbed[:, None]).to(device)
+                satellite_R = torch.from_numpy(
+                    satellite_base_variance / np.float32(variant.imerg_weight)
+                ).to(device)
 
             # --- per-stream likelihood weighting ------------------------------------
             # Weighting a stream by w means dividing BOTH its R and its Gamma
@@ -1211,6 +1322,13 @@ def main() -> None:
             "imerg_stride_default": args.imerg_stride,
             "imerg_r_multiplier_default": args.imerg_r_multiplier,
             "imerg_bias_correction": qm_meta,
+            "analysis_sampler_n_steps": int(base_sampler.n_steps),
+            "analysis_sampler_n_corrections": int(base_sampler.n_corrections),
+            "analysis_sampler_heun": bool(base_sampler.heun),
+            "background_sampler_n_steps": int(base_background_sampler.n_steps),
+            "background_sampler_n_corrections": int(
+                base_background_sampler.n_corrections
+            ),
             "seed": args.seed,
             "caveat": (
                 "A window this short cannot adjudicate CRPS differences of a few "
