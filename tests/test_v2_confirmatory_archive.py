@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -21,6 +22,14 @@ SPEC = importlib.util.spec_from_file_location(
 SUMMARY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = SUMMARY
 SPEC.loader.exec_module(SUMMARY)
+
+EVALUATOR_SPEC = importlib.util.spec_from_file_location(
+    "_v2_gridded_evaluator",
+    ROOT / "scripts" / "55_evaluate_v2_gridded_archive.py",
+)
+EVALUATOR = importlib.util.module_from_spec(EVALUATOR_SPEC)
+sys.modules[EVALUATOR_SPEC.name] = EVALUATOR
+EVALUATOR_SPEC.loader.exec_module(EVALUATOR)
 
 from bdhires.zarr_output import write_physical_ensemble_zarr  # noqa: E402
 
@@ -77,6 +86,7 @@ def test_selection_dates_and_may_2022_are_excluded_only_from_primary_scores():
         },
     }
     assert SUMMARY.daily_mask(data, confirmatory=True).tolist() == [False, False, True, True]
+    assert EVALUATOR.confirmatory_daily_mask(dates).tolist() == [False, False, True, True]
     assert SUMMARY.daily_mask(data, confirmatory=False).tolist() == [True] * 4
     assert SUMMARY.monthly_samples(data, confirmatory=True)["month"].astype(str).tolist() == [
         "2022-06"
@@ -282,3 +292,96 @@ def test_full_four_period_validation_and_selection_guard(tmp_path):
     assert sum(entry["days"] for entry in catalog) == 520
     assert len(fold_plots) == 20 and all(Path(path).is_file() for path in fold_plots)
     json.dumps({"primary": primary, "catalog": catalog}, allow_nan=False)
+
+
+def test_real_archive_evaluator_separates_products_texture_and_gauges(tmp_path):
+    n_time, members, size = 8, 3, 16
+    times = np.arange(np.datetime64("2021-05-01"), np.datetime64("2021-05-09"))
+    lat = 22.0 + 0.05 * np.arange(size)
+    lon = 88.0 + 0.05 * np.arange(size)
+    grid = SimpleNamespace(
+        lat=lat, lon=lon, lat_min=lat[0] - 0.025,
+        lon_min=lon[0] - 0.025, res=0.05,
+    )
+    valid = np.ones((size, size), bool)
+    yy, xx = np.mgrid[:size, :size]
+    texture = np.sin(2 * np.pi * yy / 4) * np.cos(2 * np.pi * xx / 4)
+    broad = 4.0 + yy / 8 + xx / 12
+    chirps = np.stack([broad + day + 2.0 * texture for day in range(n_time)]).astype(np.float32)
+    cpc = np.stack([broad + day for day in range(n_time)]).astype(np.float32)
+    imerg = EVALUATOR.S.block_mean(chirps, 8, np.broadcast_to(valid, chirps.shape))
+    fields = {}
+    for method_index, method in enumerate(SUMMARY.METHODS):
+        centre = np.stack([
+            broad + day + (0.4 + 0.3 * method_index) * texture
+            for day in range(n_time)
+        ])
+        fields[method] = np.stack([
+            centre - 0.2 * texture, centre, centre + 0.2 * texture
+        ], axis=1).astype(np.float32)
+
+    station_ids = np.asarray(["A", "B", "C", "D", "E"])
+    station_y = np.asarray([2, 4, 7, 10, 13])
+    station_x = np.asarray([2, 11, 7, 13, 4])
+    station_lat = lat[station_y]
+    station_lon = lon[station_x]
+    gauge = chirps[:, station_y, station_x]
+    store = tmp_path / "gridded" / "2021_may_sep.zarr"
+    write_physical_ensemble_zarr(
+        store,
+        fields=fields,
+        method_specs={name: {} for name in SUMMARY.METHODS},
+        selected_times=times,
+        grid=grid,
+        valid=valid,
+        condition=cpc,
+        chirps=chirps,
+        raw_imerg_mm=imerg,
+        imerg_factor=8,
+        station_ids=station_ids,
+        station_lat=station_lat,
+        station_lon=station_lon,
+        gauge_mm=gauge,
+        assim_idx=np.arange(5),
+        scope={"start": "2021-05-01", "end": "2021-05-08",
+               "assimilate_all_stations": True},
+    )
+    fold_dir = tmp_path / "cv" / "2021_may_sep"
+    fold_dir.mkdir(parents=True)
+    for fold in range(5):
+        arrays = {}
+        for method in SUMMARY.METHODS:
+            arrays[f"station_{method}"] = fields[method][:, :, station_y, station_x]
+            arrays[f"meanfield_{method}"] = fields[method].mean(axis=1)
+        np.savez_compressed(
+            fold_dir / f"fold{fold}.npz",
+            times=times.astype(str), station_ids=station_ids,
+            station_lat=station_lat, station_lon=station_lon,
+            grid_lat=lat, grid_lon=lon, eval_idx=np.asarray([fold]),
+            assim_idx=np.asarray([index for index in range(5) if index != fold]),
+            variant_names=np.asarray(SUMMARY.METHODS), gauge_mm=gauge,
+            valid=valid, chirps=chirps, condition=cpc, raw_imerg_mm=imerg,
+            **arrays,
+        )
+
+    output = tmp_path / "evaluation"
+    arguments = [
+        "55_evaluate_v2_gridded_archive.py", "--zarr", str(store),
+        "--cv-root", str(tmp_path), "--out-dir", str(output),
+        "--texture-members", "1",
+    ]
+    with mock.patch.object(sys, "argv", arguments):
+        EVALUATOR.main()
+    payload = json.loads((output / "evaluation.json").read_text())
+    assert payload["design"]["days"] == 8
+    assert len(payload["evaluation_matrix"]) == len(SUMMARY.METHODS)
+    assert len(payload["withheld_gauge_matrix"]) == len(SUMMARY.METHODS)
+    assert len(payload["withheld_gauge_subgrid_anomalies"]) == 3 * len(SUMMARY.METHODS)
+    assert all(
+        "mse_skill_vs_no_subgrid" in row
+        for row in payload["withheld_gauge_subgrid_anomalies"]
+    )
+    assert payload["interpretation"]["chirps_role"].endswith("gridded truth")
+    assert (output / "fig01_evaluation_matrix.png").is_file()
+    assert (output / "fig03_subgrid_matrix.png").is_file()
+    assert (output / "fig05_subgrid_case.png").is_file()

@@ -176,6 +176,16 @@ variation of daily ensemble means, while `monthly_posterior_spread` measures
 average within-day ensemble uncertainty. `monthly_member_means` retains the 30
 members for probabilistic monthly comparisons.
 
+The complete reference-aware evaluation—including daily/monthly plots,
+multi-product matrices, spectra, variograms, subgrid decomposition and
+withheld-gauge sub-footprint anomaly tests—is documented in
+`docs/EVALUATION_v2_gridded_archive.md`. It can be submitted as soon as any one
+seasonal Zarr completes:
+
+```bash
+bash slurm/submit_v2_gridded_evaluation.sh
+```
+
 ## Safe restart behavior
 
 Rerunning the submission command reuses a task only when all expected outputs
