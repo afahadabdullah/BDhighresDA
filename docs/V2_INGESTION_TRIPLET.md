@@ -71,6 +71,21 @@ Treat cap activation above 1% of member-steps, or a much higher fraction in the
 simultaneous arm than either single-stream arm, as a failed stability screen;
 in that case the result needs a no-corrector sensitivity before publication.
 
+A subsequent v1-to-v2 audit found the missing v2-specific mechanism. V1 used a
+smooth `log1p` precipitation transform, whereas v2 uses `sqrt`. The physical
+operators compute `T(average(T^-1(x)))`; at an exactly dry gauge stencil or
+satellite footprint, automatic differentiation previously crossed the infinite
+derivative of `sqrt(0)` after the inverse branch supplied a zero derivative.
+This undefined `0 * inf` path explains why a single member could fail in either
+observation component. The square-root transform now preserves its exact
+forward values and explicitly selects the finite zero subgradient at zero.
+Regression tests cover the transform itself and all-dry physical gauge and
+block-average operators. Each GPU fold also runs
+`scripts/51_check_sqrt_da_gradient.py` against its actual torch/CUDA backend
+before assimilation. The land-mask and bounded-corrector changes remain valid
+independent safeguards, but they are no longer presented as the complete
+explanation of the v2 failures.
+
 Before committing a full five-fold run, reproduce the failing fold through day
 2 with all 30 members:
 
@@ -114,7 +129,7 @@ preflight -> five-fold array -> pooled summary
 Outputs are isolated at:
 
 ```text
-data/processed/v2_ingestion_triplet/ing2022_s04_g010_capped/
+data/processed/v2_ingestion_triplet/ing2022_s04_g010_sqrtfix/
   fold0.npz ... fold4.npz
   fold0.json ... fold4.json
   ingestion_selection.md

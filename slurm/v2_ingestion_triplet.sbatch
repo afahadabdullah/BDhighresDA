@@ -32,11 +32,16 @@ mkdir -p logs
     exit 1
 }
 
+# This is the v2-only numerical boundary that failed intermittently in the
+# earlier run. Check the real torch/CUDA backend before spending minutes on a
+# day of assimilation.
+"$PYTHON_BIN" -u scripts/51_check_sqrt_da_gradient.py
+
 FOLD="${SLURM_ARRAY_TASK_ID:?run as the configured five-fold array}"
 START="${V2_INGEST_START:-2022-05-01}"
 END="${V2_INGEST_END:-2022-05-10}"
 MEMBERS="${V2_INGEST_MEMBERS:-30}"
-ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04_g010_capped}"
+ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04_g010_sqrtfix}"
 IMERG="${V2_INGEST_IMERG:?set V2_INGEST_IMERG to the prepared S04 file}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc_v2/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"

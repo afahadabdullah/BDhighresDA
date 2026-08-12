@@ -23,7 +23,7 @@ export PYTHONPATH="$PWD/src"
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/bdhires-v2-ingest-summary-${SLURM_JOB_ID}"
 mkdir -p "$MPLCONFIGDIR" logs
 
-ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04_g010_capped}"
+ROOT="${V2_INGEST_ROOT:-data/processed/v2_ingestion_triplet/ing2022_s04_g010_sqrtfix}"
 DUMPS=()
 REPORTS=()
 for fold in 0 1 2 3 4; do

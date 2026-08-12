@@ -42,6 +42,45 @@ def _backend(x):
     return np
 
 
+if torch is not None:
+
+    class _SqrtWithZeroSubgradient(torch.autograd.Function):
+        """Exact square root with the zero subgradient selected at zero.
+
+        ``sqrt`` has an infinite derivative at zero.  In the physical
+        observation operators it is composed with the inverse square-root
+        transform, ``sqrt(clamp(z, 0) ** 2)``.  The composite is finite but
+        PyTorch can encounter ``0 * inf`` while differentiating an exactly dry
+        gauge stencil or satellite footprint.  Selecting the zero subgradient
+        matches the locally constant dry branch introduced by inverse()'s
+        clamp and leaves every forward value exact.
+        Unexpected NaNs are deliberately not repaired here: their gradients
+        remain non-finite so the DA fail-fast checks still catch them.
+        """
+
+        @staticmethod
+        def forward(ctx, values):
+            roots = torch.sqrt(values)
+            ctx.save_for_backward(roots)
+            return roots
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (roots,) = ctx.saved_tensors
+            derivative = grad_output / (2.0 * roots)
+            return torch.where(
+                roots == 0,
+                torch.zeros_like(derivative),
+                derivative,
+            )
+
+
+def _sqrt_with_zero_subgradient(values):
+    if torch is not None and isinstance(values, torch.Tensor):
+        return _SqrtWithZeroSubgradient.apply(values)
+    return np.sqrt(values)
+
+
 @dataclass(frozen=True)
 class PrecipTransform:
     """Invertible mm/day <-> model-space transform.
@@ -72,7 +111,7 @@ class PrecipTransform:
         if self.kind == "log1p":
             y = xp.log1p(p / self.eps)
         elif self.kind == "sqrt":
-            y = xp.sqrt(p)
+            y = _sqrt_with_zero_subgradient(p)
         elif self.kind == "cbrt":
             y = p ** (1.0 / 3.0)
         elif self.kind == "none":

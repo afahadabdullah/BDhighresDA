@@ -183,6 +183,18 @@ so their relative contribution is unknown. Delta is now capped at 0.3, its norm
 uses active land dimensions only, the mask is restored after each substep, and
 cap activation is written to the reports.
 
+**Later v1-to-v2 audit:** the common v2-specific cause was still present. V1
+used `log1p`; v2 uses `sqrt`. At an exactly dry predicted gauge stencil or
+satellite footprint, the physical observation operators differentiated through
+`sqrt(0)` after the inverse branch supplied a zero derivative. The resulting
+undefined `0 * inf` path explains the one-member failure in either component.
+The transform now preserves exact square-root forward values but selects the
+zero subgradient at zero. Unit tests cover both physical operators, and every
+v2 ingestion fold runs `scripts/51_check_sqrt_da_gradient.py` on its actual
+torch/CUDA backend before assimilation. The land-mask and corrector changes
+remain valid safeguards, but the earlier claim that they completely explained
+the v2 failure was too strong.
+
 ### Hypotheses already ruled out
 
 1. **Crop misalignment** -- factor 8 divides 128 evenly, needs no crop, fails.

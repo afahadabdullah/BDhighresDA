@@ -9,8 +9,10 @@ import pytest
 
 from bdhires.da import (
     BilinearObsOperator,
+    GuidanceConfig,
     PhysicalBilinearObsOperator,
     PhysicalBlockAverageObsOperator,
+    obs_log_likelihood,
 )
 from bdhires.grids import Grid
 from bdhires.transforms import PrecipTransform
@@ -56,6 +58,55 @@ def test_bilinear_station_interpolates_mm_before_transforming():
     expected = transform.forward(physical.mean())
 
     assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_sqrt_transform_has_exact_forward_and_finite_zero_subgradient():
+    transform = PrecipTransform(kind="sqrt", mu=0.4, sd=1.3)
+    physical = torch.tensor([0.0, 1.0, 4.0], requires_grad=True)
+
+    transformed = transform.forward(physical)
+    expected = (torch.tensor([0.0, 1.0, 2.0]) - 0.4) / 1.3
+    assert torch.equal(transformed, expected)
+
+    transformed.sum().backward()
+    expected_gradient = torch.tensor([0.0, 1.0 / 2.6, 1.0 / 5.2])
+    assert torch.isfinite(physical.grad).all()
+    assert torch.allclose(physical.grad, expected_gradient, atol=1e-7)
+
+
+def test_sqrt_physical_operators_have_finite_all_dry_gradient():
+    """A dry v2 member must not create 0-times-infinity in H backward."""
+    grid = Grid("tiny", lon_min=90.0, lat_min=20.0, nlon=4, nlat=4, res=0.05)
+    transform = PrecipTransform(kind="sqrt", mu=0.4, sd=1.3)
+    valid = np.ones((4, 4), dtype=np.float32)
+    lat = np.array([(grid.lat[1] + grid.lat[2]) / 2])
+    lon = np.array([(grid.lon[1] + grid.lon[2]) / 2])
+
+    # This is transformed precipitation below T(0). inverse() maps the complete
+    # field to exactly 0 mm, reproducing the failed v2 dry-member boundary.
+    state = torch.full((1, 1, 4, 4), -10.0, requires_grad=True)
+    block = PhysicalBlockAverageObsOperator(2, transform, valid=valid)
+    gauge = PhysicalBilinearObsOperator(
+        grid, lat, lon, transform, valid=valid
+    )
+    predicted = torch.cat([block(state), gauge(state)], dim=-1)
+    dry_value = transform.forward(torch.tensor(0.0))
+    assert torch.all(predicted == dry_value)
+
+    # Keep a non-zero likelihood residual so backward really crosses sqrt(0).
+    wet_observation = transform.forward(torch.full_like(predicted, 4.0))
+    variance = torch.full_like(predicted, 0.25)
+    time = torch.tensor([0.5])
+    likelihood = obs_log_likelihood(
+        wet_observation,
+        predicted,
+        variance,
+        time,
+        GuidanceConfig(gamma=1.0e-3),
+    )
+    likelihood.sum().backward()
+    assert torch.isfinite(state.grad).all()
+    assert torch.count_nonzero(state.grad) == 0
 
 
 def test_bilinear_station_zeros_masked_ocean_before_coastal_interpolation():
