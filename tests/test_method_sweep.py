@@ -47,6 +47,7 @@ qm = _load("27_fit_imerg_bias_correction")
 summary = _load("29_summarize_method_sweep")
 v2_gauge_summary = _load("49_summarize_v2_gauge_sweep")
 v2_ingestion_summary = _load("50_summarize_v2_ingestion_triplet")
+v1_v2_summary = _load("52_compare_v1_v2_da")
 
 
 # ---------------------------------------------------------------- quantile map
@@ -430,6 +431,30 @@ def test_ingestion_verdict_uses_whole_interval():
     assert v2_ingestion_summary.verdict({"ci_low": 0.1, "ci_high": 0.5}) == "satellite_helps"
     assert v2_ingestion_summary.verdict({"ci_low": -0.5, "ci_high": -0.1}) == "satellite_hurts"
     assert v2_ingestion_summary.verdict({"ci_low": -0.1, "ci_high": 0.2}) == "unresolved"
+
+
+def test_v1_v2_fold_matching_allows_only_fold_label_permutation():
+    first = [
+        {"withheld": ("A", "B"), "ids": np.array(list("ABCD"))},
+        {"withheld": ("C", "D"), "ids": np.array(list("ABCD"))},
+    ]
+    second = list(reversed(first))
+    assert v1_v2_summary.match_fold_partitions(
+        {"v1": first, "v2": second}
+    ) == [("A", "B"), ("C", "D")]
+
+
+def test_v1_v2_fold_matching_rejects_different_assimilated_complements():
+    first = [
+        {"withheld": ("A", "B"), "ids": np.array(list("ABCD"))},
+        {"withheld": ("C", "D"), "ids": np.array(list("ABCD"))},
+    ]
+    second = [
+        {"withheld": ("A", "C"), "ids": np.array(list("ABCD"))},
+        {"withheld": ("B", "D"), "ids": np.array(list("ABCD"))},
+    ]
+    with pytest.raises(ValueError, match="withheld station groups differ"):
+        v1_v2_summary.match_fold_partitions({"v1": first, "v2": second})
 
 
 @needs_sweep

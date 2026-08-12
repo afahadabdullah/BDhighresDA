@@ -143,3 +143,27 @@ The primary paired test is
 The 95% interval uses a circular three-day block bootstrap and keeps every
 station from a weather day together. If the interval includes zero, the honest
 conclusion is that the satellite contribution is unresolved on ten days.
+
+## Matched v1 comparison
+
+After the corrected five-fold v2 triplet and its summary finish, compare it
+against both the previously reported v1 gauge result (`ing2022_RAW`) and the
+same S04 simultaneous method under v1 (`ing2022_S04`) without rerunning DA:
+
+```bash
+bash slurm/submit_v1_v2_ingestion_comparison.sh
+```
+
+The CPU-only comparison aligns folds by their withheld station-ID sets rather
+than trusting fold numbers. It rejects different station pools, dates, BMD
+values, ensemble sizes, or assimilated complements. It reports paired
+day-block intervals for v2 gauges versus v1 gauges, v2 simultaneous S04 versus
+v1 simultaneous S04, and v2 simultaneous S04 versus the previously reported
+v1 gauge DA. Outputs are written under:
+
+```text
+data/processed/v2_ingestion_triplet/ing2022_s04_g010_sqrtfix/v1_vs_v2/
+  v1_vs_v2_selection.md
+  v1_vs_v2_selection.json
+  v1_vs_v2_selection.png
+```
