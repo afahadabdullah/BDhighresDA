@@ -12,6 +12,7 @@ export V2_CONFIRM_ROOT="${V2_CONFIRM_ROOT:-data/processed/v2_confirmatory_2021_2
 export V2_EVAL_CV_ROOT="${V2_EVAL_CV_ROOT:-$V2_CONFIRM_ROOT}"
 export V2_EVAL_TEXTURE_MEMBERS="${V2_EVAL_TEXTURE_MEMBERS:-5}"
 POOL="${V2_EVAL_POOL:-1}"
+PER_SEASON="${V2_EVAL_PER_SEASON:-1}"
 
 STORES=()
 if (( $# )); then
@@ -30,14 +31,18 @@ if (( ${#STORES[@]} == 0 )); then
 fi
 
 echo "Submitting evaluation for ${#STORES[@]} completed season(s)"
-for store in "${STORES[@]}"; do
-    label="$(basename "$store" .zarr)"
-    out="$V2_CONFIRM_ROOT/evaluation/$label"
-    result="$(sbatch --parsable \
-        --export="ALL,V2_EVAL_ZARRS=$store,V2_EVAL_OUT=$out" \
-        slurm/v2_gridded_evaluation.sbatch)"
-    echo "  $label: ${result%%;*} -> $out"
-done
+if [[ "$PER_SEASON" == "1" ]]; then
+    for store in "${STORES[@]}"; do
+        label="$(basename "$store" .zarr)"
+        out="$V2_CONFIRM_ROOT/evaluation/$label"
+        result="$(sbatch --parsable \
+            --export="ALL,V2_EVAL_ZARRS=$store,V2_EVAL_OUT=$out" \
+            slurm/v2_gridded_evaluation.sbatch)"
+        echo "  $label: ${result%%;*} -> $out"
+    done
+else
+    echo "  per-season jobs disabled (V2_EVAL_PER_SEASON=0)"
+fi
 
 if [[ "$POOL" == "1" && ${#STORES[@]} -gt 1 ]]; then
     joined="$(IFS=:; echo "${STORES[*]}")"

@@ -14,13 +14,17 @@ This script therefore keeps three kinds of evidence separate:
    while the model anomaly is its fine prediction minus its own 0.4-degree
    block mean. Agreement robust to all three baselines is the strongest
    real-data evidence that located subgrid structure is useful.
-2. ``product_agreement``: daily/monthly spatial correlation and variability
+2. ``product_agreement``: daily/monthly/May--September spatial correlation and variability
    agreement with CHIRPS, IMERG, and CPC.  These diagnose plausibility and
    observation adherence; they are never labelled skill or truth.
 3. ``reference_free_structure``: variance below the 0.4-degree footprint,
    spectral power, variograms, member texture and ensemble coherence.  These
    establish that the model resolves rather than merely upsamples, but texture
    alone cannot prove correct placement.
+
+Production fields are also sampled at gauges that entered the likelihood. That
+table is explicitly called ``assimilated_fit`` and is never presented as
+independent verification.
 
 The script accepts one completed seasonal Zarr immediately, or several stores
 for a pooled analysis.  Every figure ships its underlying CSV tables through
@@ -68,6 +72,11 @@ def parse_args() -> argparse.Namespace:
              "default is inferred from a .../gridded/<period>.zarr path",
     )
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument(
+        "--cpc-source-zarr", default=None,
+        help="optional packed checkpoint Zarr used to load same-day original CPC; "
+             "default is inferred from each archive's scope.checkpoint_data",
+    )
     parser.add_argument("--factor", type=int, default=FOOTPRINT_FACTOR)
     parser.add_argument("--texture-members", type=int, default=5,
                         help="evenly spaced members used for spectra/variograms")
@@ -203,6 +212,8 @@ def point_metrics(members: np.ndarray, truth: np.ndarray) -> dict:
     difference = mean - truth
     wet = truth >= WET_MM
     low, high = np.quantile(members, [0.05, 0.95], axis=1)
+    rmse = float(np.sqrt(np.mean(difference**2)))
+    spread = float(np.sqrt(np.mean(np.var(members, axis=1, ddof=1))))
     return {
         "n": int(len(truth)),
         "crps_mm": float(np.mean(fair_crps_per_sample(members, truth))),
@@ -210,7 +221,10 @@ def point_metrics(members: np.ndarray, truth: np.ndarray) -> dict:
         "dry_mae_mm": float(np.mean(np.abs(difference[~wet]))) if (~wet).any() else None,
         "wet_mae_mm": float(np.mean(np.abs(difference[wet]))) if wet.any() else None,
         "bias_mm": float(np.mean(difference)),
+        "rmse_mm": rmse,
         "correlation": finite_float(correlation(mean, truth)),
+        "spread_mm": spread,
+        "spread_skill_ratio": float(spread / rmse) if rmse > 0 else None,
         "coverage_90": float(np.mean((truth >= low) & (truth <= high))),
     }
 
@@ -261,6 +275,31 @@ def bilinear_sample(field: np.ndarray, grid_lat: np.ndarray, grid_lon: np.ndarra
         + field[:, y0, x1] * (1 - wy)[None] * wx[None]
         + field[:, y1, x1] * wy[None] * wx[None]
     )
+
+
+def bilinear_sample_members(
+    field: np.ndarray,
+    grid_lat: np.ndarray,
+    grid_lon: np.ndarray,
+    station_lat: np.ndarray,
+    station_lon: np.ndarray,
+) -> np.ndarray:
+    """Bilinearly sample ``(time,member,lat,lon)`` to ``(time,member,station)``.
+
+    Production archives mask ocean cells after sampling.  The diffusion state
+    uses zero outside the land mask, so archived NaNs are restored to zero
+    before applying the same align-corners bilinear geometry used by the DA
+    station operator.
+    """
+    field = np.asarray(field, float)
+    if field.ndim != 4:
+        raise ValueError(f"expected time,member,lat,lon; got {field.shape}")
+    time, member, nlat, nlon = field.shape
+    sampled = bilinear_sample(
+        np.nan_to_num(field, nan=0.0).reshape(time * member, nlat, nlon),
+        grid_lat, grid_lon, station_lat, station_lon,
+    )
+    return sampled.reshape(time, member, len(station_lat))
 
 
 def write_rows(path: Path, rows: list[dict]) -> None:
@@ -373,6 +412,82 @@ def load_archive(paths: list[Path], factor: int) -> dict:
     }
 
 
+def load_same_day_cpc(archive: dict, override: str | None = None) -> tuple[np.ndarray, Path] | None:
+    """Load CPC on the gauge/target date from the checkpoint-bound packed store.
+
+    The CPC copied into the production Zarr is the lagged conditioning field.
+    This loader goes back to ``scope.checkpoint_data`` and selects the target
+    dates directly. If that auditable source is unavailable, CPC is omitted
+    from gauge verification rather than silently substituting the lagged input.
+    """
+    candidates = []
+    for dataset in archive["datasets"]:
+        scope = dataset.attrs.get("scope", {})
+        if isinstance(scope, dict) and scope.get("checkpoint_data"):
+            candidates.append(str(scope["checkpoint_data"]))
+    if override:
+        source_path = Path(override)
+    elif candidates and len(set(candidates)) == 1:
+        source_path = Path(candidates[0])
+    else:
+        print("[gauges] same-day CPC source is not uniquely recorded; omitting CPC")
+        return None
+    if not source_path.is_dir():
+        print(f"[gauges] same-day CPC source missing: {source_path}; omitting CPC")
+        return None
+
+    import zarr
+
+    root = zarr.open(str(source_path), mode="r")
+    channels = [str(name) for name in root.attrs.get("cond_channels", [])]
+    if "cpc_precip" not in channels:
+        print(f"[gauges] {source_path}: no cpc_precip channel; omitting CPC")
+        return None
+    cpc_index = channels.index("cpc_precip")
+    valid_index = channels.index("cpc_valid") if "cpc_valid" in channels else None
+    source_times = np.asarray(
+        root["time"][:], dtype="datetime64[ns]"
+    ).astype("datetime64[D]")
+    time_lookup = {day: index for index, day in enumerate(source_times)}
+    missing = [str(day) for day in archive["time"] if day not in time_lookup]
+    if missing:
+        print(
+            f"[gauges] {source_path}: {len(missing)} archive date(s) lack "
+            f"same-day CPC ({missing[:5]}); omitting CPC"
+        )
+        return None
+    source_lat = np.asarray(root["lat"][:], float)
+    source_lon = np.asarray(root["lon"][:], float)
+    lat_index = np.asarray([
+        int(np.argmin(np.abs(source_lat - value))) for value in archive["lat"]
+    ])
+    lon_index = np.asarray([
+        int(np.argmin(np.abs(source_lon - value))) for value in archive["lon"]
+    ])
+    if (
+        not np.allclose(source_lat[lat_index], archive["lat"], atol=1.0e-5)
+        or not np.allclose(source_lon[lon_index], archive["lon"], atol=1.0e-5)
+    ):
+        print(
+            f"[gauges] {source_path}: CPC grid does not contain the archive grid; "
+            "omitting CPC"
+        )
+        return None
+    output = np.empty((len(archive["time"]), *archive["valid"].shape), np.float32)
+    for position, day in enumerate(archive["time"]):
+        source_position = time_lookup[day]
+        layer = np.asarray(root["cond"][source_position, cpc_index], np.float32)
+        selected = layer[np.ix_(lat_index, lon_index)]
+        if valid_index is not None:
+            available = np.asarray(
+                root["cond"][source_position, valid_index], bool
+            )[np.ix_(lat_index, lon_index)]
+            selected = np.where(available, selected, np.nan)
+        output[position] = selected
+    print(f"[gauges] loaded same-day original CPC from {source_path}")
+    return output, source_path
+
+
 def product_fields(archive: dict) -> dict[str, np.ndarray]:
     return {name: archive[name] for name in REFERENCE_NAMES}
 
@@ -479,6 +594,219 @@ def evaluate_daily_and_monthly(archive: dict, factor: int) -> tuple[list[dict], 
                 ))
             monthly_matrix.append(row)
     return daily_rows, monthly_rows, matrix_rows + monthly_matrix
+
+
+def complete_may_sep_years(times: np.ndarray) -> list[int]:
+    """Calendar years containing every day from 1 May through 30 September."""
+    days = set(np.asarray(times).astype("datetime64[D]").astype(str).tolist())
+    years = sorted({int(str(day)[:4]) for day in times})
+    complete = []
+    for year in years:
+        expected = np.arange(
+            np.datetime64(f"{year}-05-01", "D"),
+            np.datetime64(f"{year}-10-01", "D"),
+        ).astype(str)
+        if set(expected.tolist()).issubset(days):
+            complete.append(year)
+    return complete
+
+
+def _period_field_metrics(candidate: np.ndarray, reference: np.ndarray) -> dict:
+    """Average spatial diagnostics over one or more matched gridded periods."""
+    candidate = np.asarray(candidate, float)
+    reference = np.asarray(reference, float)
+    if candidate.ndim == 2:
+        candidate, reference = candidate[None], reference[None]
+    correlations = daily_spatial_correlation(candidate, reference)
+    crmse = daily_centered_rmse(candidate, reference)
+    return {
+        "r": finite_float(np.nanmean(correlations)),
+        "crmse_mm": finite_float(np.nanmean(crmse)),
+        "bias_mm": finite_float(np.nanmean(candidate - reference)),
+        "variance_ratio": finite_float(ratio(
+            float(np.nanmean((candidate - np.nanmean(candidate, axis=(-2, -1), keepdims=True)) ** 2)),
+            float(np.nanmean((reference - np.nanmean(reference, axis=(-2, -1), keepdims=True)) ** 2)),
+        )),
+    }
+
+
+def evaluate_temporal_scales(archive: dict, factor: int) -> tuple[list[dict], list[dict], dict]:
+    """Evaluate gridded mean and temporal variability at daily/monthly/seasonal scales.
+
+    The common-support matrix uses exact 0.4-degree block means for every
+    source.  Daily variability is the day-to-day series of domain spatial SD;
+    monthly and May--September variability are maps of temporal SD of daily
+    precipitation.  The latter two therefore measure weather variability, not
+    posterior uncertainty.
+    """
+    methods = archive["methods"]
+    times = archive["time"].astype("datetime64[D]")
+    valid = archive["valid"]
+    sources = {
+        **{method: archive["mean"][index] for index, method in enumerate(methods)},
+        **product_fields(archive),
+    }
+    common = {name: block_stack(field, factor, valid) for name, field in sources.items()}
+    primary = confirmatory_daily_mask(times)
+    months = times.astype("datetime64[M]")
+    years = np.asarray([int(str(day)[:4]) for day in times])
+    full_years = complete_may_sep_years(times)
+    confirmatory_years = [year for year in full_years if year != 2022]
+    seasonal_scope = "confirmatory_full_may_sep"
+    if not confirmatory_years:
+        # A small single-season archive (and the synthetic unit test) still
+        # receives descriptive plots, but it is not mislabeled confirmation.
+        confirmatory_years = sorted(set(years[primary].tolist()))
+        seasonal_scope = "available_archive_no_complete_confirmatory_may_sep"
+
+    rows = []
+    for method in methods:
+        for reference in REFERENCE_NAMES:
+            daily_mean = _period_field_metrics(
+                common[method][primary], common[reference][primary]
+            )
+            method_sd = np.nanstd(common[method].reshape(len(times), -1), axis=1)[primary]
+            reference_sd = np.nanstd(common[reference].reshape(len(times), -1), axis=1)[primary]
+            daily_variability = {
+                "r": finite_float(correlation(method_sd, reference_sd)),
+                "crmse_mm": finite_float(centered_rmse(method_sd, reference_sd)),
+                "bias_mm": finite_float(np.nanmean(method_sd - reference_sd)),
+                "variance_ratio": finite_float(ratio(
+                    float(np.nanmean(method_sd**2)), float(np.nanmean(reference_sd**2))
+                )),
+            }
+            rows.append({
+                "method": method, "reference": reference, "scale": "daily",
+                "mean_definition": "daily precipitation pattern at 0.4 degree",
+                "variability_definition": "daily domain spatial SD time series",
+                "n_periods": int(primary.sum()),
+                **{f"mean_{key}": value for key, value in daily_mean.items()},
+                **{f"variability_{key}": value for key, value in daily_variability.items()},
+            })
+
+            month_mean_method, month_mean_reference = [], []
+            month_var_method, month_var_reference = [], []
+            for month in np.unique(months):
+                if str(month) == "2022-05":
+                    continue
+                choose = months == month
+                month_mean_method.append(np.nanmean(common[method][choose], axis=0))
+                month_mean_reference.append(np.nanmean(common[reference][choose], axis=0))
+                month_var_method.append(np.nanstd(common[method][choose], axis=0))
+                month_var_reference.append(np.nanstd(common[reference][choose], axis=0))
+            monthly_mean = _period_field_metrics(month_mean_method, month_mean_reference)
+            monthly_variability = _period_field_metrics(month_var_method, month_var_reference)
+            rows.append({
+                "method": method, "reference": reference, "scale": "monthly",
+                "mean_definition": "calendar-month mean pattern at 0.4 degree",
+                "variability_definition": "within-month temporal SD pattern",
+                "n_periods": int(len(month_mean_method)),
+                **{f"mean_{key}": value for key, value in monthly_mean.items()},
+                **{f"variability_{key}": value for key, value in monthly_variability.items()},
+            })
+
+            season_mean_method, season_mean_reference = [], []
+            season_var_method, season_var_reference = [], []
+            for year in confirmatory_years:
+                choose = (years == year) & primary
+                if not choose.any():
+                    continue
+                season_mean_method.append(np.nanmean(common[method][choose], axis=0))
+                season_mean_reference.append(np.nanmean(common[reference][choose], axis=0))
+                season_var_method.append(np.nanstd(common[method][choose], axis=0))
+                season_var_reference.append(np.nanstd(common[reference][choose], axis=0))
+            seasonal_mean = _period_field_metrics(season_mean_method, season_mean_reference)
+            seasonal_variability = _period_field_metrics(
+                season_var_method, season_var_reference
+            )
+            rows.append({
+                "method": method, "reference": reference, "scale": "may_sep",
+                "mean_definition": "May-September seasonal mean pattern at 0.4 degree",
+                "variability_definition": "within-season daily temporal SD pattern",
+                "season_scope": seasonal_scope,
+                "years": ",".join(str(year) for year in confirmatory_years),
+                "n_periods": int(len(season_mean_method)),
+                **{f"mean_{key}": value for key, value in seasonal_mean.items()},
+                **{f"variability_{key}": value for key, value in seasonal_variability.items()},
+            })
+
+    # Descriptive per-season values retain 2022 but mark its selection leakage.
+    daily_stats = {name: spatial_statistics(field, valid) for name, field in sources.items()}
+    seasonal_rows = []
+    for year in sorted(set(years.tolist())):
+        choose = years == year
+        label = "may_sep" if year in full_years else (
+            "may_jun" if set(int(str(day)[5:7]) for day in times[choose]) <= {5, 6}
+            else "available_period"
+        )
+        for name, field in sources.items():
+            mean_field = np.nanmean(field[choose], axis=0)
+            variability_field = np.nanstd(field[choose], axis=0)
+            seasonal_rows.append({
+                "year": year, "period": label, "source": name,
+                "start": str(times[choose].min()), "end": str(times[choose].max()),
+                "n_days": int(choose.sum()), "complete_may_sep": year in full_years,
+                "selection_contaminated": year == 2022,
+                "seasonal_domain_mean_mm": float(np.nanmean(mean_field[valid])),
+                "seasonal_spatial_std_mm": float(np.nanstd(mean_field[valid])),
+                "within_season_daily_variability_mm": float(
+                    np.nanmean(variability_field[valid])
+                ),
+                "daily_domain_mean_variability_mm": float(np.nanstd(
+                    daily_stats[name]["domain_mean_mm"][choose]
+                )),
+                "mean_posterior_spread_mm": (
+                    float(np.nanmean(archive["spread"][methods.index(name), choose][:, valid]))
+                    if name in methods else None
+                ),
+            })
+
+    # Calendar-month climatology maps use all confirmatory months available.
+    calendar_months = np.arange(5, 10)
+    monthly_mean_maps, monthly_variability_maps = {}, {}
+    for name, field in sources.items():
+        source_means, source_variability = [], []
+        for calendar_month in calendar_months:
+            means, variability = [], []
+            for year in sorted(set(years.tolist())):
+                month = np.datetime64(f"{year}-{calendar_month:02d}", "M")
+                if str(month) == "2022-05":
+                    continue
+                choose = months == month
+                if choose.any():
+                    means.append(np.nanmean(field[choose], axis=0))
+                    variability.append(np.nanstd(field[choose], axis=0))
+            if means:
+                source_means.append(np.nanmean(np.stack(means), axis=0))
+                source_variability.append(np.nanmean(np.stack(variability), axis=0))
+            else:
+                source_means.append(np.full(valid.shape, np.nan))
+                source_variability.append(np.full(valid.shape, np.nan))
+        monthly_mean_maps[name] = np.stack(source_means)
+        monthly_variability_maps[name] = np.stack(source_variability)
+
+    seasonal_mean_maps, seasonal_variability_maps = {}, {}
+    for name, field in sources.items():
+        means, variability = [], []
+        for year in confirmatory_years:
+            choose = (years == year) & primary
+            if choose.any():
+                means.append(np.nanmean(field[choose], axis=0))
+                variability.append(np.nanstd(field[choose], axis=0))
+        seasonal_mean_maps[name] = np.nanmean(np.stack(means), axis=0)
+        seasonal_variability_maps[name] = np.nanmean(np.stack(variability), axis=0)
+
+    grids = {
+        "sources": [*methods, *REFERENCE_NAMES],
+        "calendar_months": calendar_months,
+        "monthly_mean": monthly_mean_maps,
+        "monthly_variability": monthly_variability_maps,
+        "seasonal_mean": seasonal_mean_maps,
+        "seasonal_variability": seasonal_variability_maps,
+        "seasonal_scope": seasonal_scope,
+        "seasonal_years": confirmatory_years,
+    }
+    return rows, seasonal_rows, grids
 
 
 def selected_member_indices(count: int, requested: int) -> np.ndarray:
@@ -755,6 +1083,378 @@ def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
     return point_rows, anomaly_rows
 
 
+def load_withheld_gauge_bundle(
+    paths: list[Path], methods: list[str], factor: int, cv_root: Path | None
+) -> dict | None:
+    """Collect every independently withheld station/day exactly once."""
+    if cv_root is None:
+        return None
+    dates, stations, station_lats, station_lons, truth = [], [], [], [], []
+    members = {method: [] for method in methods}
+    products = {reference: [] for reference in REFERENCE_NAMES}
+    for path in paths:
+        period_dir = cv_root / "cv" / path.stem
+        fold_paths = sorted(period_dir.glob("fold[0-4].npz"))
+        if len(fold_paths) != 5:
+            continue
+        for fold_path in fold_paths:
+            with np.load(fold_path, allow_pickle=False) as dump:
+                if dump["variant_names"].astype(str).tolist() != methods:
+                    raise ValueError(f"{fold_path}: method order differs from Zarr")
+                eval_idx = np.asarray(dump["eval_idx"], int)
+                fold_dates = dump["times"].astype("datetime64[D]")
+                fold_stations = dump["station_ids"].astype(str)[eval_idx]
+                observed = np.asarray(dump["gauge_mm"][:, eval_idx], float)
+                dates.append(np.repeat(fold_dates, len(eval_idx)))
+                stations.append(np.tile(fold_stations, len(fold_dates)))
+                station_lats.append(np.tile(
+                    np.asarray(dump["station_lat"], float)[eval_idx], len(fold_dates)
+                ))
+                station_lons.append(np.tile(
+                    np.asarray(dump["station_lon"], float)[eval_idx], len(fold_dates)
+                ))
+                truth.append(observed.reshape(-1))
+                for method in methods:
+                    values = np.asarray(dump[f"station_{method}"][:, :, eval_idx], float)
+                    members[method].append(
+                        np.moveaxis(values, 1, 2).reshape(-1, values.shape[1])
+                    )
+                grid_lat = np.asarray(dump["grid_lat"], float)
+                grid_lon = np.asarray(dump["grid_lon"], float)
+                station_lat = np.asarray(dump["station_lat"], float)[eval_idx]
+                station_lon = np.asarray(dump["station_lon"], float)[eval_idx]
+                valid = np.asarray(dump["valid"], bool)
+                product_fields_at_scale = {
+                    "chirps": np.asarray(dump["chirps"], float),
+                    "cpc": np.asarray(dump["condition"], float),
+                    "imerg": upsample_coarse(
+                        np.asarray(dump["raw_imerg_mm"], float), factor, valid.shape
+                    ),
+                }
+                for reference, field in product_fields_at_scale.items():
+                    products[reference].append(bilinear_sample(
+                        np.nan_to_num(field, nan=0.0), grid_lat, grid_lon,
+                        station_lat, station_lon,
+                    ).reshape(-1))
+    if not truth:
+        return None
+    bundle = {
+        "date": np.concatenate(dates),
+        "station": np.concatenate(stations),
+        "station_lat": np.concatenate(station_lats),
+        "station_lon": np.concatenate(station_lons),
+        "truth": np.concatenate(truth),
+        "members": {method: np.concatenate(parts) for method, parts in members.items()},
+        "products": {
+            reference: np.concatenate(parts) for reference, parts in products.items()
+        },
+    }
+    keys = np.asarray([
+        f"{date}|{station}" for date, station in zip(bundle["date"], bundle["station"])
+    ])
+    if len(keys) != len(np.unique(keys)):
+        raise ValueError("a withheld date/station pair appears in more than one fold")
+    return bundle
+
+
+def load_assimilated_gauge_bundle(archive: dict) -> dict:
+    """Sample all-station production fields at gauges that entered the likelihood."""
+    methods = archive["methods"]
+    dates, stations, truth = [], [], []
+    members = {method: [] for method in methods}
+    for path, dataset in zip(archive["paths"], archive["datasets"]):
+        store_dates = np.asarray(dataset.time.values).astype("datetime64[D]")
+        station_ids = dataset.station_id.values.astype(str)
+        station_lat = np.asarray(dataset.station_lat.values, float)
+        station_lon = np.asarray(dataset.station_lon.values, float)
+        observed = np.asarray(dataset.gauge.values, float)
+        dates.append(np.repeat(store_dates, len(station_ids)))
+        stations.append(np.tile(station_ids, len(store_dates)))
+        truth.append(observed.reshape(-1))
+        for method_index, method in enumerate(methods):
+            print(f"[gauges] sampling assimilated fit: {path.stem} / {method}")
+            # ``method`` is a data variable in schema v1 rather than an xarray
+            # index coordinate, so positional selection is intentional here.
+            field = np.asarray(
+                dataset.precipitation.isel(method=method_index).values, float
+            )
+            sampled = bilinear_sample_members(
+                field, archive["lat"], archive["lon"], station_lat, station_lon
+            )
+            members[method].append(
+                np.moveaxis(sampled, 1, 2).reshape(-1, sampled.shape[1])
+            )
+            del field, sampled
+    return {
+        "date": np.concatenate(dates),
+        "station": np.concatenate(stations),
+        "truth": np.concatenate(truth),
+        "members": {method: np.concatenate(parts) for method, parts in members.items()},
+    }
+
+
+def attach_same_day_cpc_to_withheld_bundle(
+    bundle: dict | None, archive: dict, cpc: np.ndarray
+) -> None:
+    """Sample a matched same-day CPC grid for every withheld station record."""
+    if bundle is None:
+        return
+    time_lookup = {day: index for index, day in enumerate(archive["time"])}
+    sampled = np.full(len(bundle["date"]), np.nan, float)
+    for day in np.unique(bundle["date"]):
+        if day not in time_lookup:
+            continue
+        choose = bundle["date"] == day
+        sampled[choose] = bilinear_sample(
+            np.nan_to_num(cpc[time_lookup[day]][None], nan=0.0),
+            archive["lat"], archive["lon"],
+            bundle["station_lat"][choose], bundle["station_lon"][choose],
+        )[0]
+    bundle["products"]["cpc_same_day"] = sampled
+
+
+def aggregate_gauge_samples(
+    bundle: dict, methods: list[str], scale: str
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, dict]]:
+    """Aggregate daily station ensembles to monthly or May--September means."""
+    dates = bundle["date"].astype("datetime64[D]")
+    stations = bundle["station"].astype(str)
+    if scale == "monthly":
+        labels = dates.astype("datetime64[M]")
+        allowed = labels != np.datetime64("2022-05", "M")
+        period_labels = np.unique(labels[allowed])
+        group_name = lambda label: str(label)
+    elif scale == "may_sep":
+        years = np.asarray([int(str(day)[:4]) for day in dates])
+        full_years = complete_may_sep_years(np.unique(dates))
+        selected_years = [year for year in full_years if year != 2022]
+        if not selected_years:
+            selected_years = sorted(set(years[confirmatory_daily_mask(dates)].tolist()))
+        labels = years
+        allowed = np.isin(years, selected_years) & confirmatory_daily_mask(dates)
+        period_labels = np.asarray(selected_years)
+        group_name = lambda label: str(int(label))
+    else:
+        raise ValueError(f"unsupported gauge aggregation scale: {scale}")
+
+    output_truth = []
+    output_members = {method: [] for method in methods}
+    variability_truth = []
+    variability_predicted = {method: [] for method in methods}
+    groups = []
+    for label in period_labels:
+        in_period = allowed & (labels == label)
+        requested_days = len(np.unique(dates[in_period]))
+        required = int(np.ceil(0.8 * requested_days))
+        for station in np.unique(stations[in_period]):
+            choose = in_period & (stations == station)
+            finite = np.isfinite(bundle["truth"][choose])
+            for method in methods:
+                finite &= np.all(np.isfinite(bundle["members"][method][choose]), axis=1)
+            if finite.sum() < required or required == 0:
+                continue
+            observed = bundle["truth"][choose][finite]
+            output_truth.append(float(np.mean(observed)))
+            variability_truth.append(float(np.std(observed)))
+            groups.append(f"{group_name(label)}|{station}")
+            for method in methods:
+                values = bundle["members"][method][choose][finite]
+                output_members[method].append(np.mean(values, axis=0))
+                variability_predicted[method].append(float(np.std(values.mean(axis=1))))
+    return (
+        np.asarray(output_truth, float),
+        {method: np.asarray(values, float) for method, values in output_members.items()},
+        {
+            "group": np.asarray(groups),
+            "truth": np.asarray(variability_truth, float),
+            "predicted": {
+                method: np.asarray(values, float)
+                for method, values in variability_predicted.items()
+            },
+        },
+    )
+
+
+def evaluate_gauge_scales(
+    bundle: dict | None, methods: list[str], evaluation_type: str
+) -> list[dict]:
+    """Daily/monthly/seasonal gauge value and temporal-variability metrics."""
+    if bundle is None:
+        return []
+    rows = []
+    primary = confirmatory_daily_mask(bundle["date"])
+    full_years = complete_may_sep_years(np.unique(bundle["date"]))
+    confirmatory_years = [year for year in full_years if year != 2022]
+    gauge_season_scope = "confirmatory_full_may_sep"
+    if not confirmatory_years:
+        confirmatory_years = sorted({
+            int(str(day)[:4]) for day in bundle["date"][primary]
+        })
+        gauge_season_scope = "available_archive_no_complete_confirmatory_may_sep"
+    for method in methods:
+        rows.append({
+            "evaluation": evaluation_type,
+            "independent": evaluation_type == "withheld",
+            "scale": "daily", "method": method,
+            "temporal_variability_definition": None,
+            **point_metrics(bundle["members"][method][primary], bundle["truth"][primary]),
+        })
+    for scale in ("monthly", "may_sep"):
+        truth, members, variability = aggregate_gauge_samples(bundle, methods, scale)
+        for method in methods:
+            predicted_variability = variability["predicted"][method]
+            variability_truth = variability["truth"]
+            variability_keep = (
+                np.isfinite(predicted_variability) & np.isfinite(variability_truth)
+            )
+            rows.append({
+                "evaluation": evaluation_type,
+                "independent": evaluation_type == "withheld",
+                "scale": scale, "method": method,
+                "season_scope": gauge_season_scope if scale == "may_sep" else None,
+                "years": (
+                    ",".join(str(year) for year in confirmatory_years)
+                    if scale == "may_sep" else None
+                ),
+                "temporal_variability_definition": (
+                    "SD of daily ensemble mean versus SD of daily gauge values "
+                    "within each station-period"
+                ),
+                **point_metrics(members[method], truth),
+                "n_variability_groups": int(variability_keep.sum()),
+                "temporal_variability_correlation": finite_float(correlation(
+                    predicted_variability[variability_keep],
+                    variability_truth[variability_keep],
+                )),
+                "temporal_variability_bias_mm": finite_float(np.nanmean(
+                    predicted_variability[variability_keep]
+                    - variability_truth[variability_keep]
+                )),
+                "temporal_variability_ratio": finite_float(ratio(
+                    float(np.nanmean(predicted_variability[variability_keep] ** 2)),
+                    float(np.nanmean(variability_truth[variability_keep] ** 2)),
+                )),
+            })
+    return rows
+
+
+def deterministic_metrics(predicted: np.ndarray, observed: np.ndarray) -> dict:
+    """Matched deterministic scores for a product or an ensemble mean."""
+    predicted = np.asarray(predicted, float)
+    observed = np.asarray(observed, float)
+    keep = np.isfinite(predicted) & np.isfinite(observed)
+    if not keep.any():
+        return {"n": 0}
+    predicted, observed = predicted[keep], observed[keep]
+    difference = predicted - observed
+    return {
+        "n": int(len(observed)),
+        "correlation": finite_float(correlation(predicted, observed)),
+        "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+        "mae_mm": float(np.mean(np.abs(difference))),
+        "bias_mm": float(np.mean(difference)),
+    }
+
+
+def evaluate_long_term_withheld_products(
+    bundle: dict | None, methods: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Compare all model and reference products against withheld BMD gauges.
+
+    ``pooled_daily`` weights every finite station-day equally. ``station_time``
+    first scores the daily time series at each station and then summarizes the
+    station scores. ``long_term_mean`` averages each station over all archived
+    confirmatory dates and evaluates the 38-station spatial climatology.
+    """
+    if bundle is None:
+        return [], []
+    primary = confirmatory_daily_mask(bundle["date"])
+    observed = np.asarray(bundle["truth"], float)[primary]
+    dates = bundle["date"][primary]
+    stations = bundle["station"][primary].astype(str)
+    predictions = {
+        **{
+            method: np.asarray(bundle["members"][method], float)[primary].mean(axis=1)
+            for method in methods
+        },
+        "chirps": np.asarray(bundle["products"]["chirps"], float)[primary],
+        "imerg": np.asarray(bundle["products"]["imerg"], float)[primary],
+    }
+    if "cpc_same_day" in bundle["products"]:
+        predictions["cpc"] = np.asarray(
+            bundle["products"]["cpc_same_day"], float
+        )[primary]
+    common = np.isfinite(observed)
+    for predicted in predictions.values():
+        common &= np.isfinite(predicted)
+    if not common.any():
+        print("[gauges] no common finite withheld sample across products; skipping comparison")
+        return [], []
+    observed, dates, stations = observed[common], dates[common], stations[common]
+    predictions = {
+        source: predicted[common] for source, predicted in predictions.items()
+    }
+    rows, station_rows = [], []
+    for source, predicted in predictions.items():
+        pooled = deterministic_metrics(predicted, observed)
+        long_term_observed, long_term_predicted = [], []
+        for station in np.unique(stations):
+            choose = stations == station
+            scores = deterministic_metrics(predicted[choose], observed[choose])
+            keep = (
+                np.isfinite(predicted[choose]) & np.isfinite(observed[choose])
+            )
+            station_observed_mean = (
+                float(np.mean(observed[choose][keep])) if keep.any() else None
+            )
+            station_predicted_mean = (
+                float(np.mean(predicted[choose][keep])) if keep.any() else None
+            )
+            station_rows.append({
+                "source": source,
+                "source_type": "analysis" if source in methods else "product",
+                "station_id": station,
+                "long_term_observed_mm": station_observed_mean,
+                "long_term_predicted_mm": station_predicted_mean,
+                **scores,
+            })
+            if keep.any():
+                long_term_predicted.append(station_predicted_mean)
+                long_term_observed.append(station_observed_mean)
+        station_selected = [row for row in station_rows if row["source"] == source]
+        station_correlations = np.asarray([
+            row.get("correlation", np.nan) for row in station_selected
+        ], float)
+        finite_station_r = station_correlations[np.isfinite(station_correlations)]
+        fisher_mean_r = (
+            float(np.tanh(np.mean(np.arctanh(np.clip(
+                finite_station_r, -0.999999, 0.999999
+            ))))) if finite_station_r.size else None
+        )
+        long_term = deterministic_metrics(long_term_predicted, long_term_observed)
+        rows.append({
+            "source": source,
+            "source_type": "analysis" if source in methods else "product",
+            "archive_start": str(dates.min()), "archive_end": str(dates.max()),
+            "archive_days": int(len(np.unique(dates))),
+            "seasonal_sampling": "May-Sep 2021-2023 plus May-Jun 2024",
+            "selection_dates_excluded": "2022-05-01..2022-05-10",
+            "matched_sample_across_all_sources": True,
+            "cpc_timing": "same-day original CPC" if source == "cpc" else None,
+            "n_stations": int(len(np.unique(stations))),
+            **{f"pooled_daily_{key}": value for key, value in pooled.items()},
+            "mean_station_temporal_correlation": finite_float(
+                np.nanmean(station_correlations)
+            ),
+            "fisher_mean_station_temporal_correlation": fisher_mean_r,
+            "median_station_temporal_correlation": finite_float(
+                np.nanmedian(station_correlations)
+            ),
+            **{f"long_term_station_mean_{key}": value for key, value in long_term.items()},
+        })
+    return rows, station_rows
+
+
 def aggregate_monthly_matrix(rows: list[dict], methods: list[str]) -> list[dict]:
     output = []
     for method in methods:
@@ -933,6 +1633,347 @@ def plot_daily_monthly(daily_rows: list[dict], monthly_rows: list[dict],
         figure, out_dir, "02", "daily_monthly_variability",
         data={"daily": daily_rows, "monthly": monthly_rows}, sources=sources,
         caption="Daily and monthly amount and variability. Product curves are references, not truth.",
+    )
+    plt.close(figure)
+
+
+def save_temporal_grids(grids: dict, archive: dict, out_dir: Path) -> tuple[Path, list[dict]]:
+    """Ship compact gridded arrays behind the monthly and seasonal map figures."""
+    path = out_dir / "temporal_mean_variability_grids.npz"
+    arrays = {
+        "lat": archive["lat"], "lon": archive["lon"],
+        "calendar_month": grids["calendar_months"],
+        "seasonal_year": np.asarray(grids["seasonal_years"], int),
+        "seasonal_scope": np.asarray(grids["seasonal_scope"]),
+    }
+    summary = []
+    valid = archive["valid"]
+    for source in grids["sources"]:
+        for kind in (
+            "monthly_mean", "monthly_variability",
+            "seasonal_mean", "seasonal_variability",
+        ):
+            values = np.asarray(grids[kind][source], np.float32)
+            arrays[f"{kind}__{source}"] = values
+            if values.ndim == 2:
+                summary.append({
+                    "source": source, "field": kind, "calendar_month": None,
+                    "domain_mean_mm": float(np.nanmean(values[valid])),
+                    "spatial_std_mm": float(np.nanstd(values[valid])),
+                })
+            else:
+                for index, month in enumerate(grids["calendar_months"]):
+                    selected = values[index][valid]
+                    finite = selected[np.isfinite(selected)]
+                    summary.append({
+                        "source": source, "field": kind,
+                        "calendar_month": int(month),
+                        "domain_mean_mm": float(np.mean(finite)) if finite.size else None,
+                        "spatial_std_mm": float(np.std(finite)) if finite.size else None,
+                    })
+    np.savez_compressed(path, **arrays)
+    return path, summary
+
+
+def _source_label(name: str) -> str:
+    return name.replace("v2_simul_s04_", "").replace("v2_", "")
+
+
+def plot_monthly_grid_maps(
+    grids: dict, archive: dict, kind: str, number: str, out_dir: Path,
+    source_paths: list[Path], grid_path: Path, summary_rows: list[dict],
+) -> None:
+    plt = use_paper_style()
+    sources = grids["sources"]
+    months = grids["calendar_months"]
+    values = np.concatenate([
+        np.asarray(grids[kind][source], float).ravel() for source in sources
+    ])
+    values = values[np.isfinite(values)]
+    vmax = float(np.percentile(values, 98)) if values.size else 1.0
+    figure, axes = plt.subplots(
+        len(sources), len(months), figsize=(12, 1.35 * len(sources) + 1.0),
+        constrained_layout=True, squeeze=False,
+    )
+    image = None
+    extent = [archive["lon"][0], archive["lon"][-1], archive["lat"][0], archive["lat"][-1]]
+    month_names = ("May", "Jun", "Jul", "Aug", "Sep")
+    for row, source in enumerate(sources):
+        for column, month in enumerate(months):
+            axis = axes[row, column]
+            image = axis.imshow(
+                grids[kind][source][column], origin="lower", extent=extent,
+                vmin=0, vmax=vmax, cmap="YlGnBu", aspect="auto",
+            )
+            axis.grid(False)
+            if row == 0:
+                axis.set_title(month_names[column])
+            if column == 0:
+                axis.set_ylabel(_source_label(source))
+            axis.set_xticks([]); axis.set_yticks([])
+    label = "monthly mean precipitation (mm/day)" if kind == "monthly_mean" else (
+        "within-month temporal SD (mm/day)"
+    )
+    figure.colorbar(image, ax=axes, label=label, shrink=0.75)
+    title = "Calendar-month mean fields" if kind == "monthly_mean" else (
+        "Calendar-month daily variability fields"
+    )
+    figure.suptitle(f"{title} (selection month May 2022 excluded)")
+    selected_summary = [row for row in summary_rows if row["field"] == kind]
+    save_figure(
+        figure, out_dir, number, kind, data={"map_summary": selected_summary},
+        sources=[*source_paths, grid_path],
+        caption=(
+            f"{title}. Complete gridded values are in {grid_path.name}; "
+            "products are agreement references rather than truth."
+        ),
+    )
+    plt.close(figure)
+
+
+def plot_seasonal_grid_maps(
+    grids: dict, archive: dict, out_dir: Path, source_paths: list[Path],
+    grid_path: Path, summary_rows: list[dict],
+) -> None:
+    plt = use_paper_style()
+    sources = grids["sources"]
+    all_mean = np.concatenate([
+        np.asarray(grids["seasonal_mean"][source], float).ravel() for source in sources
+    ])
+    all_variability = np.concatenate([
+        np.asarray(grids["seasonal_variability"][source], float).ravel()
+        for source in sources
+    ])
+    mean_vmax = float(np.nanpercentile(all_mean, 98))
+    variability_vmax = float(np.nanpercentile(all_variability, 98))
+    figure, axes = plt.subplots(
+        2, len(sources), figsize=(2.0 * len(sources), 5.2),
+        constrained_layout=True, squeeze=False,
+    )
+    extent = [archive["lon"][0], archive["lon"][-1], archive["lat"][0], archive["lat"][-1]]
+    images = [None, None]
+    for column, source in enumerate(sources):
+        for row, (kind, vmax) in enumerate((
+            ("seasonal_mean", mean_vmax),
+            ("seasonal_variability", variability_vmax),
+        )):
+            axis = axes[row, column]
+            images[row] = axis.imshow(
+                grids[kind][source], origin="lower", extent=extent,
+                vmin=0, vmax=vmax, cmap="YlGnBu", aspect="auto",
+            )
+            axis.grid(False); axis.set_xticks([]); axis.set_yticks([])
+            if row == 0:
+                axis.set_title(_source_label(source), fontsize=7)
+        if column == 0:
+            axes[0, column].set_ylabel("May–Sep mean")
+            axes[1, column].set_ylabel("daily temporal SD")
+    figure.colorbar(images[0], ax=axes[0], label="mm/day", shrink=0.75)
+    figure.colorbar(images[1], ax=axes[1], label="mm/day", shrink=0.75)
+    years = ", ".join(str(year) for year in grids["seasonal_years"])
+    scope = grids["seasonal_scope"].replace("_", " ")
+    figure.suptitle(
+        f"May–September gridded mean and variability ({years}; {scope})"
+    )
+    selected_summary = [
+        row for row in summary_rows if row["field"].startswith("seasonal_")
+    ]
+    save_figure(
+        figure, out_dir, "08", "may_sep_gridded_mean_variability",
+        data={"map_summary": selected_summary}, sources=[*source_paths, grid_path],
+        caption=(
+            "Seasonal mean and within-season daily temporal standard deviation. "
+            f"Complete grids are in {grid_path.name}; 2022 is excluded from the "
+            "confirmatory seasonal climatology because it contains selection dates."
+        ),
+    )
+    plt.close(figure)
+
+
+def plot_temporal_scale_matrix(
+    rows: list[dict], out_dir: Path, source_paths: list[Path]
+) -> None:
+    plt = use_paper_style()
+    methods = list(dict.fromkeys(row["method"] for row in rows))
+    pairs = [(method, reference) for method in methods for reference in REFERENCE_NAMES]
+    scales = ("daily", "monthly", "may_sep")
+    lookup = {(row["method"], row["reference"], row["scale"]): row for row in rows}
+    figure, axes = plt.subplots(1, 2, figsize=(10, 0.42 * len(pairs) + 2.2), constrained_layout=True)
+    for axis, key, title in (
+        (axes[0], "mean_r", "A. Mean-pattern agreement"),
+        (axes[1], "variability_r", "B. Variability agreement"),
+    ):
+        matrix = np.asarray([
+            [lookup[(method, reference, scale)].get(key, np.nan) for scale in scales]
+            for method, reference in pairs
+        ], float)
+        image = axis.imshow(matrix, aspect="auto", vmin=-0.2, vmax=1, cmap="viridis")
+        for row_index in range(matrix.shape[0]):
+            for column in range(matrix.shape[1]):
+                value = matrix[row_index, column]
+                axis.text(
+                    column, row_index, "—" if not np.isfinite(value) else f"{value:.2f}",
+                    ha="center", va="center",
+                    color="white" if np.isfinite(value) and value < 0.45 else "black",
+                )
+        axis.set_xticks(np.arange(3), ("daily", "monthly", "May–Sep"))
+        axis.set_yticks(
+            np.arange(len(pairs)),
+            [f"{_source_label(method)} vs {reference}" for method, reference in pairs],
+            fontsize=6,
+        )
+        axis.set_title(title); axis.grid(False)
+    figure.colorbar(image, ax=axes, label="correlation (agreement, not skill)", shrink=0.7)
+    figure.suptitle("Gridded mean and variability agreement at common 0.4° support")
+    save_figure(
+        figure, out_dir, "09", "temporal_scale_grid_matrix",
+        data={"matrix": rows}, sources=source_paths,
+        caption=(
+            "Daily variability is the time series of domain spatial SD; monthly "
+            "and seasonal variability are spatial patterns of within-period temporal SD."
+        ),
+    )
+    plt.close(figure)
+
+
+def plot_gauge_scale_matrix(
+    rows: list[dict], methods: list[str], out_dir: Path, source_paths: list[Path]
+) -> None:
+    plt = use_paper_style()
+    evaluations = ("withheld", "assimilated_fit")
+    scales = ("daily", "monthly", "may_sep")
+    metrics = (
+        ("crps_mm", "CRPS"), ("mae_mm", "MAE"), ("bias_mm", "bias"),
+        ("correlation", "r"), ("coverage_90", "cov90"),
+        ("temporal_variability_correlation", "var r"),
+    )
+    lookup = {
+        (row["evaluation"], row["scale"], row["method"]): row for row in rows
+    }
+    figure, axes = plt.subplots(2, 3, figsize=(13, 7), constrained_layout=True)
+    for row_index, evaluation in enumerate(evaluations):
+        for column, scale in enumerate(scales):
+            axis = axes[row_index, column]
+            selected = [lookup.get((evaluation, scale, method), {}) for method in methods]
+            raw = np.asarray([
+                [entry.get(key, np.nan) for key, _ in metrics] for entry in selected
+            ], float)
+            score = np.full_like(raw, np.nan)
+            for metric_index, (key, _) in enumerate(metrics):
+                values = raw[:, metric_index]
+                finite = np.isfinite(values)
+                if not finite.any():
+                    continue
+                if key in {"crps_mm", "mae_mm"}:
+                    low, high = np.nanmin(values), np.nanmax(values)
+                    score[finite, metric_index] = (
+                        1.0 if high == low else (high - values[finite]) / (high - low)
+                    )
+                elif key == "bias_mm":
+                    magnitude = np.abs(values)
+                    high = np.nanmax(magnitude)
+                    score[finite, metric_index] = (
+                        1.0 if high == 0 else 1.0 - magnitude[finite] / high
+                    )
+                elif key == "coverage_90":
+                    score[finite, metric_index] = np.clip(
+                        1.0 - np.abs(values[finite] - 0.9) / 0.9, 0, 1
+                    )
+                else:
+                    score[finite, metric_index] = np.clip((values[finite] + 0.2) / 1.2, 0, 1)
+            axis.imshow(score, aspect="auto", vmin=0, vmax=1, cmap="viridis")
+            for method_index in range(len(methods)):
+                for metric_index in range(len(metrics)):
+                    value = raw[method_index, metric_index]
+                    axis.text(
+                        metric_index, method_index,
+                        "—" if not np.isfinite(value) else f"{value:.2f}",
+                        ha="center", va="center", fontsize=6,
+                        color=("white" if np.isfinite(score[method_index, metric_index])
+                               and score[method_index, metric_index] < 0.45 else "black"),
+                    )
+            axis.set_xticks(np.arange(len(metrics)), [label for _, label in metrics], rotation=20)
+            axis.set_yticks(np.arange(len(methods)), [_source_label(method) for method in methods])
+            axis.grid(False)
+            evidence = "independent withheld" if evaluation == "withheld" else "assimilated fit"
+            scale_label = "May–Sep" if scale == "may_sep" else scale
+            axis.set_title(f"{evidence}: {scale_label}")
+    figure.suptitle(
+        "BMD gauge evaluation by temporal scale (annotations raw; colour ranks within panel)"
+    )
+    save_figure(
+        figure, out_dir, "10", "withheld_assimilated_gauge_matrix",
+        data={"gauge_matrix": rows}, sources=source_paths,
+        caption=(
+            "Withheld rows are independent verification. Assimilated-fit rows use "
+            "gauges that entered the production likelihood and diagnose fit only."
+        ),
+    )
+    plt.close(figure)
+
+
+def plot_long_term_withheld_product_comparison(
+    rows: list[dict], station_rows: list[dict], out_dir: Path,
+    source_paths: list[Path],
+) -> None:
+    if not rows:
+        return
+    plt = use_paper_style()
+    sources = [row["source"] for row in rows]
+    labels = [_source_label(source) for source in sources]
+    y = np.arange(len(rows))
+    colors = [
+        ("#2878B5" if row["source"] == "chirps" else
+         "#E09F3E" if row["source"] == "imerg" else
+         "#4C956C" if row["source"] == "cpc" else
+         plt.cm.tab10(index % 10))
+        for index, row in enumerate(rows)
+    ]
+    figure, axes = plt.subplots(2, 3, figsize=(13, 8), constrained_layout=True)
+
+    def values(key):
+        return np.asarray([row.get(key, np.nan) for row in rows], float)
+
+    panels = (
+        (axes[0, 0], "pooled_daily_correlation", "A. Pooled daily correlation", "r"),
+        (axes[0, 1], "fisher_mean_station_temporal_correlation", "B. Fisher-mean station temporal correlation", "mean r"),
+        (axes[0, 2], "pooled_daily_rmse_mm", "C. Pooled daily RMSE", "mm/day"),
+        (axes[1, 0], "pooled_daily_bias_mm", "D. Pooled daily bias", "mm/day"),
+        (axes[1, 1], "long_term_station_mean_correlation", "E. Spatial correlation of station means", "r"),
+    )
+    for axis, key, title, xlabel in panels:
+        axis.barh(y, values(key), color=colors)
+        if "bias" in key:
+            axis.axvline(0, color="black", lw=0.8)
+        if "correlation" in key:
+            axis.set_xlim(-0.2, 1)
+        axis.set_yticks(y, labels); axis.invert_yaxis()
+        axis.set_title(title); axis.set_xlabel(xlabel)
+
+    width = 0.38
+    axes[1, 2].barh(
+        y - width / 2, values("long_term_station_mean_rmse_mm"),
+        height=width, label="RMSE", color="#457B9D",
+    )
+    axes[1, 2].barh(
+        y + width / 2, values("long_term_station_mean_bias_mm"),
+        height=width, label="bias", color="#D1495B",
+    )
+    axes[1, 2].axvline(0, color="black", lw=0.8)
+    axes[1, 2].set_yticks(y, labels); axes[1, 2].invert_yaxis()
+    axes[1, 2].set_title("F. Long-term station-mean error")
+    axes[1, 2].set_xlabel("mm/day"); axes[1, 2].legend()
+    figure.suptitle(
+        "All products against independently withheld BMD gauges, May 2021–June 2024"
+    )
+    save_figure(
+        figure, out_dir, "11", "long_term_withheld_product_comparison",
+        data={"summary": rows, "station_scores": station_rows}, sources=source_paths,
+        caption=(
+            "Available archive days are May--September 2021--2023 and May--June "
+            "2024, not a continuous four-year record. The ten May 2022 selection "
+            "days are excluded. All targets are independently withheld gauges."
+        ),
     )
     plt.close(figure)
 
@@ -1125,9 +2166,13 @@ def main() -> None:
     args = parse_args()
     paths = [Path(path) for path in args.zarr]
     archive = load_archive(paths, args.factor)
+    same_day_cpc_result = load_same_day_cpc(archive, args.cpc_source_zarr)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     daily_rows, monthly_rows, product_and_monthly_rows = evaluate_daily_and_monthly(
+        archive, args.factor
+    )
+    temporal_scale_rows, seasonal_rows, temporal_grids = evaluate_temporal_scales(
         archive, args.factor
     )
     product_rows = [row for row in product_and_monthly_rows if "month" not in row]
@@ -1139,6 +2184,23 @@ def main() -> None:
     point_rows, anomaly_rows = evaluate_withheld_gauges(
         paths, archive["methods"], args.factor, cv_root
     )
+    withheld_bundle = load_withheld_gauge_bundle(
+        paths, archive["methods"], args.factor, cv_root
+    )
+    if same_day_cpc_result is not None:
+        attach_same_day_cpc_to_withheld_bundle(
+            withheld_bundle, archive, same_day_cpc_result[0]
+        )
+    assimilated_bundle = load_assimilated_gauge_bundle(archive)
+    gauge_scale_rows = [
+        *evaluate_gauge_scales(withheld_bundle, archive["methods"], "withheld"),
+        *evaluate_gauge_scales(
+            assimilated_bundle, archive["methods"], "assimilated_fit"
+        ),
+    ]
+    long_term_product_rows, long_term_station_rows = (
+        evaluate_long_term_withheld_products(withheld_bundle, archive["methods"])
+    )
     matrix = merge_matrix(
         archive["methods"], product_rows, monthly_matrix_rows, subgrid_rows,
         point_rows, anomaly_rows,
@@ -1146,12 +2208,25 @@ def main() -> None:
 
     write_rows(out_dir / "daily_domain.csv", daily_rows)
     write_rows(out_dir / "monthly_domain.csv", monthly_rows)
+    write_rows(out_dir / "seasonal_domain.csv", seasonal_rows)
+    write_rows(out_dir / "temporal_scale_grid_matrix.csv", temporal_scale_rows)
     write_rows(out_dir / "product_matrix.csv", product_rows)
     write_rows(out_dir / "monthly_matrix.csv", monthly_matrix_rows)
     write_rows(out_dir / "subgrid_matrix.csv", subgrid_rows)
     write_rows(out_dir / "withheld_gauge_matrix.csv", point_rows)
     write_rows(out_dir / "withheld_gauge_subgrid_anomalies.csv", anomaly_rows)
+    write_rows(out_dir / "gauge_temporal_scale_matrix.csv", gauge_scale_rows)
+    write_rows(
+        out_dir / "long_term_withheld_product_matrix.csv", long_term_product_rows
+    )
+    write_rows(
+        out_dir / "long_term_withheld_station_scores.csv", long_term_station_rows
+    )
     write_rows(out_dir / "evaluation_matrix.csv", matrix)
+    temporal_grid_path, temporal_grid_summary = save_temporal_grids(
+        temporal_grids, archive, out_dir
+    )
+    write_rows(out_dir / "temporal_mean_variability_grid_summary.csv", temporal_grid_summary)
 
     payload = {
         "design": {
@@ -1168,6 +2243,12 @@ def main() -> None:
                 str(SELECTION_START), str(SELECTION_END)
             ],
             "selection_month_excluded_from_aggregate_monthly": "2022-05",
+            "selection_season_excluded_from_aggregate_may_sep": 2022,
+            "complete_may_sep_years": complete_may_sep_years(archive["time"]),
+            "confirmatory_may_sep_years": temporal_grids["seasonal_years"],
+            "same_day_cpc_source": (
+                str(same_day_cpc_result[1]) if same_day_cpc_result else None
+            ),
         },
         "interpretation": {
             "independent_evidence": (
@@ -1185,13 +2266,32 @@ def main() -> None:
                 "fine-resolution training target and structural reference; explicitly "
                 "not assumed to be gridded truth"
             ),
+            "variability": (
+                "daily variability is domain spatial SD; monthly and seasonal "
+                "variability are temporal SD of daily ensemble-mean precipitation. "
+                "Posterior ensemble spread is reported separately"
+            ),
+            "assimilated_gauge_fit": (
+                "production gauges entered the likelihood and diagnose fit only; "
+                "they are not independent verification"
+            ),
+            "long_term_product_comparison": (
+                "all analysis means, CHIRPS, IMERG and (when its recorded source "
+                "is available) same-day original CPC target independently withheld "
+                "BMD gauges; lagged archived CPC is never substituted. The archive "
+                "has seasonal gaps and is not a continuous May 2021 to June 2024 record"
+            ),
         },
         "evaluation_matrix": matrix,
         "product_matrix": product_rows,
         "monthly_matrix": aggregate_monthly_matrix(monthly_matrix_rows, archive["methods"]),
+        "temporal_scale_grid_matrix": temporal_scale_rows,
+        "seasonal_domain": seasonal_rows,
         "subgrid_matrix": subgrid_rows,
         "withheld_gauge_matrix": point_rows,
         "withheld_gauge_subgrid_anomalies": anomaly_rows,
+        "gauge_temporal_scale_matrix": gauge_scale_rows,
+        "long_term_withheld_product_matrix": long_term_product_rows,
         "spectra": spectra,
         "scale_curves": curve_rows,
     }
@@ -1205,6 +2305,11 @@ def main() -> None:
         "CHIRPS, IMERG and CPC metrics are product agreement, not truth. "
         "Independent downscaling evidence comes from the five-fold withheld-gauge "
         "scores and sub-footprint anomaly tests when those folds are available. "
+        "Production-station scores are explicitly labelled assimilated fit, not "
+        "verification. Daily, monthly and May–September temporal variability is "
+        "kept separate from posterior ensemble spread. "
+        "The long-term product comparison targets withheld BMD gauges and loads "
+        "same-day CPC from the recorded source when available; lagged CPC is omitted. "
         "Spectra, variance and variograms diagnose resolved texture but not its "
         "correct placement.\n"
     )
@@ -1214,6 +2319,24 @@ def main() -> None:
     plot_subgrid_matrix(matrix, out_dir, paths)
     plot_scale_diagnostics(spectra, curve_rows, archive["methods"], out_dir, paths)
     plot_subgrid_case(archive, args.factor, out_dir, paths)
+    plot_monthly_grid_maps(
+        temporal_grids, archive, "monthly_mean", "06", out_dir,
+        paths, temporal_grid_path, temporal_grid_summary,
+    )
+    plot_monthly_grid_maps(
+        temporal_grids, archive, "monthly_variability", "07", out_dir,
+        paths, temporal_grid_path, temporal_grid_summary,
+    )
+    plot_seasonal_grid_maps(
+        temporal_grids, archive, out_dir, paths,
+        temporal_grid_path, temporal_grid_summary,
+    )
+    plot_temporal_scale_matrix(temporal_scale_rows, out_dir, paths)
+    plot_gauge_scale_matrix(gauge_scale_rows, archive["methods"], out_dir, paths)
+    plot_long_term_withheld_product_comparison(
+        long_term_product_rows, long_term_station_rows, out_dir,
+        [*paths, *([same_day_cpc_result[1]] if same_day_cpc_result else [])],
+    )
     for dataset in archive["datasets"]:
         dataset.close()
     print(f"[done] evaluated {len(archive['time'])} days -> {out_dir}")

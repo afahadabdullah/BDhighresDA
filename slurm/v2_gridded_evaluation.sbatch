@@ -53,4 +53,4 @@ echo "  CHIRPS/IMERG/CPC are agreement references, not asserted truth"
     --out-dir "$OUT"
 
 echo "Evaluation complete: $OUT/evaluation.json"
-echo "Figures: $OUT/fig{01..05}_*.png"
+echo "Figures: $OUT/fig{01..11}_*.png"

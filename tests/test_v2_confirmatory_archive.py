@@ -96,6 +96,35 @@ def test_selection_dates_and_may_2022_are_excluded_only_from_primary_scores():
     ]
 
 
+def test_same_day_cpc_loader_uses_recorded_target_dates(tmp_path):
+    import zarr
+
+    source = tmp_path / "packed_cpc.zarr"
+    root = zarr.open(str(source), mode="w")
+    root.attrs["cond_channels"] = ["cpc_precip", "cpc_valid"]
+    times = np.asarray(["2021-05-01", "2021-05-02"], dtype="datetime64[ns]")
+    root.create_dataset("time", data=times.astype(np.int64))
+    root.create_dataset("lat", data=np.asarray([22.0, 22.05]))
+    root.create_dataset("lon", data=np.asarray([88.0, 88.05]))
+    cond = np.ones((2, 2, 2, 2), np.float32)
+    cond[0, 0] = 3.0
+    cond[1, 0] = 7.0
+    root.create_dataset("cond", data=cond)
+    archive = {
+        "datasets": [SimpleNamespace(
+            attrs={"scope": {"checkpoint_data": str(source)}}
+        )],
+        "time": times.astype("datetime64[D]"),
+        "lat": np.asarray([22.0, 22.05]),
+        "lon": np.asarray([88.0, 88.05]),
+        "valid": np.ones((2, 2), bool),
+    }
+    values, path = EVALUATOR.load_same_day_cpc(archive)
+    assert path == source
+    assert np.all(values[0] == 3.0)
+    assert np.all(values[1] == 7.0)
+
+
 def test_segmented_bootstrap_never_bridges_seasonal_gaps():
     dates = np.asarray(
         ["2021-09-29", "2021-09-30", "2022-05-01", "2022-05-02"],
@@ -377,6 +406,18 @@ def test_real_archive_evaluator_separates_products_texture_and_gauges(tmp_path):
     assert len(payload["evaluation_matrix"]) == len(SUMMARY.METHODS)
     assert len(payload["withheld_gauge_matrix"]) == len(SUMMARY.METHODS)
     assert len(payload["withheld_gauge_subgrid_anomalies"]) == 3 * len(SUMMARY.METHODS)
+    assert len(payload["temporal_scale_grid_matrix"]) == 9 * len(SUMMARY.METHODS)
+    assert len(payload["gauge_temporal_scale_matrix"]) == 6 * len(SUMMARY.METHODS)
+    assert len(payload["long_term_withheld_product_matrix"]) == (
+        len(SUMMARY.METHODS) + 2
+    )
+    assert {
+        row["source"] for row in payload["long_term_withheld_product_matrix"]
+    } == {*SUMMARY.METHODS, "chirps", "imerg"}
+    assert payload["design"]["same_day_cpc_source"] is None
+    assert {
+        row["evaluation"] for row in payload["gauge_temporal_scale_matrix"]
+    } == {"withheld", "assimilated_fit"}
     assert all(
         "mse_skill_vs_no_subgrid" in row
         for row in payload["withheld_gauge_subgrid_anomalies"]
@@ -385,3 +426,10 @@ def test_real_archive_evaluator_separates_products_texture_and_gauges(tmp_path):
     assert (output / "fig01_evaluation_matrix.png").is_file()
     assert (output / "fig03_subgrid_matrix.png").is_file()
     assert (output / "fig05_subgrid_case.png").is_file()
+    assert (output / "fig06_monthly_mean.png").is_file()
+    assert (output / "fig07_monthly_variability.png").is_file()
+    assert (output / "fig08_may_sep_gridded_mean_variability.png").is_file()
+    assert (output / "fig09_temporal_scale_grid_matrix.png").is_file()
+    assert (output / "fig10_withheld_assimilated_gauge_matrix.png").is_file()
+    assert (output / "fig11_long_term_withheld_product_comparison.png").is_file()
+    assert (output / "temporal_mean_variability_grids.npz").is_file()

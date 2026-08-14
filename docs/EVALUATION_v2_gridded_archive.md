@@ -15,11 +15,13 @@ There is no perfect gridded rainfall truth for this real-data experiment:
 The evaluator therefore does not produce one misleading “model versus CHIRPS”
 score. It keeps three evidence classes separate.
 
-All archived dates appear in the descriptive daily/monthly time series. The
+All archived dates appear in the descriptive daily/monthly/seasonal tables. The
 aggregate daily method matrices exclude 2022-05-01 through 2022-05-10 because
 those dates selected `ig010` and `huber3`; aggregate monthly matrices exclude
-May 2022. This matches the confirmatory selection guard used by the pooled
-withheld-gauge summary.
+May 2022, and confirmatory May--September matrices exclude the complete 2022
+season. This matches the confirmatory selection guard used by the pooled
+withheld-gauge summary and prevents ten selected days from leaking into a
+seasonal score.
 
 ### 1. Independent gauge evidence
 
@@ -47,6 +49,13 @@ This gauge evidence appears only after all five CV folds for that season have
 finished. The gridded-only diagnostics can be generated immediately after the
 seasonal Zarr finishes.
 
+The all-station production Zarr also permits a separate **assimilated-gauge
+fit** diagnostic. Its 30-member fields are sampled at BMD coordinates with the
+same bilinear grid geometry used by the likelihood. Those gauges entered the
+production analysis and therefore show whether the likelihood was fitted, not
+whether the method generalizes. They are never combined with or substituted
+for the independent withheld-gauge scores.
+
 ### 2. Multi-product agreement
 
 For CHIRPS, IMERG and CPC separately, the evaluator reports:
@@ -58,6 +67,23 @@ For CHIRPS, IMERG and CPC separately, the evaluator reports:
 - daily and monthly mean posterior ensemble spread for the model methods;
 - monthly mean amount and spatial pattern;
 - within-month temporal variability and its spatial pattern.
+- May--September mean and within-season daily temporal variability.
+
+All sources are first reduced by exact block means for the common-support
+daily/monthly/seasonal matrix. The plot therefore cannot reward a source just
+for having more fine pixels. The saved native 0.05° maps remain available for
+examining resolved spatial detail.
+
+The word **variability** has one definition at each aggregation scale:
+
+- daily: the day-to-day series of spatial standard deviation over the domain;
+- monthly: the spatial field of daily temporal standard deviation within each
+  calendar month;
+- May--September: the spatial field of daily temporal standard deviation
+  within each complete season.
+
+These are precipitation variability diagnostics. Posterior ensemble spread is
+uncertainty and is shown in separate columns and panels.
 
 These are labelled **agreement**, not skill. IMERG agreement tests observation
 adherence, CPC agreement tests conditioning consistency, and CHIRPS agreement
@@ -122,6 +148,13 @@ Disable the pooled job if desired:
 V2_EVAL_POOL=0 bash slurm/submit_v2_gridded_evaluation.sh
 ```
 
+Run only the pooled analysis (avoid four additional per-season jobs):
+
+```bash
+V2_EVAL_PER_SEASON=0 V2_EVAL_FORCE=1 \
+  bash slurm/submit_v2_gridded_evaluation.sh
+```
+
 ## Outputs
 
 Per-season output is written to:
@@ -137,11 +170,28 @@ contains:
 - `evaluation_matrix.csv` — combined methods × diagnostics table;
 - `daily_domain.csv` — daily mean, spatial variability, wet area and p95;
 - `monthly_domain.csv` — monthly amount and within-month variability;
+- `seasonal_domain.csv` — each archived seasonal mean and temporal variability;
+- `temporal_scale_grid_matrix.csv` — common-0.4° daily, monthly and
+  May--September mean/variability agreement with all three products;
+- `temporal_mean_variability_grids.npz` — native-grid monthly climatology and
+  confirmatory May--September mean/temporal-SD fields behind the maps;
+- `temporal_mean_variability_grid_summary.csv` — domain summaries of those maps;
 - `product_matrix.csv` and `monthly_matrix.csv`;
 - `subgrid_matrix.csv`;
 - `withheld_gauge_matrix.csv`;
 - `withheld_gauge_subgrid_anomalies.csv`;
-- five PNG/PDF figures, each with source CSV and provenance manifest.
+- `gauge_temporal_scale_matrix.csv` — daily, monthly and seasonal results for
+  independent withheld gauges and separately labelled assimilated-gauge fit;
+- `long_term_withheld_product_matrix.csv` — pooled daily, mean station-temporal,
+  and long-term station-mean correlation/RMSE/bias for every analysis, CHIRPS,
+  IMERG and original same-day CPC against withheld BMD gauges. The evaluator
+  infers the packed CPC store from `scope.checkpoint_data` (or accepts
+  `--cpc-source-zarr`), selects target dates directly, and omits CPC if that
+  source cannot be audited. It never substitutes the archived lagged CPC input.
+  Every source is scored on the same common finite station-day sample;
+- `long_term_withheld_station_scores.csv` — per-station temporal scores and
+  observed/predicted long-term means behind that comparison;
+- eleven PNG/PDF figures, each with source data and provenance manifest.
 
 The figures are:
 
@@ -152,6 +202,44 @@ The figures are:
 4. Spectra, variograms and residual-variance scale ladder.
 5. Full fields and below-0.4° residual maps for the most
    CHIRPS-subgrid-active archived day.
+6. Calendar-month mean maps for every method and product.
+7. Calendar-month daily temporal-variability maps.
+8. Confirmatory May--September mean and within-season temporal-SD maps. For the
+   pooled 2021--2024 archive these use complete 2021 and 2023 seasons; 2022 is
+   selection-contaminated and 2024 has only May--June.
+9. Common-support daily/monthly/May--September gridded agreement matrix.
+10. Daily/monthly/May--September gauge matrix with independent withheld evidence
+    and assimilated fit in separate rows.
+11. Gauge-targeted comparison of all model products, CHIRPS, IMERG and original
+    same-day CPC. It shows pooled daily correlation/RMSE/bias and mean temporal
+    correlation across individual stations, plus spatial correlation/RMSE/bias
+    across the long-term means of all withheld stations. The plotted
+    across-station temporal correlation is averaged in Fisher-z space; the arithmetic mean and median
+    are retained in the CSV.
+
+## Run locally on a CPU node
+
+Quote or explicitly list the Zarr paths; do not rely on an unset shell variable.
+From the repository root:
+
+```bash
+mkdir -p logs
+nohup env PYTHONPATH="$PWD/src" MPLBACKEND=Agg \
+  python -u scripts/55_evaluate_v2_gridded_archive.py \
+  --zarr \
+    data/processed/v2_confirmatory_2021_2024/gridded/2021_may_sep.zarr \
+    data/processed/v2_confirmatory_2021_2024/gridded/2022_may_sep.zarr \
+    data/processed/v2_confirmatory_2021_2024/gridded/2023_may_sep.zarr \
+    data/processed/v2_confirmatory_2021_2024/gridded/2024_may_jun.zarr \
+  --cv-root data/processed/v2_confirmatory_2021_2024 \
+  --out-dir data/processed/v2_confirmatory_2021_2024/evaluation/pooled_current \
+  --factor 8 --texture-members 5 \
+  > logs/v2-evaluation-local.out 2>&1 &
+tail -f logs/v2-evaluation-local.out
+```
+
+Sampling the full production ensemble at assimilated gauges adds sequential
+Zarr I/O but holds only one method/season field in memory at a time.
 
 ## Reading the result conservatively
 
