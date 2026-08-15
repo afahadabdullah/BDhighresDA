@@ -51,6 +51,27 @@ date, so changing `--chunk-days` cannot change the learned target.
 
 ## 3. Train the three phases
 
+On Prism, submit the complete dependency chain from the repository root:
+
+```bash
+bash slurm/submit_v3_subgrid_pipeline.sh
+```
+
+This sends preparation to `grace-cpuonly`, starts the coarse and allocation
+GH200 jobs in parallel after preparation succeeds, and starts joint training
+only after both branches succeed. A completed target archive is reused.
+Interrupted training resumes from `last.pt` only when the saved and requested
+configs match exactly.
+
+Monitor it with:
+
+```bash
+squeue -u "$USER"
+tail -f logs/bdhires-v3-*.out
+```
+
+The equivalent phase-by-phase commands inside a compatible environment are:
+
 ```bash
 python scripts/57_train_subgrid_oracle.py \
   --config configs/train_h100_cpc_v3_subgrid_coarse.yaml
