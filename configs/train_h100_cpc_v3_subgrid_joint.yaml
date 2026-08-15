@@ -1,0 +1,53 @@
+# Phase 3: operational joint multiscale flow.  Branch checkpoints are strict
+# initialisers; the zero-started fine->coarse path learns the missing cross-score.
+stage: joint
+data:
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  crop: 120
+  factor: 10
+  downsamplings: 3
+  years:
+    train: [1981, 2018]
+    val: [2019, 2020]
+model:
+  coarse:
+    base_channels: 64
+    channel_mult: [1, 2]
+    num_res_blocks: 2
+    dropout: 0.10
+    num_heads: 4
+  allocation:
+    base_channels: 64
+    channel_mult: [1, 2, 3, 4]
+    num_res_blocks: 2
+    attn_resolutions: [15, 30]
+    dropout: 0.15
+    num_heads: 4
+train:
+  out_dir: runs/prior_h100_cpc_v3_subgrid/joint
+  init_coarse: runs/prior_h100_cpc_v3_subgrid/coarse/best.pt
+  init_allocation: runs/prior_h100_cpc_v3_subgrid/allocation/best.pt
+  epochs: 100
+  batch_size: 16
+  lr: 0.00008
+  precision: bf16
+  weight_decay: 0.01
+  grad_clip: 1.0
+  occurrence_weight: 0.10
+  use_ema: true
+  ema_decay: 0.9997
+  num_workers: 8
+  seed: 3103
+  ckpt_every: 5
+  cond_dropout: 0.05
+  clean_context_probability: 0.15
+  coarse_loss_weight: 1.0
+  allocation_loss_weight: 1.0
+sampling:
+  members: 30
+  n_steps: 50
+  heun: true
+  convergence_steps: [25, 50, 100]
+  occurrence_temperature: 1.0
+  soft_hard_median_sigma: 0.10
+  soft_hard_p95_sigma: 0.50

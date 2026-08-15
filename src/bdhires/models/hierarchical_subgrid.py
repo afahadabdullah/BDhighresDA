@@ -163,13 +163,28 @@ class CoupledSubgridFlow(nn.Module):
 
     supports_clean_coarse_context = True
 
-    def __init__(self, coarse_branch: CoarseHurdleFlow, allocation_branch: AllocationFlow):
+    def __init__(
+        self,
+        coarse_branch: CoarseHurdleFlow,
+        allocation_branch: AllocationFlow,
+        clean_context_probability: float = 0.0,
+    ):
         super().__init__()
+        if not 0.0 <= clean_context_probability <= 1.0:
+            raise ValueError("clean_context_probability must lie in [0, 1]")
         self.coarse_branch = coarse_branch
         self.allocation_branch = allocation_branch
+        self.register_buffer(
+            "_clean_context_probability",
+            torch.tensor(float(clean_context_probability), dtype=torch.float32),
+        )
         self.fine_to_coarse = nn.Conv2d(2, 2, kernel_size=1)
         nn.init.zeros_(self.fine_to_coarse.weight)
         nn.init.zeros_(self.fine_to_coarse.bias)
+
+    @property
+    def clean_context_trained(self) -> bool:
+        return bool(self._clean_context_probability.item() > 0.0)
 
     def forward(
         self,
@@ -261,6 +276,14 @@ def _masked_mse(prediction, target, mask) -> torch.Tensor:
     return ((prediction - target).square() * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _occurrence_loss(clean_state, target_state, mask) -> torch.Tensor:
+    logits = clean_state[:, 1:2]
+    label = (target_state[:, 1:2] >= 0.0).to(logits.dtype)
+    loss = F.binary_cross_entropy_with_logits(logits, label, reduction="none")
+    weight = mask.to(loss.dtype)
+    return (loss * weight).sum() / weight.sum().clamp_min(1.0)
+
+
 def hierarchical_flow_matching_loss(
     model: CoupledSubgridFlow,
     state1: HierarchicalState,
@@ -274,12 +297,20 @@ def hierarchical_flow_matching_loss(
     logit_normal_t: bool = True,
     coarse_weight: float = 1.0,
     allocation_weight: float = 1.0,
+    occurrence_weight: float = 0.1,
     clean_context_probability: float = 0.15,
     return_components: bool = False,
 ):
     """Joint flow-matching objective with a trained clean-clamp oracle mode."""
     flow = flow or HierarchicalRectifiedFlow()
     batch = state1.coarse.shape[0]
+    base_model = getattr(model, "module", model)
+    recorded_probability = float(base_model._clean_context_probability.item())
+    if abs(recorded_probability - float(clean_context_probability)) > 1.0e-7:
+        raise ValueError(
+            "joint loss clean_context_probability differs from the value "
+            "recorded in the model/checkpoint"
+        )
     t = flow.sample_t(batch, state1.coarse.device, logit_normal_t)
     state_t, target, _ = flow.interpolate(state1, t)
     if cond_dropout:
@@ -315,9 +346,18 @@ def hierarchical_flow_matching_loss(
     allocation_loss = _masked_mse(
         prediction.allocation, target.allocation, fine_mask
     )
-    total = float(coarse_weight) * coarse_loss + float(allocation_weight) * allocation_loss
+    clean = flow.x1_hat(state_t, t, prediction)
+    occurrence_loss = _occurrence_loss(clean.coarse, state1.coarse, coarse_mask)
+    occurrence_loss = occurrence_loss + _occurrence_loss(
+        clean.allocation, state1.allocation, fine_mask
+    )
+    total = (
+        float(coarse_weight) * coarse_loss
+        + float(allocation_weight) * allocation_loss
+        + float(occurrence_weight) * occurrence_loss
+    )
     if return_components:
-        return total, coarse_loss, allocation_loss
+        return total, coarse_loss, allocation_loss, occurrence_loss
     return total
 
 
@@ -327,11 +367,16 @@ def coarse_flow_matching_loss(
     cond: torch.Tensor | None,
     mask: torch.Tensor,
     flow: RectifiedFlow | None = None,
+    occurrence_weight: float = 0.1,
 ):
     flow = flow or RectifiedFlow()
     t = flow.sample_t(target.shape[0], target.device)
     state_t, velocity, _ = flow.interpolate(target, t)
-    return _masked_mse(model(state_t, t, cond), velocity, mask)
+    prediction = model(state_t, t, cond)
+    clean = flow.x1_hat(state_t, t, prediction)
+    return _masked_mse(prediction, velocity, mask) + float(
+        occurrence_weight
+    ) * _occurrence_loss(clean, target, mask)
 
 
 def allocation_flow_matching_loss(
@@ -344,6 +389,7 @@ def allocation_flow_matching_loss(
     *,
     max_coarse_noise: float = 0.35,
     clean_probability: float = 0.25,
+    occurrence_weight: float = 0.1,
 ):
     """Phase-2 objective with an interface identical to the joint fine branch."""
     flow = flow or RectifiedFlow()
@@ -356,4 +402,7 @@ def allocation_flow_matching_loss(
     scale = level[:, None, None, None]
     coarse_context = (1.0 - scale) * coarse_truth + scale * torch.randn_like(coarse_truth)
     prediction = model(state_t, t, fine_cond, coarse_context, level)
-    return _masked_mse(prediction, velocity, mask)
+    clean_state = flow.x1_hat(state_t, t, prediction)
+    return _masked_mse(prediction, velocity, mask) + float(
+        occurrence_weight
+    ) * _occurrence_loss(clean_state, target, mask)

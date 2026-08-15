@@ -14,9 +14,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 
-from ..grids import Grid
+from ..grids import Grid, crop_offsets
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,39 @@ def validate_aligned_crop(
         raise ValueError(
             f"crop={crop} must be divisible by lcm({factor}, 2^{downsamplings})={divisor}"
         )
+
+
+def aligned_production_canvas(
+    outer: Grid,
+    core: Grid,
+    canvas: int = 160,
+    factor: int = 10,
+    downsamplings: int = 3,
+) -> tuple[tuple[slice, slice], tuple[slice, slice]]:
+    """Return an architecture-safe halo canvas and the core slice inside it."""
+    row, column = crop_offsets(outer, core)
+    if canvas < core.nlat or canvas < core.nlon:
+        raise ValueError("production canvas must contain the complete core grid")
+    desired_row = row - (canvas - core.nlat) / 2.0
+    desired_column = column - (canvas - core.nlon) / 2.0
+    row0 = int(round(desired_row / factor) * factor)
+    column0 = int(round(desired_column / factor) * factor)
+    row0 = min(max(row0, 0), outer.nlat - canvas)
+    column0 = min(max(column0, 0), outer.nlon - canvas)
+    # Clamping can move an origin off phase only if outer dimensions are bad;
+    # validate rather than silently accepting it.
+    validate_aligned_crop((row0, column0), canvas, factor, downsamplings)
+    if not (
+        row0 <= row and row + core.nlat <= row0 + canvas
+        and column0 <= column and column + core.nlon <= column0 + canvas
+    ):
+        raise ValueError("aligned canvas does not contain the requested core")
+    outer_slice = (slice(row0, row0 + canvas), slice(column0, column0 + canvas))
+    core_slice = (
+        slice(row - row0, row - row0 + core.nlat),
+        slice(column - column0, column - column0 + core.nlon),
+    )
+    return outer_slice, core_slice
 
 
 def _as_bchw(value: torch.Tensor, name: str) -> torch.Tensor:
@@ -245,14 +278,31 @@ def encode_subgrid_targets(
         encoding.amount_sqrt_std
     )
 
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(int(encoding.dequant_seed) + int(sample_offset))
-    coarse_logits = _dequantized_binary_logits(
-        coarse_wet.to(torch.float32).cpu(), encoding, generator
-    ).to(fine.device)
-    fine_logits = _dequantized_binary_logits(
-        wet.to(torch.float32).cpu(), encoding, generator
-    ).to(fine.device)
+    # One seed per time sample makes the target independent of preparation
+    # chunking and worker count.
+    coarse_logits_parts = []
+    fine_logits_parts = []
+    for member in range(fine.shape[0]):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            int(encoding.dequant_seed) + int(sample_offset) + member
+        )
+        coarse_logits_parts.append(
+            _dequantized_binary_logits(
+                coarse_wet[member : member + 1].to(torch.float32).cpu(),
+                encoding,
+                generator,
+            )
+        )
+        fine_logits_parts.append(
+            _dequantized_binary_logits(
+                wet[member : member + 1].to(torch.float32).cpu(),
+                encoding,
+                generator,
+            )
+        )
+    coarse_logits = torch.cat(coarse_logits_parts).to(fine.device)
+    fine_logits = torch.cat(fine_logits_parts).to(fine.device)
 
     coarse_fine = coarse.repeat_interleave(encoding.factor, -2).repeat_interleave(
         encoding.factor, -1
@@ -308,7 +358,7 @@ def decode_coarse_amount(
         encoding.amount_sqrt_mean
     )
     positive = amount_root.clamp_min(0.0).square()
-    st, hard_mask, soft = hard_forward_soft_backward(
+    st, _hard_mask, soft = hard_forward_soft_backward(
         coarse_state[:, 1:2], coarse_valid, temperature
     )
     occurrence = st if hard else soft
@@ -381,7 +431,10 @@ def reconstruct_from_amount(
         wet_st = (wet_hard - wet_soft).detach() + wet_soft
 
     occurrence = wet_st if hard else wet_soft
-    weights = occurrence * F.softplus(allocation_state[:, :1])
+    positive_weight = F.softplus(allocation_state[:, :1]).clamp_min(
+        float(encoding.intensity_floor)
+    )
+    weights = occurrence * positive_weight
     weights = torch.where(valid_b, weights, torch.zeros_like(weights))
     ab = _blockify(area_b, encoding.factor)
     qb = _blockify(weights, encoding.factor)
@@ -468,6 +521,7 @@ class SubgridDataset(Dataset):
         self.index = index
         self.valid = np.asarray(store["fine_valid"][:], dtype=np.float32)
         self.area = np.asarray(store["cell_area"][:], dtype=np.float32)
+        self.coarse_valid = np.asarray(store["coarse_valid"][:], dtype=np.float32)
         self.height, self.width = self.valid.shape
         validate_aligned_crop((0, 0), cfg.crop, cfg.factor, cfg.downsamplings)
         if cfg.crop > min(self.height, self.width):
@@ -490,7 +544,21 @@ class SubgridDataset(Dataset):
             return row, column
         if self.cfg.crop_origin is not None:
             raise ValueError("crop_origin cannot be combined with random_crop")
-        generator = np.random.default_rng(self.cfg.seed + int(i))
+        # Worker-local state advances across epochs, so a repeatedly seen day
+        # does not receive one frozen crop for the entire training run.
+        worker = get_worker_info()
+        worker_id = -1 if worker is None else int(worker.id)
+        worker_seed = int(torch.initial_seed() % (2**32))
+        rng_key = (worker_id, worker_seed)
+        # A dataset may be sampled once in the parent process before workers
+        # are forked. Keying the generator prevents all workers inheriting the
+        # same already-created RNG stream.
+        if getattr(self, "_crop_rng_key", None) != rng_key:
+            self._crop_rng = np.random.default_rng(
+                int(self.cfg.seed) + worker_seed
+            )
+            self._crop_rng_key = rng_key
+        generator = self._crop_rng
         rows = np.arange(0, self.height - self.cfg.crop + 1, self.cfg.factor)
         columns = np.arange(0, self.width - self.cfg.crop + 1, self.cfg.factor)
         return int(generator.choice(rows)), int(generator.choice(columns))
@@ -510,7 +578,9 @@ class SubgridDataset(Dataset):
             return torch.from_numpy(value)
 
         item = {
-            "time": self.time[j],
+            "time_ns": torch.tensor(
+                self.time[j].astype("datetime64[ns]").astype(np.int64), dtype=torch.int64
+            ),
             "coarse_state": read("coarse_state", j, coarse_slice),
             "allocation_state": read("allocation_state", j, fine_slice),
             "coarse_mm": torch.from_numpy(
@@ -522,7 +592,7 @@ class SubgridDataset(Dataset):
             "fine_valid": torch.from_numpy(self.valid[fine_slice]).unsqueeze(0),
             "cell_area": torch.from_numpy(self.area[fine_slice]).unsqueeze(0),
             "coarse_valid": torch.from_numpy(
-                np.asarray(self.z["coarse_valid"][:], dtype=np.float32)[coarse_slice]
+                self.coarse_valid[coarse_slice]
             ).unsqueeze(0),
             "crop_origin": torch.tensor([row, column], dtype=torch.int64),
         }

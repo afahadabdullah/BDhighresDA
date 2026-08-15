@@ -1,0 +1,34 @@
+# Phase 2: CHIRPS-derived 0.05-degree allocation flow with coarse augmentation.
+stage: allocation
+data:
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  crop: 120
+  factor: 10
+  downsamplings: 3
+  years:
+    train: [1981, 2018]
+    val: [2019, 2020]
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [15, 30]
+  dropout: 0.15
+  num_heads: 4
+train:
+  out_dir: runs/prior_h100_cpc_v3_subgrid/allocation
+  epochs: 125
+  batch_size: 24
+  lr: 0.00015
+  precision: bf16
+  weight_decay: 0.01
+  grad_clip: 1.0
+  occurrence_weight: 0.10
+  use_ema: true
+  ema_decay: 0.9995
+  num_workers: 8
+  seed: 3102
+  ckpt_every: 5
+  conditioning_augmentation:
+    max_coarse_noise: 0.35
+    clean_probability: 0.25

@@ -32,7 +32,7 @@ import numpy as np
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.grids import WIDE  # noqa: E402
+from bdhires.grids import get_grid  # noqa: E402
 
 CHANNELS = ["elev", "slope", "lsm", "sin_lon", "cos_lon", "sin_lat", "cos_lat"]
 
@@ -97,9 +97,13 @@ def main():
     ap.add_argument("--dem", default=None)
     ap.add_argument("--chirps", required=True, help="any CHIRPS wide-domain year file")
     ap.add_argument("--out", default="data/static/static_wide.nc")
+    ap.add_argument(
+        "--grid", default="wide", choices=("wide", "wide_cpc"),
+        help="use wide_cpc for the V3-SG CPC-edge-aligned domain",
+    )
     args = ap.parse_args()
 
-    grid = WIDE
+    grid = get_grid(args.grid)
     with xr.open_dataset(args.chirps) as ds:
         p = ds["precip"]
         lat_name = "latitude" if "latitude" in p.dims else "lat"

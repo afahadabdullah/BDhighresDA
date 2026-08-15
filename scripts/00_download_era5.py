@@ -30,7 +30,7 @@ import pandas as pd
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.grids import WIDE  # noqa: E402
+from bdhires.grids import Grid, WIDE, get_grid  # noqa: E402
 
 BUCKET = "earthmover-icechunk-era5"
 PREFIX = "icechunkV2"
@@ -47,9 +47,9 @@ VARIABLES = ("tp", "tcwv", "cape", "u10", "v10", "msl")
 STATE_VARIABLES = tuple(variable for variable in VARIABLES if variable != "tp")
 
 
-def bounds() -> tuple[float, float, float, float]:
+def bounds(grid: Grid = WIDE) -> tuple[float, float, float, float]:
     """Return regional bounds as north, west, south, east."""
-    west, south, east, north = WIDE.bbox
+    west, south, east, north = grid.bbox
     return north + PAD, west - PAD, south - PAD, east + PAD
 
 
@@ -57,7 +57,7 @@ def expected_days(year: int) -> int:
     return 366 if calendar.isleap(year) else 365
 
 
-def validate_year(path: Path, year: int) -> None:
+def validate_year(path: Path, year: int, grid: Grid = WIDE) -> None:
     """Raise if *path* is not a complete daily regional ERA5 year."""
     with xr.open_dataset(path) as dataset:
         missing = set(VARIABLES) - set(dataset.data_vars)
@@ -82,7 +82,7 @@ def validate_year(path: Path, year: int) -> None:
                 f"{days[-1] if len(days) else 'empty'}, {len(days)} values"
             )
 
-        north, west, south, east = bounds()
+        north, west, south, east = bounds(grid)
         lat_min = float(dataset.latitude.min())
         lat_max = float(dataset.latitude.max())
         lon_min = float(dataset.longitude.min())
@@ -107,13 +107,13 @@ def validate_year(path: Path, year: int) -> None:
                 raise ValueError(f"{path} has no finite edge values for {variable}")
 
 
-def aggregate_year(source: xr.Dataset, year: int) -> xr.Dataset:
+def aggregate_year(source: xr.Dataset, year: int, grid: Grid = WIDE) -> xr.Dataset:
     """Return one correctly aligned daily year from an hourly source dataset."""
     start = pd.Timestamp(year=year, month=1, day=1)
     stop = pd.Timestamp(year=year + 1, month=1, day=1)
     hourly_expected = pd.date_range(start, stop, freq="h")
 
-    north, west, south, east = bounds()
+    north, west, south, east = bounds(grid)
     window = source[list(VARIABLES)].sel(
         valid_time=slice(start, stop),
         latitude=slice(north, south),  # Earthmover latitude is descending
@@ -223,14 +223,16 @@ def open_earthmover() -> xr.Dataset:
     return dataset
 
 
-def write_year(source: xr.Dataset, year: int, out: Path, workers: int) -> None:
+def write_year(
+    source: xr.Dataset, year: int, out: Path, workers: int, grid: Grid = WIDE
+) -> None:
     """Aggregate, write and validate one annual file atomically."""
     target = out / f"era5_daily_{year}.nc"
     partial = target.with_suffix(target.suffix + ".part")
 
     if target.exists():
         try:
-            validate_year(target, year)
+            validate_year(target, year, grid)
             print("already complete", target, flush=True)
             return
         except (OSError, ValueError) as exc:
@@ -239,7 +241,7 @@ def write_year(source: xr.Dataset, year: int, out: Path, workers: int) -> None:
 
     if partial.exists():
         try:
-            validate_year(partial, year)
+            validate_year(partial, year, grid)
             partial.replace(target)
             print("recovered", target, flush=True)
             return
@@ -247,7 +249,7 @@ def write_year(source: xr.Dataset, year: int, out: Path, workers: int) -> None:
             partial.unlink()
 
     print(f"aggregating Earthmover ERA5 for {year}", flush=True)
-    daily = aggregate_year(source, year)
+    daily = aggregate_year(source, year, grid)
     nlat = daily.sizes["latitude"]
     nlon = daily.sizes["longitude"]
     encoding = {
@@ -274,7 +276,7 @@ def write_year(source: xr.Dataset, year: int, out: Path, workers: int) -> None:
             )
     daily.close()
 
-    validate_year(partial, year)
+    validate_year(partial, year, grid)
     partial.replace(target)
     print("wrote", target, flush=True)
 
@@ -284,6 +286,12 @@ def main() -> None:
     parser.add_argument("--start", type=int, default=1981)
     parser.add_argument("--end", type=int, default=2025)
     parser.add_argument("--out", default="data/raw/era5")
+    parser.add_argument(
+        "--grid",
+        default="wide",
+        choices=("wide", "wide_cpc"),
+        help="wide_cpc is the CPC-edge-aligned V3-SG preparation domain",
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -295,12 +303,14 @@ def main() -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    grid = get_grid(args.grid)
 
     if args.dry_run:
         print("source:", f"s3://{BUCKET}/{PREFIX}", GROUP)
         print("years:", args.start, "-", args.end)
         print("variables:", ", ".join(VARIABLES))
-        print("bounds (N,W,S,E):", bounds())
+        print("grid:", grid.name)
+        print("bounds (N,W,S,E):", bounds(grid))
         print("output:", out / "era5_daily_YYYY.nc")
         return
 
@@ -312,7 +322,7 @@ def main() -> None:
             flush=True,
         )
         for year in range(args.start, args.end + 1):
-            write_year(source, year, out, args.workers)
+            write_year(source, year, out, args.workers, grid)
     finally:
         source.close()
 

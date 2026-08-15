@@ -514,6 +514,12 @@ hard reconstruction. Conditioning augmentation belongs in this phase rather
 than in a later repair: randomly corrupt `m_truth` using an error distribution
 estimated from Model A and pass the corruption level as a conditioning scalar.
 Retain some clean `m_truth` examples so the oracle endpoint remains measurable.
+The allocation branch keeps exactly this coarse-state-plus-corruption-level
+interface after transfer into the coupled flow. In joint training the level is
+`1-t` for the noisy coarse trajectory and zero for a clean coarse context; no
+input channel or first-layer parameter is dropped or reinitialised. A pinned
+batch must give identical Model-B and just-transferred joint fine velocities
+before joint optimisation.
 Do not initially add many texture losses: first determine what the correct
 factorisation alone achieves.
 
@@ -521,8 +527,12 @@ factorisation alone achieves.
 
 Initialise the coupled multiscale flow from Models A and B and train it on paired
 coarse amount and fine allocation states. Model A's held-out error distribution
-sets the final conditioning-augmentation calibration; it is not the first time
-Model B sees an imperfect coarse field. Verify that the coupled background
+calibrates the **sequential ablation's** conditioning augmentation; the
+operational joint model instead observes its own noisy coarse state and the
+matching `1-t` level directly. Joint training also presents a frozen fraction
+of clean terminal coarse contexts with level zero. That trained mode is used by
+the coupled oracle below and avoids treating naive trajectory replacement as an
+exact conditional sampler. Verify that the coupled background
 retains both Model A's coarse calibration and Model B's oracle placement skill.
 Rerun Model A's complete Brier, reliability, positive-tail and CRPS diagnostics
 on the coupled flow's decoded coarse marginal; calibration is not assumed to
@@ -689,8 +699,18 @@ The oracle arms diagnose the model and inputs; they are not deployable analyses.
 For `coupled_oracle`, clamp the coarse state at every Euler/Heun/corrector stage
 to its fixed linear-interpolant trajectory
 `m_t = (1-t) * epsilon_m + t * m_truth`, using pinned noise, while sampling only
-the fine branch. This is conditional/inpainting sampling, not replacement of the
-final coarse field after generation.
+the fine branch, and provide the clean `m_truth` context with corruption level
+zero through the conditioning mode used during joint training. The naive clamp
+without that trained clean context is not accepted as a draw from
+`p(z | m_1=m_truth)`.
+
+Validate this approximation directly: take coarse fields produced by the joint
+flow, condition the clean-context sampler on those fields, and compare its fine
+distribution with the corresponding unclamped joint samples using allocation
+entropy, wet fraction, scale-resolved residual variance and matched-coarse
+`z` marginals. If the distributions disagree materially, use a back-and-forth
+resampling conditional sampler and rerun this validation before retaining the
+`coupled_oracle` gate.
 
 ### Frozen sampling and compute budget
 
@@ -786,6 +806,14 @@ uncertainty. A positive interval excluding zero is the designated evidence that
 the area observation exercises relatively more amount authority than the point
 observation; the complementary allocation result follows from the same
 decomposition.
+
+The magnitude of the allocation response to IMERG is a second required result.
+Repeat the IMERG impulse with an otherwise identical 0.5-degree observation
+operator aligned to the CPC blocks. Report whether
+`1-S_m(IMERG 0.4-degree)` is materially larger than
+`1-S_m(aligned 0.5-degree control)`. This control isolates allocation authority
+created by the deliberate support mismatch from the nearly structural fact that
+an area observation usually moves coarse amount more than a point gauge does.
 
 The predeclared directional expectation is that IMERG produces the larger
 amount contribution at coarse scales while its allocation contribution is
@@ -922,7 +950,9 @@ applicable gates hold:
    positive anomaly `Delta_CRPS` against its matched climatology null.
 6. For the scale-aware-authority claim, the controlled impulse-response
    contrast `S_m(IMERG) - S_m(gauge)` must be positive with its 95% interval
-   excluding zero, and the real single-stream arms must have the same direction.
+   excluding zero, the real single-stream arms must have the same direction,
+   and `1-S_m(IMERG 0.4-degree)` must exceed the aligned 0.5-degree control by
+   the frozen materiality threshold with its interval excluding zero.
    Failure does not erase rainfall skill, but it removes the claimed division
    of observational authority from the contribution.
 
@@ -984,7 +1014,9 @@ Required tests should cover:
 - the coupled joint score changing wet fraction and allocation entropy
   consistently under a forced large `m` increment;
 - `coupled_oracle` clamping the coarse interpolant after every Euler, Heun and
-  corrector update and recovering exact `m_truth` at the terminal state;
+  corrector update, using the trained clean-context mode, recovering exact
+  `m_truth` at the terminal state, and passing the matched-joint-distribution
+  validation; naive replacement without clean context must fail explicitly;
 - an explicit failure if a sampler attempts to combine separate Model-A and
   Model-B scores while omitting `grad_m log p_phi(z|m,c)`;
 - the maximal-minus-ERA5 probe recomputing the identical scale-resolved metric
@@ -997,6 +1029,9 @@ Required tests should cover:
   conditional amount branch remaining nonnegative;
 - literal Model-A-to-joint coarse-branch transfer with no unmatched intended
   parameters and identical pre-fine-tuning velocities on a pinned batch;
+- literal Model-B-to-joint fine-branch transfer, including the retained coarse
+  corruption-level channel, with identical pre-fine-tuning velocities on a
+  pinned batch;
 - a dry-cell positive innovation and wet-cell zero innovation both producing
   finite occurrence-logit gradients, followed by exact hard-mask conservation;
 - wetness-relaxation temperature sensitivity frozen on validation data;

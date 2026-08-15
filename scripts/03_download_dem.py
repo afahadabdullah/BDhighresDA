@@ -3,8 +3,8 @@
 
 The source is the credential-free Copernicus DEM 2021 release in the AWS Open
 Data Registry. Individual one-degree Cloud Optimized GeoTIFF tiles are
-downloaded, validated and averaged directly onto the project's 0.05-degree
-256 x 256 WIDE grid. Missing tiles are ocean and are assigned zero elevation.
+downloaded, validated and averaged directly onto the selected project
+0.05-degree wide grid. Missing tiles are ocean and are assigned zero elevation.
 
 The compact regional NetCDF is the only retained output by default:
 
@@ -30,7 +30,7 @@ import numpy as np
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.grids import WIDE  # noqa: E402
+from bdhires.grids import Grid, WIDE, get_grid  # noqa: E402
 
 BASE = "https://copernicus-dem-90m.s3.amazonaws.com"
 PRODUCT = "Copernicus_DSM_COG_30"
@@ -51,9 +51,9 @@ def tile_url(stem: str) -> str:
     return f"{BASE}/{stem}/{stem}.tif"
 
 
-def candidate_tiles() -> list[tuple[str, str]]:
-    """Return (stem, URL) pairs intersecting the WIDE grid."""
-    west, south, east, north = WIDE.bbox
+def candidate_tiles(grid: Grid = WIDE) -> list[tuple[str, str]]:
+    """Return (stem, URL) pairs intersecting the selected grid."""
+    west, south, east, north = grid.bbox
     tiles = []
     for latitude in range(math.floor(south), math.ceil(north)):
         for longitude in range(math.floor(west), math.ceil(east)):
@@ -121,16 +121,16 @@ def fetch_tile(stem: str, url: str, tile_dir: Path) -> Path | None:
     raise AssertionError("unreachable")
 
 
-def validate_dem(path: Path) -> None:
+def validate_dem(path: Path, grid: Grid = WIDE) -> None:
     with xr.open_dataarray(path) as elevation:
         if elevation.dims != ("lat", "lon"):
             raise ValueError(f"{path} has unexpected dimensions {elevation.dims}")
-        if elevation.shape != WIDE.shape:
+        if elevation.shape != grid.shape:
             raise ValueError(
-                f"{path} has shape {elevation.shape}, expected {WIDE.shape}"
+                f"{path} has shape {elevation.shape}, expected {grid.shape}"
             )
-        np.testing.assert_allclose(elevation.lat.values, WIDE.lat, atol=1e-6)
-        np.testing.assert_allclose(elevation.lon.values, WIDE.lon, atol=1e-6)
+        np.testing.assert_allclose(elevation.lat.values, grid.lat, atol=1e-6)
+        np.testing.assert_allclose(elevation.lon.values, grid.lon, atol=1e-6)
         values = elevation.values
         if not np.isfinite(values).all():
             raise ValueError(f"{path} contains non-finite elevation values")
@@ -142,19 +142,19 @@ def validate_dem(path: Path) -> None:
             )
 
 
-def aggregate_tiles(paths: list[Path], output: Path) -> None:
-    """Average source tiles onto WIDE and atomically write a regional NetCDF."""
+def aggregate_tiles(paths: list[Path], output: Path, grid: Grid = WIDE) -> None:
+    """Average source tiles onto the grid and atomically write a NetCDF."""
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.merge import merge
 
-    west, south, east, north = WIDE.bbox
+    west, south, east, north = grid.bbox
     sources = [rasterio.open(path) for path in paths]
     try:
         mosaic, _ = merge(
             sources,
             bounds=(west, south, east, north),
-            res=(WIDE.res, WIDE.res),
+            res=(grid.res, grid.res),
             nodata=0.0,
             dtype="float32",
             resampling=Resampling.average,
@@ -166,22 +166,22 @@ def aggregate_tiles(paths: list[Path], output: Path) -> None:
 
     values = np.nan_to_num(mosaic[0], nan=0.0, posinf=0.0, neginf=0.0)
     values = np.flipud(values).astype("float32")  # project latitude is ascending
-    if values.shape != WIDE.shape:
+    if values.shape != grid.shape:
         raise ValueError(
-            f"resampled DEM has shape {values.shape}, expected {WIDE.shape}"
+            f"resampled DEM has shape {values.shape}, expected {grid.shape}"
         )
 
     elevation = xr.DataArray(
         values,
         dims=("lat", "lon"),
-        coords={"lat": WIDE.lat, "lon": WIDE.lon},
+        coords={"lat": grid.lat, "lon": grid.lon},
         name="elevation",
         attrs={
             "long_name": "mean surface elevation within each 0.05 degree cell",
             "units": "m",
             "source": "Copernicus DEM GLO-90, 2021 release",
             "source_resolution": SOURCE_RESOLUTION,
-            "aggregation": "area-average resampling to the BDhighresDA WIDE grid",
+            "aggregation": f"area-average resampling to the BDhighresDA {grid.name} grid",
             "license_notice": (
                 "Contains modified Copernicus DEM data (2021), accessed from "
                 "the AWS Open Data Registry."
@@ -206,7 +206,7 @@ def aggregate_tiles(paths: list[Path], output: Path) -> None:
             }
         },
     )
-    validate_dem(partial)
+    validate_dem(partial, grid)
     partial.replace(output)
     print(
         f"wrote {output} {values.shape}; "
@@ -222,6 +222,10 @@ def main() -> None:
         default="data/raw/dem/copernicus_glo90_wide.nc",
     )
     parser.add_argument("--tile-dir", default="data/raw/dem/copernicus_glo90_tiles")
+    parser.add_argument(
+        "--grid", default="wide", choices=("wide", "wide_cpc"),
+        help="use wide_cpc for the V3-SG CPC-edge-aligned domain",
+    )
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--keep-tiles", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -229,19 +233,20 @@ def main() -> None:
 
     if args.jobs < 1:
         parser.error("--jobs must be positive")
+    grid = get_grid(args.grid)
 
     output = Path(args.out)
     if output.exists():
         try:
-            validate_dem(output)
+            validate_dem(output, grid)
             print("already complete", output)
             return
         except (OSError, ValueError, AssertionError) as exc:
             print(f"removing invalid DEM {output}: {exc}", flush=True)
             output.unlink()
 
-    tiles = candidate_tiles()
-    print(f"WIDE bounds: {WIDE.bbox}; {len(tiles)} candidate one-degree tiles")
+    tiles = candidate_tiles(grid)
+    print(f"{grid.name} bounds: {grid.bbox}; {len(tiles)} candidate one-degree tiles")
     if args.dry_run:
         for _, url in tiles:
             print(url)
@@ -270,7 +275,7 @@ def main() -> None:
         )
     paths.sort()
     print(f"aggregating {len(paths)} land tiles", flush=True)
-    aggregate_tiles(paths, output)
+    aggregate_tiles(paths, output, grid)
 
     if not args.keep_tiles:
         for path in paths:

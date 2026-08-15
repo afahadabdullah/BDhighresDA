@@ -21,7 +21,7 @@ from pathlib import Path
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from bdhires.grids import WIDE  # noqa: E402
+from bdhires.grids import get_grid  # noqa: E402
 
 BASE = (
     "https://data.chc.ucsb.edu/products/CHIRPS-2.0/global_daily/netcdf/p05/"
@@ -88,6 +88,12 @@ def main():
     ap.add_argument("--start", type=int, default=1981)
     ap.add_argument("--end", type=int, default=2025)
     ap.add_argument("--out", default="data/raw/chirps")
+    ap.add_argument(
+        "--grid",
+        default="wide",
+        choices=("wide", "wide_cpc"),
+        help="wide_cpc is the CPC-edge-aligned 260x260 V3-SG domain",
+    )
     ap.add_argument("--keep-global", action="store_true")
     ap.add_argument(
         "--dry-run",
@@ -101,10 +107,11 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    lo, la, hi, ha = WIDE.bbox
+    grid = get_grid(args.grid)
+    lo, la, hi, ha = grid.bbox
 
     for year in range(args.start, args.end + 1):
-        sub = out / f"chirps_wide_{year}.nc"
+        sub = out / f"chirps_{grid.name}_{year}.nc"
         url = BASE.format(year=year)
         glob_f = out / Path(url).name
 

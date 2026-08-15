@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
 import torch
 
 from ..data.subgrid_dataset import (
@@ -246,9 +245,13 @@ def _correct(
                 cfg.occurrence_temperature, clean_context,
             )
             prior_score = flow.score(state, time, velocity)
+            guidance = observations.guidance
+            active = float(guidance.t_start <= float(t) <= guidance.t_end)
+            likelihood_scale = active * float(guidance.scale)
             score = HierarchicalState(
-                prior_score.coarse + likelihood_gradient.coarse,
-                prior_score.allocation + likelihood_gradient.allocation,
+                prior_score.coarse + likelihood_scale * likelihood_gradient.coarse,
+                prior_score.allocation
+                + likelihood_scale * likelihood_gradient.allocation,
             )
         norm2 = (
             score.coarse.flatten(1).square().sum(1)
@@ -303,6 +306,11 @@ def sample_hierarchical(
     ):
         raise ValueError(
             "oracle clamping requires a joint model trained with clean coarse context"
+        )
+    if oracle_coarse_truth is not None and not model.clean_context_trained:
+        raise ValueError(
+            "oracle clamping is disabled because this checkpoint records zero "
+            "clean-context training probability"
         )
     if coarse_shape[0] != allocation_shape[0] or coarse_shape[1] != 2 or allocation_shape[1] != 2:
         raise ValueError("coarse/allocation shapes must be (same_B,2,H,W)")
@@ -400,11 +408,15 @@ def sample_hierarchical(
         "n_steps": cfg.n_steps,
         "heun": cfg.heun,
         "oracle_clean_context": oracle_coarse_truth is not None,
-        "hard_field_equals_final_likelihood_forward": (
-            None if last_likelihood_field is None
-            else bool(torch.equal(physical, last_likelihood_field))
-        ),
+        # Guidance and archival decoding both call decode_and_reconstruct with
+        # hard=True.  The last in-trajectory field is at a different state and
+        # is therefore not the relevant equality check.
+        "archive_uses_likelihood_hard_decoder": True,
     }
+    if last_likelihood_field is not None:
+        diagnostics["last_guidance_to_final_field_max_abs_mm"] = float(
+            (physical - last_likelihood_field).abs().max().cpu()
+        )
     if observations is not None:
         values = _expand_observations(observations, batch)
         hard_hx = observations.operator(physical)
