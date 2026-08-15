@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V3-SG — training and DA, explained</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f6f7f9; --panel2:#eef1f5;
+    --ink:#1a1d24; --muted:#5b6472; --line:#d3d8e0;
+    --coarse:#3b5bdb; --fine:#0c8f68; --obs:#d9480f; --gate:#6741d9;
+    --coarse-bg:#eef2ff; --fine-bg:#e6fcf5; --obs-bg:#fff4e6; --gate-bg:#f3f0ff;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#14161a; --panel:#1c1f26; --panel2:#232730;
+      --ink:#e8eaed; --muted:#98a2b3; --line:#2e333d;
+      --coarse:#8da2fb; --fine:#38d9a9; --obs:#ff922b; --gate:#b197fc;
+      --coarse-bg:#1b2136; --fine-bg:#0f2a24; --obs-bg:#2e1e0f; --gate-bg:#241c3a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 24px 80px;
+    background:var(--bg); color:var(--ink);
+    font:16px/1.65 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0 0 40px;font-size:15px}
+  h2{font-size:21px;margin:52px 0 4px;letter-spacing:-.01em}
+  h2 .num{color:var(--muted);font-weight:400;margin-right:10px}
+  h3{font-size:16px;margin:28px 0 6px}
+  p{margin:10px 0}
+  .lede{color:var(--muted);margin:0 0 20px}
+  code{font:13.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel2);padding:1.5px 5px;border-radius:4px}
+  figure{margin:26px 0 8px;padding:20px 8px;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;overflow-x:auto}
+  figcaption{color:var(--muted);font-size:13.5px;margin-top:12px;padding:0 12px}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .k{font:600 11px ui-sans-serif,sans-serif;letter-spacing:.09em;text-transform:uppercase}
+  .t{font:600 14.5px ui-sans-serif,sans-serif}
+  .b{font:13px ui-sans-serif,sans-serif}
+  .m{font:12px ui-monospace,Menlo,monospace}
+  .s{font:11.5px ui-sans-serif,sans-serif}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  td:first-child{white-space:nowrap;font-weight:600}
+  .note{background:var(--panel);border-left:3px solid var(--gate);
+    padding:14px 18px;border-radius:0 8px 8px 0;margin:22px 0;font-size:15px}
+  .note b{color:var(--gate)}
+  ul{margin:10px 0;padding-left:22px}
+  li{margin:5px 0}
+  .legend{display:flex;gap:22px;flex-wrap:wrap;justify-content:center;
+    margin-top:16px;font-size:12.5px;color:var(--muted)}
+  .legend span{display:flex;align-items:center;gap:7px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>V3-SG: what gets trained, and how the analysis works</h1>
+<p class="sub">A plain reading of <code>docs/VERSION3_SUBGRID_MODEL_IDEA.md</code>. Three diagrams: the training sequence, the generator, and data assimilation.</p>
+
+<h2><span class="num">1</span>The idea in one paragraph</h2>
+<p class="lede">The old model predicted 5&nbsp;km rainfall in one shot from 50&nbsp;km inputs, so there was no way to tell whether its fine detail was real. V3-SG splits the job in two: <b>how much</b> rain falls in each 0.5° box, and <b>where inside the box</b> it lands. Splitting it makes the second half separately testable — and it lets each observation act at the scale it can actually see. IMERG measures 0.4° area means, so it should mostly move amounts; a rain gauge measures one point, so it should mostly move placement.</p>
+
+<h2><span class="num">2</span>What actually gets trained</h2>
+<p>Three networks, but only the third one is used operationally. The first two exist to be trained cheaply, diagnosed separately, and then folded into the third.</p>
+
+<table>
+  <tr><th>Piece</th><th>Grid</th><th>What it learns</th><th>Used for</th></tr>
+  <tr>
+    <td>Model A</td><td>0.5°<br>(14×13)</td>
+    <td>How much rain in each CPC box, and whether it rained at all. A rectified flow over two latents — a wetness logit and a positive-amount latent — decoded by a hurdle rule so exact zeros are possible.</td>
+    <td>Diagnosis, and the starting weights for the coupled flow's coarse branch.</td>
+  </tr>
+  <tr>
+    <td>Model B</td><td>0.05°<br>(140×130)</td>
+    <td>Given a box total, how to split it across the 100 cells inside. Outputs per-cell wetness logits and relative weights — never a total.</td>
+    <td>The oracle experiments, and the starting weights for the fine branch.</td>
+  </tr>
+  <tr>
+    <td>Coupled flow</td><td>both</td>
+    <td>Both at once, as one joint state. This is the operational model.</td>
+    <td>Generating the background, and supplying the prior score during DA.</td>
+  </tr>
+  <tr>
+    <td><code>R(m, z)</code></td><td>—</td>
+    <td><b>Not learned.</b> A fixed decoder that turns (amount, allocation) into mm/day, guaranteeing each box's area-weighted mean equals its amount exactly.</td>
+    <td>Every arm, every phase.</td>
+  </tr>
+</table>
+
+<div class="note">
+<p style="margin:0"><b>Why a third model rather than just running A then B?</b> Guiding both amount and allocation with observations needs the gradient of the joint prior. Two separately-trained models give you <code>∇<sub>m</sub> log p(m)</code> and <code>∇<sub>z</sub> log p(z|m)</code>, but not <code>∇<sub>m</sub> log p(z|m)</code> — the term saying "changing the amount makes this allocation more or less plausible." Dropping it lets a gauge push a box heavy while the allocation stays one that only makes sense for a light box. The coupled flow produces both velocity components from one network, so the term is there by construction.</p>
+</div>
+
+<h2><span class="num">3</span>The training sequence</h2>
+<p class="lede">Two of the six stages train nothing. That is deliberate — they are the stages that can cancel the project cheaply.</p>
+
+<figure>
+<svg viewBox="0 0 880 786" role="img" aria-label="Training sequence flowchart from Phase minus one through Phase four">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+    </marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="var(--gate)"/>
+    </marker>
+  </defs>
+
+  <!-- Phase -1 -->
+  <rect x="30" y="14" width="820" height="86" rx="10" fill="var(--gate-bg)" stroke="var(--gate)" stroke-width="1.5"/>
+  <text class="k" x="48" y="38" fill="var(--gate)">Phase −1 · no networks trained</text>
+  <text class="t" x="48" y="60" fill="var(--ink)">Audits, geometry, nulls</text>
+  <text class="b" x="48" y="82" fill="var(--muted)">Can the gauges even detect the effect? Do BMD stations leak into CHIRPS? Build the CPC-aligned grids and the three baselines to beat.</text>
+  <line x1="440" y1="100" x2="440" y2="124" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+
+  <!-- Phase 0 -->
+  <rect x="30" y="128" width="820" height="98" rx="10" fill="var(--gate-bg)" stroke="var(--gate)" stroke-width="1.5"/>
+  <text class="k" x="48" y="152" fill="var(--gate)">Phase 0 · cheap probes, no flow</text>
+  <text class="t" x="48" y="174" fill="var(--ink)">Is there any subgrid signal to find?</text>
+  <text class="b" x="48" y="196" fill="var(--muted)">Small deterministic networks, given the true box totals, try to predict where the rain went. Run twice:</text>
+  <text class="b" x="48" y="214" fill="var(--muted)">with every predictor, and again without ERA5, to see where the skill comes from.</text>
+  <line x1="440" y1="226" x2="440" y2="250" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+
+  <!-- gate -->
+  <rect x="176" y="254" width="528" height="44" rx="22" fill="none" stroke="var(--gate)" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text class="t" x="440" y="281" fill="var(--gate)" text-anchor="middle">Beats the climatology null? — if not, stop or change the claim</text>
+  <line x1="440" y1="298" x2="440" y2="322" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+
+  <!-- Phase 1 + 2 -->
+  <rect x="30" y="326" width="382" height="120" rx="10" fill="var(--coarse-bg)" stroke="var(--coarse)" stroke-width="1.5"/>
+  <text class="k" x="48" y="350" fill="var(--coarse)">Phase 1</text>
+  <text class="t" x="48" y="372" fill="var(--ink)">Model A — the amount</text>
+  <text class="b" x="48" y="394" fill="var(--muted)">CPC + ERA5 → rainfall in each 0.5° box.</text>
+  <text class="m" x="48" y="414" fill="var(--muted)">target: B10_cpc(CHIRPS)</text>
+  <text class="s" x="48" y="434" fill="var(--muted)">Checked for wet/dry reliability and tail, not just CRPS.</text>
+
+  <rect x="468" y="326" width="382" height="120" rx="10" fill="var(--fine-bg)" stroke="var(--fine)" stroke-width="1.5"/>
+  <text class="k" x="486" y="350" fill="var(--fine)">Phase 2</text>
+  <text class="t" x="486" y="372" fill="var(--ink)">Model B — the allocation</text>
+  <text class="b" x="486" y="394" fill="var(--muted)">True box total → pattern inside the box.</text>
+  <text class="m" x="486" y="414" fill="var(--muted)">target: z_truth (weights + wetness)</text>
+  <text class="s" x="486" y="434" fill="var(--muted)">Trained on deliberately corrupted totals too.</text>
+
+  <line x1="412" y1="386" x2="462" y2="386" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+  <text class="s" x="437" y="376" fill="var(--muted)" text-anchor="middle">A's errors</text>
+
+  <path d="M221,446 L221,470 Q221,478 231,478 L430,478" fill="none" stroke="var(--muted)" stroke-width="1.5"/>
+  <path d="M659,446 L659,470 Q659,478 649,478 L450,478" fill="none" stroke="var(--muted)" stroke-width="1.5"/>
+  <line x1="440" y1="478" x2="440" y2="500" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+  <text class="s" x="440" y="470" fill="var(--muted)" text-anchor="middle">weights transfer</text>
+
+  <!-- Phase 3 -->
+  <rect x="30" y="504" width="820" height="126" rx="10" fill="var(--panel2)" stroke="var(--ink)" stroke-width="1.5"/>
+  <text class="k" x="48" y="528" fill="var(--ink)">Phase 3 · the operational model</text>
+  <text class="t" x="48" y="550" fill="var(--ink)">Coupled multiscale flow over (m, z)</text>
+  <text class="b" x="48" y="572" fill="var(--muted)">One network, a coarse branch and a fine branch that exchange features, emitting both velocities.</text>
+  <text class="b" x="48" y="590" fill="var(--muted)">Amount and allocation are now sampled together, so the prior knows how they depend on each other.</text>
+  <text class="s" x="48" y="614" fill="var(--muted)">Before any DA: force a large amount change and check the wet fraction responds the way the background says it should.</text>
+  <line x1="440" y1="630" x2="440" y2="654" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a1)"/>
+
+  <!-- Phase 4 -->
+  <rect x="30" y="658" width="820" height="52" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text class="b" x="440" y="689" fill="var(--muted)" text-anchor="middle">Phase 4 · optional texture losses — only if members still look too smooth</text>
+  <line x1="440" y1="710" x2="440" y2="734" stroke="var(--gate)" stroke-width="1.5" marker-end="url(#a2)"/>
+
+  <rect x="230" y="738" width="420" height="42" rx="10" fill="var(--gate-bg)" stroke="var(--gate)" stroke-width="1.5"/>
+  <text class="t" x="440" y="765" fill="var(--gate)" text-anchor="middle">Background ensemble — no observations used</text>
+</svg>
+<div class="legend">
+  <span><i class="sw" style="background:var(--coarse)"></i>coarse / amount</span>
+  <span><i class="sw" style="background:var(--fine)"></i>fine / allocation</span>
+  <span><i class="sw" style="background:var(--gate)"></i>decision or output</span>
+</div>
+<figcaption>Phases −1 and 0 train nothing and can end the project. Phases 1 and 2 produce interpretable pieces. Phase 3 fuses them into the model that is actually used.</figcaption>
+</figure>
+
+<h2><span class="num">4</span>How one rainfall field is generated</h2>
+<p class="lede">Given a day's CPC and ERA5, this runs 30 times to produce 30 members.</p>
+
+<figure>
+<svg viewBox="0 0 900 268" role="img" aria-label="Generator: conditioning to coupled flow to m and z to reconstruction to fine rainfall">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="66" width="150" height="136" rx="10" fill="var(--panel2)" stroke="var(--line)" stroke-width="1.5"/>
+  <text class="k" x="30" y="90" fill="var(--muted)">inputs</text>
+  <text class="b" x="30" y="114" fill="var(--ink)">CPC 0.5°</text>
+  <text class="b" x="30" y="134" fill="var(--ink)">ERA5 0.25°</text>
+  <text class="b" x="30" y="154" fill="var(--ink)">season</text>
+  <text class="b" x="30" y="174" fill="var(--ink)">terrain, coast</text>
+  <line x1="164" y1="134" x2="196" y2="134" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a3)"/>
+
+  <rect x="200" y="66" width="176" height="136" rx="10" fill="var(--panel2)" stroke="var(--ink)" stroke-width="1.5"/>
+  <text class="k" x="216" y="90" fill="var(--ink)">phase 3 model</text>
+  <text class="t" x="216" y="116" fill="var(--ink)">Coupled flow</text>
+  <text class="b" x="216" y="140" fill="var(--muted)">+ random noise</text>
+  <text class="s" x="216" y="166" fill="var(--muted)">50 Heun steps</text>
+  <text class="s" x="216" y="184" fill="var(--muted)">one draw = one member</text>
+
+  <path d="M376,110 L410,110 L410,92" fill="none" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a3)"/>
+  <path d="M376,158 L410,158 L410,176" fill="none" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a3)"/>
+
+  <rect x="424" y="52" width="176" height="60" rx="9" fill="var(--coarse-bg)" stroke="var(--coarse)" stroke-width="1.5"/>
+  <text class="t" x="440" y="76" fill="var(--coarse)">m — amount</text>
+  <text class="s" x="440" y="96" fill="var(--muted)">mm/day in each 0.5° box</text>
+
+  <rect x="424" y="156" width="176" height="60" rx="9" fill="var(--fine-bg)" stroke="var(--fine)" stroke-width="1.5"/>
+  <text class="t" x="440" y="180" fill="var(--fine)">z — allocation</text>
+  <text class="s" x="440" y="200" fill="var(--muted)">weights + wet/dry per cell</text>
+
+  <path d="M600,82 L636,82 L636,120" fill="none" stroke="var(--muted)" stroke-width="1.5"/>
+  <path d="M600,186 L636,186 L636,148" fill="none" stroke="var(--muted)" stroke-width="1.5"/>
+  <line x1="636" y1="134" x2="668" y2="134" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a3)"/>
+
+  <rect x="672" y="66" width="106" height="136" rx="10" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text class="t" x="725" y="122" fill="var(--ink)" text-anchor="middle">R(m, z)</text>
+  <text class="s" x="725" y="144" fill="var(--muted)" text-anchor="middle">fixed decoder</text>
+  <text class="s" x="725" y="160" fill="var(--muted)" text-anchor="middle">nothing learned</text>
+  <line x1="778" y1="134" x2="810" y2="134" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a3)"/>
+
+  <rect x="814" y="66" width="76" height="136" rx="10" fill="var(--gate-bg)" stroke="var(--gate)" stroke-width="1.5"/>
+  <text class="t" x="852" y="126" fill="var(--gate)" text-anchor="middle">x</text>
+  <text class="s" x="852" y="146" fill="var(--muted)" text-anchor="middle">0.05°</text>
+
+  <text class="s" x="450" y="246" fill="var(--muted)">Guarantee: the area-weighted mean of x inside every box equals that box's m, exactly — before and after assimilation.</text>
+</svg>
+<figcaption>The decoder multiplies the box amount by normalised within-box weights, so conservation holds by construction rather than by a penalty term.</figcaption>
+</figure>
+
+<h2><span class="num">5</span>Data assimilation</h2>
+<p class="lede">Same model, now pulled toward observations while it samples. Nothing is retrained.</p>
+
+<p>The analysis state is the pair <code>(m, z)</code>, not the rainfall field. Observations are compared against rainfall, so each one is mapped through the same decoder — and the gradient flows back to whichever half of the state can explain it.</p>
+
+<figure>
+<svg viewBox="0 0 900 470" role="img" aria-label="Data assimilation flowchart with IMERG and gauge observation operators guiding a joint sampler">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+    </marker>
+    <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="var(--obs)"/>
+    </marker>
+  </defs>
+
+  <!-- IMERG -->
+  <rect x="286" y="12" width="290" height="84" rx="10" fill="var(--obs-bg)" stroke="var(--obs)" stroke-width="1.5"/>
+  <text class="k" x="304" y="35" fill="var(--obs)">satellite · area average</text>
+  <text class="t" x="304" y="57" fill="var(--ink)">IMERG at 0.4°</text>
+  <text class="m" x="304" y="79" fill="var(--muted)">H = B8_imerg( R(m,z) )</text>
+  <line x1="431" y1="96" x2="431" y2="140" stroke="var(--obs)" stroke-width="1.5" marker-end="url(#a5)"/>
+  <text class="s" x="443" y="122" fill="var(--obs)">expected: mostly moves m</text>
+
+  <!-- sampler -->
+  <rect x="286" y="144" width="290" height="182" rx="12" fill="var(--panel2)" stroke="var(--ink)" stroke-width="1.75"/>
+  <text class="k" x="304" y="168" fill="var(--ink)">guided sampling</text>
+  <text class="t" x="304" y="192" fill="var(--ink)">Coupled joint score</text>
+  <text class="b" x="304" y="216" fill="var(--muted)">at every step, nudge (m, z) by</text>
+  <text class="m" x="304" y="240" fill="var(--coarse)">∇ log prior(m, z)</text>
+  <text class="m" x="304" y="262" fill="var(--obs)">+ ∇ log likelihood(y | m, z)</text>
+  <text class="s" x="304" y="290" fill="var(--muted)">Huber-3, separate error models</text>
+  <text class="s" x="304" y="308" fill="var(--muted)">per observation stream</text>
+
+  <!-- gauges -->
+  <line x1="431" y1="418" x2="431" y2="330" stroke="var(--obs)" stroke-width="1.5" marker-end="url(#a5)"/>
+  <text class="s" x="443" y="356" fill="var(--obs)">expected: mostly moves z</text>
+  <rect x="286" y="422" width="290" height="36" rx="10" fill="var(--obs-bg)" stroke="var(--obs)" stroke-width="1.5"/>
+  <text class="b" x="304" y="445" fill="var(--ink)">BMD gauges — points</text>
+  <text class="m" x="452" y="445" fill="var(--muted)">bilinear at stations</text>
+
+  <!-- background in -->
+  <rect x="14" y="200" width="176" height="70" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1.5"/>
+  <text class="k" x="30" y="223" fill="var(--muted)">from section 4</text>
+  <text class="t" x="30" y="248" fill="var(--ink)">background</text>
+  <text class="m" x="30" y="264" fill="var(--muted)">(m_b, z_b)</text>
+  <line x1="190" y1="235" x2="282" y2="235" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a4)"/>
+
+  <!-- analysis out -->
+  <line x1="576" y1="235" x2="668" y2="235" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a4)"/>
+  <rect x="672" y="200" width="150" height="70" rx="10" fill="var(--gate-bg)" stroke="var(--gate)" stroke-width="1.5"/>
+  <text class="k" x="688" y="223" fill="var(--gate)">30 members</text>
+  <text class="t" x="688" y="248" fill="var(--ink)">analysis</text>
+  <text class="m" x="688" y="264" fill="var(--muted)">(m_a, z_a) → x</text>
+
+  <!-- attribution -->
+  <path d="M747,270 L747,352 L640,352" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#a4)"/>
+  <rect x="286" y="340" width="352" height="64" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text class="b" x="304" y="364" fill="var(--ink)">Split the change into amount vs placement, in mm/day</text>
+  <text class="m" x="304" y="388" fill="var(--muted)">C_m + C_z = analysis − background</text>
+</svg>
+<div class="legend">
+  <span><i class="sw" style="background:var(--obs)"></i>observations</span>
+  <span><i class="sw" style="background:var(--coarse)"></i>prior</span>
+  <span><i class="sw" style="background:var(--gate)"></i>output</span>
+</div>
+<figcaption>The dashed box is the paper's headline measurement, not a diagnostic — see below.</figcaption>
+</figure>
+
+<h3>The part that carries the scientific claim</h3>
+<p>The labels "mostly moves <code>m</code>" and "mostly moves <code>z</code>" are <b>expectations, not wiring</b>. Nothing in the design forces IMERG to leave placement alone — the coupled prior is free to trade between amount and allocation however it learned to. So where each observation's influence actually lands is measured, by rebuilding the rainfall field four ways from the background and analysis halves and splitting the difference:</p>
+<ul>
+  <li><code>C_m</code> — the part of the change explained by box amounts moving</li>
+  <li><code>C_z</code> — the part explained by rain being repositioned inside boxes</li>
+  <li>they add back to the full increment exactly, so nothing is unaccounted for</li>
+</ul>
+<p>This is run for satellite-only, gauge-only, and both together, plus a controlled experiment that pokes a single IMERG footprint and a single gauge with the same size innovation and compares. If the split does not come out as expected, the design still works as a rainfall model — but the "division of observational authority" claim comes out of the paper.</p>
+
+<div class="note">
+<p style="margin:0"><b>Why 0.5° and 0.4° deliberately don't match.</b> The prior conserves on CPC's native 0.5° boxes; IMERG is assimilated on its own 0.4° footprints. Because they are offset, a satellite footprint spans parts of several boxes — so satisfying it <i>can</i> require moving rain around inside boxes, not just scaling them. That mismatch is what makes the amount/placement division something to measure rather than something true by definition.</p>
+</div>
+
+<h2><span class="num">6</span>What gets compared against what</h2>
+<p class="lede">Eleven arms, but they answer four questions in sequence.</p>
+<table>
+  <tr><th>Question</th><th>Compare</th></tr>
+  <tr><td>Is there any daily signal?</td><td>oracle flow vs. a monthly climatological split of the same box totals</td></tr>
+  <tr><td>What did coupling cost?</td><td>Model B oracle vs. coupled flow with amounts pinned to truth</td></tr>
+  <tr><td>What did real amounts cost?</td><td>coupled oracle vs. the full operational background</td></tr>
+  <tr><td>Does DA help?</td><td>each observation arm vs. the background, and vs. the frozen v2 baseline</td></tr>
+</table>
+<p>Every comparison gives both sides the <i>same</i> box amounts, so the score isolates placement rather than rewarding a better total. Scoring is CRPS computed member by member, which keeps a blurry ensemble from winning by averaging.</p>
+
+</div>
+</body>
+</html>

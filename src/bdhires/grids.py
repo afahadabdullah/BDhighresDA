@@ -71,10 +71,23 @@ class Grid:
 # Bangladesh spans 88.01-92.67E and 20.57-26.63N; this box clears all of it.
 BD = Grid(name="bd", lon_min=87.6, lat_min=20.3, nlon=128, nlat=128, res=0.05)
 
-# 256 x 256 @ 0.05 deg = 12.8 deg box, used for pretraining with random crops.
+# 256 x 256 @ 0.05 deg = 12.8 deg box, used for legacy pretraining with random crops.
 WIDE = Grid(name="wide", lon_min=84.0, lat_min=16.0, nlon=256, nlat=256, res=0.05)
 
-GRIDS = {g.name: g for g in (BD, WIDE)}
+# V3-SG domains.  Their *edges* close on the native 0.5-degree CPC grid, so
+# every coarse cell is exactly 10 x 10 fine cells.  They intentionally coexist
+# with (rather than replace) the legacy grids: changing BD/WIDE would invalidate
+# all V1/V2 checkpoints and comparisons.
+BD_CPC = Grid(
+    name="bd_cpc", lon_min=87.5, lat_min=20.0,
+    nlon=130, nlat=140, res=0.05,
+)
+WIDE_CPC = Grid(
+    name="wide_cpc", lon_min=84.0, lat_min=16.0,
+    nlon=260, nlat=260, res=0.05,
+)
+
+GRIDS = {g.name: g for g in (BD, WIDE, BD_CPC, WIDE_CPC)}
 
 
 def get_grid(name: str) -> Grid:

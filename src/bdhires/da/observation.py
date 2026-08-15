@@ -162,6 +162,70 @@ class BlockAverageObsOperator(torch.nn.Module):
         return self.keep if self.keep.numel() else None
 
 
+class AreaWeightedBlockObsOperator(torch.nn.Module):
+    """Physical area means on an exactly nested footprint lattice.
+
+    Unlike :class:`BlockAverageObsOperator`, this operator consumes and returns
+    physical precipitation.  It is the native V3-SG operator for 10x10 CPC
+    control footprints and 8x8 prepared IMERG-S04 footprints.  ``crop`` fixes
+    the independent footprint phase; a 0.4-degree operator must not be silently
+    snapped onto the 0.5-degree CPC phase.
+    """
+
+    def __init__(
+        self,
+        factor: int,
+        area: np.ndarray | torch.Tensor,
+        valid: np.ndarray | torch.Tensor | None = None,
+        min_valid_frac: float = 0.50,
+        crop: tuple[int, int, int, int] | None = None,
+    ):
+        super().__init__()
+        if factor <= 0:
+            raise ValueError("factor must be positive")
+        self.factor = int(factor)
+        self.crop = crop
+        area_tensor = torch.as_tensor(area, dtype=torch.float32)[None, None]
+        if valid is None:
+            valid_tensor = torch.ones_like(area_tensor, dtype=torch.bool)
+        else:
+            valid_tensor = torch.as_tensor(valid, dtype=torch.bool)[None, None]
+        if area_tensor.shape != valid_tensor.shape:
+            raise ValueError("area and valid must share one HxW shape")
+        if crop is not None:
+            row_start, row_stop, col_start, col_stop = crop
+            area_tensor = area_tensor[..., row_start:row_stop, col_start:col_stop]
+            valid_tensor = valid_tensor[..., row_start:row_stop, col_start:col_stop]
+        if area_tensor.shape[-2] % factor or area_tensor.shape[-1] % factor:
+            raise ValueError(
+                f"cropped footprint shape {area_tensor.shape[-2:]} is not divisible by {factor}"
+            )
+        if not torch.isfinite(area_tensor).all() or (area_tensor <= 0.0).any():
+            raise ValueError("area must be finite and positive")
+        valid_area = F.avg_pool2d(area_tensor * valid_tensor, factor) * factor**2
+        total_area = F.avg_pool2d(area_tensor, factor) * factor**2
+        keep = valid_area / total_area.clamp_min(1.0e-12) >= float(min_valid_frac)
+        self.register_buffer("area", area_tensor)
+        self.register_buffer("valid", valid_tensor)
+        self.register_buffer("valid_area", valid_area)
+        self.register_buffer("keep", keep.flatten())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.crop is not None:
+            row_start, row_stop, col_start, col_stop = self.crop
+            x = x[..., row_start:row_stop, col_start:col_stop]
+        valid = self.valid.to(device=x.device)
+        area = self.area.to(device=x.device, dtype=x.dtype)
+        finite = torch.isfinite(x)
+        safe = torch.where(valid & finite, x, torch.zeros_like(x))
+        numerator = F.avg_pool2d(safe * area, self.factor) * self.factor**2
+        mean = numerator / self.valid_area.to(x).clamp_min(1.0e-12)
+        return mean.reshape(x.shape[0], x.shape[1], -1)
+
+    def valid_mask(self) -> torch.Tensor:
+        return self.keep
+
+
 class PhysicalBilinearObsOperator(BilinearObsOperator):
     """Gauge operator that interpolates in physical precipitation space.
 
