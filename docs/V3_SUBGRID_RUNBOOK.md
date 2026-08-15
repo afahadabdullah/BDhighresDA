@@ -15,9 +15,11 @@ python scripts/01_download_chirps.py \
   --start 1981 --end 2024 --grid wide_cpc \
   --out data/raw/chirps_v3sg
 
+# Existing data/raw/era5/era5_daily_*.nc files may be reused because their
+# one-degree preparation halo covers wide_cpc. Script 56 validates coverage.
+# For a fully separate copy instead, run:
 python scripts/00_download_era5.py \
-  --start 1981 --end 2024 --grid wide_cpc \
-  --out data/raw/era5_v3sg
+  --start 1981 --end 2024 --grid wide_cpc --out data/raw/era5_v3sg
 
 python scripts/02b_download_cpc.py \
   --start 1981 --end 2024 --out data/raw/cpc --require-complete
@@ -35,11 +37,20 @@ python scripts/03_build_static.py \
 
 ## 2. Build the paired target archive
 
+If the aligned CHIRPS and DEM/static inputs are absent on Prism, first submit
+the resumable CHIRPS year array and its dependent DEM/static job:
+
+```bash
+bash slurm/submit_v3_subgrid_inputs.sh
+```
+
+After both jobs finish successfully, submit the main pipeline in Section 3.
+
 ```bash
 python scripts/56_build_chirps_subgrid_targets.py \
   --chirps-glob 'data/raw/chirps_v3sg/chirps_wide_cpc_*.nc' \
   --cpc-glob 'data/raw/cpc/precip.*.nc' \
-  --era5-glob 'data/raw/era5_v3sg/era5_daily_*.nc' \
+  --era5-glob 'data/raw/era5/era5_daily_*.nc' \
   --static data/static/static_wide_cpc.nc \
   --out data/processed/cpc_v3_subgrid/wide_cpc.zarr
 ```

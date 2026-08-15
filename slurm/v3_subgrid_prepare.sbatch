@@ -37,7 +37,7 @@ mkdir -p logs
 
 CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps_v3sg/chirps_wide_cpc_*.nc}"
 CPC_GLOB="${V3_CPC_GLOB:-data/raw/cpc/precip.*.nc}"
-ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5_v3sg/era5_daily_*.nc}"
+ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5/era5_daily_*.nc}"
 STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
 DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide_cpc.nc}"
 STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
