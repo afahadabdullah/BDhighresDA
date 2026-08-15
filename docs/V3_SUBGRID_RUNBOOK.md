@@ -61,7 +61,10 @@ This sends preparation to `grace-cpuonly`, starts the coarse and allocation
 GH200 jobs in parallel after preparation succeeds, and starts joint training
 only after both branches succeed. A completed target archive is reused.
 Interrupted training resumes from `last.pt` only when the saved and requested
-configs match exactly.
+configs match exactly. If `data/static/static_wide_cpc.nc` is absent, the
+preparation job builds it from the first aligned CHIRPS file and
+`data/raw/dem/copernicus_glo90_wide_cpc.nc`; it still requires those aligned
+raw inputs to exist.
 
 Monitor it with:
 

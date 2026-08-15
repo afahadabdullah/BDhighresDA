@@ -12,6 +12,7 @@ mkdir -p logs
 for required in \
     scripts/56_build_chirps_subgrid_targets.py \
     scripts/57_train_subgrid_oracle.py \
+    scripts/03_build_static.py \
     configs/train_h100_cpc_v3_subgrid_coarse.yaml \
     configs/train_h100_cpc_v3_subgrid_allocation.yaml \
     configs/train_h100_cpc_v3_subgrid_joint.yaml; do
@@ -22,6 +23,8 @@ export V3_CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps_v3sg/chirps_wide_cpc_*.
 export V3_CPC_GLOB="${V3_CPC_GLOB:-data/raw/cpc/precip.*.nc}"
 export V3_ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5_v3sg/era5_daily_*.nc}"
 export V3_STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
+export V3_DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide_cpc.nc}"
+export V3_STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
 export V3_PREP_OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc.zarr}"
 export V3_PREP_CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 export V3_PREP_OVERWRITE="${V3_PREP_OVERWRITE:-0}"
@@ -35,8 +38,38 @@ if [[ "$V3_PREP_OUT" != "$EXPECTED_TARGET" ]]; then
     exit 1
 fi
 
+# Catch missing raw prerequisites on the login node so a four-job dependency
+# chain is not submitted only to fail immediately in the preparation job.
+if [[ ! -e "$V3_PREP_OUT" || "$V3_PREP_OVERWRITE" == "1" ]]; then
+    for label_and_pattern in \
+        "CHIRPS|$V3_CHIRPS_GLOB" \
+        "CPC|$V3_CPC_GLOB" \
+        "ERA5|$V3_ERA5_GLOB"; do
+        label="${label_and_pattern%%|*}"
+        pattern="${label_and_pattern#*|}"
+        if ! compgen -G "$pattern" >/dev/null; then
+            echo "ERROR: $label input pattern matched no files: $pattern" >&2
+            echo "No Slurm jobs were submitted." >&2
+            exit 1
+        fi
+    done
+    if [[ ! -f "$V3_STATIC" ]]; then
+        [[ -f "$V3_DEM" ]] || {
+            echo "ERROR: missing aligned DEM needed to build static fields: $V3_DEM" >&2
+            echo "No Slurm jobs were submitted." >&2
+            exit 1
+        }
+        if [[ -n "$V3_STATIC_CHIRPS" && ! -f "$V3_STATIC_CHIRPS" ]]; then
+            echo "ERROR: missing V3_STATIC_CHIRPS: $V3_STATIC_CHIRPS" >&2
+            echo "No Slurm jobs were submitted." >&2
+            exit 1
+        fi
+    fi
+fi
+
 echo "Submitting V3-SG training pipeline"
 echo "  prepare:    CHIRPS/CPC/ERA5 -> $V3_PREP_OUT"
+echo "  static:     reuse $V3_STATIC, or build it from aligned CHIRPS + $V3_DEM"
 echo "  branches:   coarse and allocation run in parallel"
 echo "  joint:      starts only after both branch jobs succeed"
 echo "  checkpoint: interrupted stages resume only with an identical config"

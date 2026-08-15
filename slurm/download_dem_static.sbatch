@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=dem-static
+#SBATCH --partition=grace-cpuonly
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -20,7 +21,13 @@ DEM_OUT="${DEM_OUT:-data/raw/dem/copernicus_glo90_wide.nc}"
 DEM_TILE_DIR="${DEM_TILE_DIR:-data/raw/dem/copernicus_glo90_tiles}"
 STATIC_OUT="${STATIC_OUT:-data/static/static_wide.nc}"
 CHIRPS_REFERENCE="${CHIRPS_REFERENCE:-data/raw/chirps/chirps_wide_2010.nc}"
+STATIC_GRID="${STATIC_GRID:-wide}"
 JOBS="${DEM_JOBS:-${SLURM_CPUS_PER_TASK:-4}}"
+
+if [[ "$STATIC_GRID" != "wide" && "$STATIC_GRID" != "wide_cpc" ]]; then
+    echo "ERROR: STATIC_GRID must be wide or wide_cpc, got $STATIC_GRID" >&2
+    exit 1
+fi
 
 [[ -f "$CHIRPS_REFERENCE" ]] || {
     echo "ERROR: CHIRPS reference file not found: $CHIRPS_REFERENCE"
@@ -31,6 +38,11 @@ JOBS="${DEM_JOBS:-${SLURM_CPUS_PER_TASK:-4}}"
 export PYTHONNOUSERSITE=1
 unset PYTHONHOME
 unset PYTHONPATH
+
+[[ "$(uname -m)" == "aarch64" ]] || {
+    echo "ERROR: this ARM environment requires a Grace CPU/GH200 node" >&2
+    exit 1
+}
 
 if [[ -n "${DEM_PYTHON:-}" ]]; then
     PYTHON_BIN="$DEM_PYTHON"
@@ -69,11 +81,13 @@ echo "Repository: $SLURM_SUBMIT_DIR"
 echo "Architecture: $(uname -m)"
 echo "DEM: $DEM_OUT"
 echo "Static fields: $STATIC_OUT"
+echo "Grid: $STATIC_GRID"
 echo "CHIRPS mask source: $CHIRPS_REFERENCE"
 echo "Python: $PYTHON_BIN"
 echo "Workers: $JOBS"
 
 DEM_ARGS=(
+    --grid "$STATIC_GRID"
     --out "$DEM_OUT"
     --tile-dir "$DEM_TILE_DIR"
     --jobs "$JOBS"
@@ -85,6 +99,7 @@ fi
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/03_download_dem.py "${DEM_ARGS[@]}"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/03_build_static.py \
+    --grid "$STATIC_GRID" \
     --dem "$DEM_OUT" \
     --chirps "$CHIRPS_REFERENCE" \
     --out "$STATIC_OUT"

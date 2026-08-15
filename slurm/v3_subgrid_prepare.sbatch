@@ -39,11 +39,11 @@ CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps_v3sg/chirps_wide_cpc_*.nc}"
 CPC_GLOB="${V3_CPC_GLOB:-data/raw/cpc/precip.*.nc}"
 ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5_v3sg/era5_daily_*.nc}"
 STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
+DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide_cpc.nc}"
+STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
 OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc.zarr}"
 CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 OVERWRITE="${V3_PREP_OVERWRITE:-0}"
-
-[[ -f "$STATIC" ]] || { echo "ERROR: missing static file: $STATIC" >&2; exit 1; }
 
 if [[ -e "$OUT" ]]; then
     COMPLETE="$($PYTHON_BIN - "$OUT" <<'PY'
@@ -72,6 +72,35 @@ PY
         echo "Inspect it, or resubmit with V3_PREP_OVERWRITE=1 to replace it." >&2
         exit 1
     fi
+fi
+
+if [[ ! -f "$STATIC" ]]; then
+    if [[ -z "$STATIC_CHIRPS" ]]; then
+        mapfile -t CHIRPS_CANDIDATES < <(compgen -G "$CHIRPS_GLOB" | sort || true)
+        if (( ${#CHIRPS_CANDIDATES[@]} == 0 )); then
+            echo "ERROR: cannot build $STATIC because $CHIRPS_GLOB matched no files" >&2
+            echo "Prepare the aligned wide_cpc CHIRPS inputs, then rerun the pipeline." >&2
+            exit 1
+        fi
+        STATIC_CHIRPS="${CHIRPS_CANDIDATES[0]}"
+    fi
+    [[ -f "$STATIC_CHIRPS" ]] || {
+        echo "ERROR: static-reference CHIRPS file is missing: $STATIC_CHIRPS" >&2
+        exit 1
+    }
+    [[ -f "$DEM" ]] || {
+        echo "ERROR: aligned DEM is missing: $DEM" >&2
+        echo "Create it with the V3-SG --grid wide_cpc DEM command in the runbook." >&2
+        exit 1
+    }
+    echo "Building missing V3 static predictors"
+    echo "  CHIRPS reference: $STATIC_CHIRPS"
+    echo "  DEM:              $DEM"
+    echo "  output:           $STATIC"
+    "$PYTHON_BIN" -u scripts/03_build_static.py \
+        --grid wide_cpc --dem "$DEM" --chirps "$STATIC_CHIRPS" --out "$STATIC"
+else
+    echo "Reusing V3 static predictors: $STATIC"
 fi
 
 ARGS=(
