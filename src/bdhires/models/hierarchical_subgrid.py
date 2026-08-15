@@ -68,8 +68,19 @@ class CoarseHurdleFlow(nn.Module):
         )
 
     def forward(self, state, t, cond=None):
-        if self.cond_channels and cond is None:
-            raise ValueError("coarse conditioning is required by this model")
+        if state.ndim != 4 or state.shape[1] != 2:
+            raise ValueError("coarse state must have shape (B,2,Hc,Wc)")
+        if self.cond_channels and (
+            cond is None
+            or cond.ndim != 4
+            or cond.shape[0] != state.shape[0]
+            or cond.shape[1] != self.cond_channels
+            or cond.shape[-2:] != state.shape[-2:]
+        ):
+            raise ValueError(
+                f"coarse conditioning must have shape "
+                f"(B,{self.cond_channels},Hc,Wc) matching the state"
+            )
         return self.net(state, t, cond)
 
 
@@ -134,18 +145,35 @@ class AllocationFlow(nn.Module):
         coarse_context: torch.Tensor,
         coarse_uncertainty=None,
     ) -> torch.Tensor:
+        if allocation_state.ndim != 4 or allocation_state.shape[1] != 2:
+            raise ValueError("allocation_state must have shape (B,2,H,W)")
         if coarse_context.ndim != 4 or coarse_context.shape[1] != 2:
             raise ValueError("coarse_context must have shape (B,2,Hc,Wc)")
         if coarse_context.shape[0] == 1 and allocation_state.shape[0] > 1:
             coarse_context = coarse_context.expand(allocation_state.shape[0], -1, -1, -1)
+        if coarse_context.shape[0] != allocation_state.shape[0]:
+            raise ValueError("coarse_context batch must match allocation_state")
+        fine_height, fine_width = allocation_state.shape[-2:]
+        coarse_height, coarse_width = coarse_context.shape[-2:]
+        if fine_height % coarse_height or fine_width % coarse_width:
+            raise ValueError("fine allocation shape must be an integer multiple of coarse context")
+        if fine_height // coarse_height != fine_width // coarse_width:
+            raise ValueError("coarse-to-fine scale must be identical in both spatial axes")
         upsampled = F.interpolate(
-            coarse_context, size=allocation_state.shape[-2:], mode="bilinear", align_corners=False
+            coarse_context, size=allocation_state.shape[-2:], mode="nearest"
         )
         condition = []
         if self.fine_cond_channels:
-            if fine_cond is None or fine_cond.shape[1] != self.fine_cond_channels:
+            if (
+                fine_cond is None
+                or fine_cond.ndim != 4
+                or fine_cond.shape[0] != allocation_state.shape[0]
+                or fine_cond.shape[1] != self.fine_cond_channels
+                or fine_cond.shape[-2:] != allocation_state.shape[-2:]
+            ):
                 raise ValueError(
-                    f"expected {self.fine_cond_channels} fine conditioning channels"
+                    f"expected {self.fine_cond_channels} fine conditioning channels "
+                    "matching allocation_state"
                 )
             condition.append(fine_cond)
         condition.extend([upsampled, self._level_map(coarse_uncertainty, allocation_state)])
@@ -276,9 +304,30 @@ def _masked_mse(prediction, target, mask) -> torch.Tensor:
     return ((prediction - target).square() * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _hurdle_velocity_mse(prediction, target_velocity, clean_target, mask) -> torch.Tensor:
+    """Balance active positive intensity against occurrence velocity.
+
+    Channel zero has no physical authority behind a hard-dry occurrence gate.
+    Training it at every dry pixel would let the numerous inactive cells
+    dominate the allocation objective even when their neutral target is
+    numerically benign. Channel one remains supervised over every valid cell.
+    """
+    wet = clean_target[:, 1:2] >= 0.0
+    positive = _masked_mse(
+        prediction[:, :1], target_velocity[:, :1], mask.to(torch.bool) & wet
+    )
+    occurrence = _masked_mse(
+        prediction[:, 1:2], target_velocity[:, 1:2], mask
+    )
+    return 0.5 * (positive + occurrence)
+
+
 def _occurrence_loss(clean_state, target_state, mask) -> torch.Tensor:
     logits = clean_state[:, 1:2]
-    label = (target_state[:, 1:2] >= 0.0).to(logits.dtype)
+    # The flow target is a finite dequantised logit, not a hard class whose BCE
+    # optimum lies at +/- infinity.  Soft labels preserve the exact finite
+    # terminal marginal while retaining useful occurrence supervision.
+    label = torch.sigmoid(target_state[:, 1:2]).to(logits.dtype).detach()
     loss = F.binary_cross_entropy_with_logits(logits, label, reduction="none")
     weight = mask.to(loss.dtype)
     return (loss * weight).sum() / weight.sum().clamp_min(1.0)
@@ -342,9 +391,11 @@ def hierarchical_flow_matching_loss(
         coarse_uncertainty=uncertainty,
         clean_coarse_context=clean_context,
     )
-    coarse_loss = _masked_mse(prediction.coarse, target.coarse, coarse_mask)
-    allocation_loss = _masked_mse(
-        prediction.allocation, target.allocation, fine_mask
+    coarse_loss = _hurdle_velocity_mse(
+        prediction.coarse, target.coarse, state1.coarse, coarse_mask
+    )
+    allocation_loss = _hurdle_velocity_mse(
+        prediction.allocation, target.allocation, state1.allocation, fine_mask
     )
     clean = flow.x1_hat(state_t, t, prediction)
     occurrence_loss = _occurrence_loss(clean.coarse, state1.coarse, coarse_mask)
@@ -374,7 +425,7 @@ def coarse_flow_matching_loss(
     state_t, velocity, _ = flow.interpolate(target, t)
     prediction = model(state_t, t, cond)
     clean = flow.x1_hat(state_t, t, prediction)
-    return _masked_mse(prediction, velocity, mask) + float(
+    return _hurdle_velocity_mse(prediction, velocity, target, mask) + float(
         occurrence_weight
     ) * _occurrence_loss(clean, target, mask)
 
@@ -387,8 +438,8 @@ def allocation_flow_matching_loss(
     mask: torch.Tensor,
     flow: RectifiedFlow | None = None,
     *,
-    max_coarse_noise: float = 0.35,
-    clean_probability: float = 0.25,
+    max_coarse_noise: float = 1.0,
+    clean_probability: float = 0.15,
     occurrence_weight: float = 0.1,
 ):
     """Phase-2 objective with an interface identical to the joint fine branch."""
@@ -396,13 +447,20 @@ def allocation_flow_matching_loss(
     batch = target.shape[0]
     t = flow.sample_t(batch, target.device)
     state_t, velocity, _ = flow.interpolate(target, t)
-    level = torch.rand(batch, device=target.device) * float(max_coarse_noise)
+    if not 0.0 <= float(max_coarse_noise) <= 1.0:
+        raise ValueError("max_coarse_noise must lie in [0, 1]")
+    if not 0.0 <= float(clean_probability) <= 1.0:
+        raise ValueError("clean_probability must lie in [0, 1]")
+    # Match the joint interpolant exactly: the fine state and its coarse
+    # context share t, with coarse uncertainty 1-t.  Scaling remains available
+    # only for an explicit ablation; the frozen configuration uses 1.0.
+    level = (1.0 - t) * float(max_coarse_noise)
     clean = torch.rand(batch, device=target.device) < float(clean_probability)
     level = torch.where(clean, torch.zeros_like(level), level)
     scale = level[:, None, None, None]
     coarse_context = (1.0 - scale) * coarse_truth + scale * torch.randn_like(coarse_truth)
     prediction = model(state_t, t, fine_cond, coarse_context, level)
     clean_state = flow.x1_hat(state_t, t, prediction)
-    return _masked_mse(prediction, velocity, mask) + float(
+    return _hurdle_velocity_mse(prediction, velocity, target, mask) + float(
         occurrence_weight
     ) * _occurrence_loss(clean_state, target, mask)

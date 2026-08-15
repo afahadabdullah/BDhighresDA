@@ -56,6 +56,7 @@ def dataset_from_config(config: dict, split: str) -> SubgridDataset:
             factor=int(data.get("factor", 10)),
             downsamplings=int(data.get("downsamplings", 3)),
             seed=int(config["train"]["seed"]) + (0 if split == "train" else 100_000),
+            tile_domain=split == "val",
         )
     )
 
@@ -121,8 +122,8 @@ def batch_loss(model, batch: dict, config: dict):
             batch["fine_cond"],
             batch["coarse_state"],
             batch["fine_valid"],
-            max_coarse_noise=float(augmentation.get("max_coarse_noise", 0.35)),
-            clean_probability=float(augmentation.get("clean_probability", 0.25)),
+            max_coarse_noise=float(augmentation.get("max_coarse_noise", 1.0)),
+            clean_probability=float(augmentation.get("clean_probability", 0.15)),
             occurrence_weight=float(config["train"].get("occurrence_weight", 0.1)),
         )
     return hierarchical_flow_matching_loss(
@@ -150,7 +151,7 @@ def move_batch(batch, device):
 
 
 @torch.no_grad()
-def validate(model, loader, config, device, max_batches: int = 32) -> float:
+def validate(model, loader, config, device, max_batches: int | None = None) -> float:
     model.eval()
     values = []
     devices = [device.index or 0] if device.type == "cuda" else []
@@ -158,7 +159,7 @@ def validate(model, loader, config, device, max_batches: int = 32) -> float:
     # stream (especially important because only rank zero validates under DDP).
     with torch.random.fork_rng(devices=devices):
         for index, batch in enumerate(loader):
-            if index >= max_batches:
+            if max_batches is not None and index >= max_batches:
                 break
             batch = move_batch(batch, device)
             torch.manual_seed(int(config["train"]["seed"]) + 900_000 + index)
@@ -276,9 +277,16 @@ def main() -> None:
                     for key, value in model.state_dict().items()
                 }
                 ema.copy_to(model)
-            val = validate(validation_model, val_loader, config, device)
+            maximum = config["train"].get("validation_max_batches")
+            val = validate(
+                validation_model,
+                val_loader,
+                config,
+                device,
+                None if maximum is None else int(maximum),
+            )
             payload = {
-                "schema": "cpc_v3_subgrid_v1",
+                "schema": "cpc_v3_subgrid_v2",
                 "stage": config["stage"],
                 "epoch": epoch,
                 "model": online if online is not None else model.state_dict(),

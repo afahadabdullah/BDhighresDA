@@ -404,14 +404,27 @@ def sample_hierarchical(
         state.coarse, state.allocation, coarse_valid, fine_valid, area, encoding,
         temperature=cfg.occurrence_temperature, hard=False,
     )
+    # Re-evaluate the exact hard terminal state used by the likelihood.  This
+    # catches any future divergence between the field returned to an archive
+    # writer and the decoder/operator path used during DA.
+    terminal_likelihood_field = decode_and_reconstruct(
+        state.coarse, state.allocation, coarse_valid, fine_valid, area, encoding,
+        temperature=cfg.occurrence_temperature, hard=True,
+    )
+    terminal_decoder_error = float(
+        (physical - terminal_likelihood_field).abs().max().detach().cpu()
+    )
+    if terminal_decoder_error > 1.0e-6:
+        raise RuntimeError(
+            "terminal hard-decoder mismatch between returned and likelihood fields: "
+            f"{terminal_decoder_error:.3g} mm/day"
+        )
     diagnostics = {
         "n_steps": cfg.n_steps,
         "heun": cfg.heun,
         "oracle_clean_context": oracle_coarse_truth is not None,
-        # Guidance and archival decoding both call decode_and_reconstruct with
-        # hard=True.  The last in-trajectory field is at a different state and
-        # is therefore not the relevant equality check.
-        "archive_uses_likelihood_hard_decoder": True,
+        "terminal_hard_decode_max_abs_mm_day": terminal_decoder_error,
+        "terminal_decoder_consistent": True,
     }
     if last_likelihood_field is not None:
         diagnostics["last_guidance_to_final_field_max_abs_mm"] = float(
@@ -419,9 +432,39 @@ def sample_hierarchical(
         )
     if observations is not None:
         values = _expand_observations(observations, batch)
-        hard_hx = observations.operator(physical)
+        hard_hx = observations.operator(terminal_likelihood_field)
         soft_hx = observations.operator(soft)
         sigma = torch.sqrt(observations.variance.to(hard_hx).clamp_min(1.0e-12))
+        terminal_time = torch.ones(batch, device=hard_hx.device, dtype=hard_hx.dtype)
+        terminal_ll = obs_log_likelihood(
+            values, hard_hx, observations.variance, terminal_time,
+            observations.guidance,
+        )
+        valid = (
+            torch.isfinite(values)
+            & torch.isfinite(hard_hx)
+            & torch.isfinite(sigma)
+        )
+        terminal_residual = torch.where(
+            valid, (hard_hx - values) / sigma, torch.zeros_like(hard_hx)
+        )
+        residual_values = terminal_residual[valid]
+        diagnostics["terminal_log_likelihood_mean"] = float(
+            terminal_ll.mean().detach().cpu()
+        )
+        diagnostics["terminal_valid_observation_count"] = int(valid.sum().cpu())
+        diagnostics["terminal_oa_bias_sigma"] = (
+            float(residual_values.mean().detach().cpu())
+            if residual_values.numel() else 0.0
+        )
+        diagnostics["terminal_oa_rmse_sigma"] = (
+            float(residual_values.square().mean().sqrt().detach().cpu())
+            if residual_values.numel() else 0.0
+        )
+        diagnostics["terminal_oa_max_abs_sigma"] = (
+            float(residual_values.abs().max().detach().cpu())
+            if residual_values.numel() else 0.0
+        )
         difference = ((hard_hx - soft_hx).abs() / sigma)
         difference = difference[torch.isfinite(values) & torch.isfinite(difference)]
         if difference.numel():

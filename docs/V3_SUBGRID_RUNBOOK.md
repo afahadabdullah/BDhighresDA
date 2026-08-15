@@ -45,9 +45,17 @@ The end date deliberately excludes the existing 2025 CHIRPS file so the
 archive remains matched to the originally frozen 1981--2024 CPC/ERA5 period.
 
 This is a two-pass, chunked writer. The first pass freezes training-period
-amount and conditioning statistics; the second writes raw rainfall, paired
-flow states and normalized conditions. Target dequantisation is seeded per
-date, so changing `--chunk-days` cannot change the learned target.
+positive-amount, wet-cell centred-log-allocation and conditioning statistics;
+the second writes raw rainfall, paired flow states and normalized conditions.
+Dry decoder-inactive channels receive neutral standardized values. Target
+dequantisation is seeded per date, so changing `--chunk-days` cannot change the
+learned target.
+The positive amount/intensity velocity loss is wet-target-only; occurrence is
+still trained across every valid block/cell.
+
+The corrected archive schema is `cpc_v3_subgrid_v2`. A pre-fix
+`cpc_v3_subgrid_v1` archive and checkpoints are intentionally rejected and must
+be moved aside before restarting; they encode a different allocation target.
 
 ## 3. Train the three phases
 
@@ -90,6 +98,10 @@ channel mismatch or partial transfer is an error. Joint checkpoints record the
 clean-coarse-context training probability; the coupled-oracle sampler refuses a
 checkpoint where that probability is zero.
 
+Validation selects checkpoints over four deterministic 120-by-120 tiles that
+cover the complete 240-by-240 domain and over every validation batch. It no
+longer selects on one central crop or the first 32 batches.
+
 ## 4. Preflight the scientific invariants
 
 Run this before an expensive training or DA submission. On the Prism login
@@ -108,15 +120,20 @@ PYTHONPATH=src pytest -q tests/test_v3_subgrid.py
 
 The tests cover CPC alignment, the 160-cell production halo, quantized crops,
 coastal mass conservation, exact dry atoms with occurrence gradients,
-chunk-invariant targets, literal branch transfer, joint gauge gradients,
-0.4/0.5-degree uniform-footprint behavior and physical authority closure.
+chunk-invariant normalized targets, literal branch transfer, full Phase-2
+coarse-corruption support, joint gauge gradients, 0.4/0.5-degree
+uniform-footprint behavior, pure amount/allocation attribution and physical
+authority closure.
 
 ## 5. Evaluate a generated archive
 
-A generated Zarr must contain `time` and one `(time, member, lat, lon)` array
-per requested method. Optional `<method>_coarse_mm` arrays activate the direct
-conservation check; optional latent-state arrays activate the physical
-amount/allocation authority decomposition.
+A generated Zarr must be written with
+`bdhires.zarr_output.write_hierarchical_sample_zarr`. It stores `time`, one
+`(time, member, lat, lon)` hard-terminal field per method, both latent states,
+and optional `<method>_coarse_mm` arrays. The writer requires the sampler's
+terminal decoder diagnostic, reopens the temporary archive, and checks every
+physical field before atomically marking it complete. Script 58 rejects an
+unverified or manually assembled store.
 
 ```bash
 python scripts/58_evaluate_subgrid_prior.py \

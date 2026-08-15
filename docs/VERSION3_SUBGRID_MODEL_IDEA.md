@@ -316,13 +316,27 @@ small seeded logistic noise. These intensity and wetness logits together are
 `z_truth`. Save epsilon, threshold and dequantisation seed in the dataset
 metadata; changing any of them defines a different target.
 
+Fit the centred log-weight mean and standard deviation on **wet training cells
+only**, standardise that channel, and store both numbers in the encoding. Dry
+valid cells receive the neutral standardised log weight, not
+`log(intensity_floor)`. Likewise, fit the coarse square-root amount statistics
+on wet retained blocks only and use zero (the standardised positive-amount
+mean) behind a dry coarse gate. This keeps decoder-inactive channels from
+dominating flow matching with artificial dry spikes. The occurrence auxiliary
+BCE uses `sigmoid(z_truth)` as its soft label; hard 0/1 labels would push the
+terminal logit to infinity and conflict with the finite dequantised flow target.
+Velocity MSE for the positive amount/intensity channel is evaluated only where
+the corresponding clean occurrence target is wet; occurrence velocity and BCE
+remain evaluated over every valid block/cell.
+
 ### Hard mass-conserving reconstruction
 
 For a wet block, let `a_i` be the physical area of valid fine cell `i`,
 `A = sum_i(a_i)`, and
 
 ```text
-q_i = wet_i * softplus(z_i)
+ell_i = intensity_std * z_i + intensity_mean
+q_i = wet_i * exp(clamp(ell_i, -L, L))
 x_i = A * m_block * q_i / sum_j(a_j * q_j)
 ```
 
@@ -355,6 +369,9 @@ intensity. Wetness logits are part of `z`, not an external post-processing
 variable. The fine branch must receive `m_block` explicitly, because the
 expected wet-cell fraction depends strongly on block rainfall amount; predicting
 wet fraction before cell placement is a reasonable implementation.
+The implemented view is a nearest-neighbour repeat of each coarse latent over
+its exact 10-by-10 CPC footprint. Bilinear interpolation is not used because it
+would mix neighbouring block amounts at their boundaries.
 
 During joint DA, use an explicitly **hard-forward, soft-backward**
 straight-through wetness estimator:
@@ -525,6 +542,10 @@ interface after transfer into the coupled flow. In joint training the level is
 input channel or first-layer parameter is dropped or reinitialised. A pinned
 batch must give identical Model-B and just-transferred joint fine velocities
 before joint optimisation.
+For the frozen implementation, Phase 2 covers the complete joint range:
+`level = 1-t` in `[0,1]`, using the same sampled `t` as the fine interpolant,
+with 15% clean level-zero contexts. Restricting pretraining to level <= 0.35
+would make the early joint trajectory out of distribution.
 Do not initially add many texture losses: first determine what the correct
 factorisation alone achieves.
 
@@ -662,6 +683,12 @@ most `1e-5 mm/day`. Select the relaxation temperature partly on these bounds,
 not only gradient stability. If every validation temperature fails, use the
 predeclared soft-conservation/continuous-occurrence fallback rather than
 publishing a field different from the one whose fit was diagnosed.
+
+The sampler performs a guidance-free terminal operator evaluation on the final
+hard state and records its likelihood and standardised O-A diagnostics. The
+sample writer then reopens the temporary Zarr and compares every saved physical
+member to that terminal hard field before setting `complete=true`; the evaluator
+rejects archives without this audit.
 
 Conceptually:
 
@@ -994,6 +1021,9 @@ Required tests should cover:
   `wide_cpc` and `bd_cpc`;
 - every training-crop origin is 0 modulo 10 and every crop size is divisible by
   both 10 and `2^d` for the chosen U-Net depth;
+- validation covering four deterministic 120-by-120 tiles of the complete
+  240-by-240 domain rather than one central crop, and production rejecting the
+  raw 14-by-13 CPC core in favour of the aligned 160-cell halo canvas;
 - nonnegative output and dry-block behavior;
 - exact `z_truth` reproduction from the pinned wet threshold, epsilon and
   dequantisation seed;
@@ -1012,6 +1042,9 @@ Required tests should cover:
 - physical-space authority components satisfying `C_m + C_z = analysis -
   background` to numerical tolerance for every member, with separate outputs
   for IMERG-only, gauges-only and simultaneous arms;
+- pure-amount changes producing zero allocation authority and pure-allocation
+  changes producing zero amount authority (the closure identity alone is
+  algebraic and is not a sufficient test);
 - paired `+1 sigma` IMERG/gauge impulse experiments using identical backgrounds,
   seeds and fixed influence-region definitions;
 - gauge likelihood acting on the reconstructed fine field;

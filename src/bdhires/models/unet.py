@@ -241,6 +241,41 @@ class UNet(nn.Module):
         nn.init.zeros_(self.out_conv.bias)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor | None = None):
+        if x.ndim != 4 or x.shape[1] != self.in_channels:
+            raise ValueError(
+                f"x must have shape (B,{self.in_channels},H,W); got {tuple(x.shape)}"
+            )
+        divisor = 2 ** (len(self.channel_mult) - 1)
+        if x.shape[-2] % divisor or x.shape[-1] % divisor:
+            raise ValueError(
+                f"input spatial shape {tuple(x.shape[-2:])} must be divisible by "
+                f"the U-Net pyramid factor {divisor}; use the aligned production "
+                "canvas rather than sampling the raw CPC core"
+            )
+        if t.ndim != 1 or t.shape[0] != x.shape[0]:
+            raise ValueError(f"t must have shape ({x.shape[0]},); got {tuple(t.shape)}")
+        if self.cond_channels:
+            if cond is None:
+                raise ValueError(
+                    f"this U-Net requires {self.cond_channels} conditioning channels"
+                )
+            if (
+                cond.ndim != 4
+                or cond.shape[0] != x.shape[0]
+                or cond.shape[1] != self.cond_channels
+                or cond.shape[-2:] != x.shape[-2:]
+            ):
+                raise ValueError(
+                    "cond must have shape "
+                    f"(B,{self.cond_channels},H,W) matching x; got {tuple(cond.shape)}"
+                )
+        elif cond is not None:
+            if cond.ndim != 4 or cond.shape[0] != x.shape[0] or cond.shape[-2:] != x.shape[-2:]:
+                raise ValueError("zero-channel cond must still match x batch and spatial shape")
+            if cond.shape[1] != 0:
+                raise ValueError(
+                    f"this U-Net expects no conditioning channels; got {cond.shape[1]}"
+                )
         emb = self.time_embed(fourier_time_embedding(t, self.base_channels))
         condition_features = (
             self.condition_encoder(cond)

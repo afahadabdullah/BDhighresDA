@@ -6,6 +6,7 @@ from .subgrid_dataset import (  # noqa: F401
     SubgridDatasetConfig,
     SubgridEncoding,
     SubgridTargets,
+    allocation_log_weight_target,
     aligned_production_canvas,
     area_weighted_block_mean,
     cell_area_weights,

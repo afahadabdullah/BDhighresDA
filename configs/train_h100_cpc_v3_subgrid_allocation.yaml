@@ -30,5 +30,5 @@ train:
   seed: 3102
   ckpt_every: 5
   conditioning_augmentation:
-    max_coarse_noise: 0.35
-    clean_probability: 0.25
+    max_coarse_noise: 1.0
+    clean_probability: 0.15

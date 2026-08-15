@@ -11,7 +11,7 @@ python scripts/56_build_chirps_subgrid_targets.py \
   --chirps-glob 'data/raw/chirps/chirps_wide_*.nc' \
   --cpc-glob 'data/raw/cpc/precip.*.nc' \
   --era5-glob 'data/raw/era5/era5_daily_*.nc' \
-  --static data/processed/static_wide_cpc.nc \
+  --static data/static/static_wide_cpc.nc \
   --out data/processed/cpc_v3_subgrid/wide_cpc.zarr
 """
 
@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.data import (  # noqa: E402
     SubgridEncoding,
+    allocation_log_weight_target,
     area_weighted_block_mean,
     cell_area_weights,
     encode_subgrid_targets,
@@ -128,6 +129,27 @@ class RunningChannels:
         mean = self.total / np.maximum(self.count, 1.0)
         variance = self.square / np.maximum(self.count, 1.0) - mean * mean
         return mean.astype(np.float32), np.sqrt(np.maximum(variance, 1.0e-8)).astype(np.float32)
+
+
+class RunningScalar:
+    def __init__(self):
+        self.count = 0
+        self.total = 0.0
+        self.square = 0.0
+
+    def update(self, values: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float64)
+        values = values[np.isfinite(values)]
+        self.count += int(values.size)
+        self.total += float(values.sum())
+        self.square += float((values * values).sum())
+
+    def finish(self, label: str) -> tuple[float, float]:
+        if self.count == 0:
+            raise ValueError(f"no training values were available for {label}")
+        mean = self.total / self.count
+        variance = self.square / self.count - mean * mean
+        return float(mean), float(np.sqrt(max(variance, 1.0e-8)))
 
 
 def _season(times: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -265,6 +287,7 @@ def main() -> None:
     parser.add_argument("--dequant-epsilon", type=float, default=0.02)
     parser.add_argument("--dequant-noise", type=float, default=0.05)
     parser.add_argument("--dequant-seed", type=int, default=314159)
+    parser.add_argument("--intensity-log-clip", type=float, default=12.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -330,10 +353,20 @@ def main() -> None:
         raise ValueError("no dates fall in the requested training period")
 
     # Pass 1: frozen amount and conditioning statistics from training dates.
-    roots = []
+    amount_stats = RunningScalar()
+    intensity_stats = RunningScalar()
     coarse_stats = fine_stats = None
     coarse_names = fine_names = None
     era5_names = tuple(value.strip() for value in args.era5_vars.split(",") if value.strip())
+    statistics_encoding = SubgridEncoding(
+        factor=factor,
+        wet_threshold_mm=args.wet_threshold,
+        dequant_epsilon=args.dequant_epsilon,
+        dequant_noise=args.dequant_noise,
+        dequant_seed=args.dequant_seed,
+        valid_area_threshold=args.valid_area_threshold,
+        intensity_log_clip=args.intensity_log_clip,
+    )
     for start in range(0, len(times), args.chunk_days):
         stop = min(start + args.chunk_days, len(times))
         raw = np.asarray(chirps.isel(time=slice(start, stop)).values, np.float32)
@@ -344,8 +377,20 @@ def main() -> None:
         )
         local_training = training[start:stop]
         if local_training.any():
-            mask = coarse_valid[None] & np.ones((int(local_training.sum()), 1, 1), bool)
-            roots.append(np.sqrt(coarse_mm.numpy()[local_training, 0][mask]))
+            coarse_values = coarse_mm.numpy()[local_training, 0]
+            coarse_wet = coarse_valid[None] & (
+                coarse_values >= float(args.wet_threshold)
+            )
+            amount_stats.update(np.sqrt(coarse_values[coarse_wet]))
+            centred_log, wet = allocation_log_weight_target(
+                torch.from_numpy(raw)[:, None],
+                torch.from_numpy(fine_valid),
+                torch.from_numpy(area),
+                statistics_encoding,
+            )
+            centred_values = centred_log.numpy()[local_training, 0]
+            wet_values = wet.numpy()[local_training, 0]
+            intensity_stats.update(centred_values[wet_values])
         coarse_cond, fine_cond, coarse_names, fine_names = _condition_chunk(
             times[start:stop], cpc, era5_ds, era5_names, static, static_names,
             fine_grid, coarse_grid, area, factor,
@@ -357,9 +402,10 @@ def main() -> None:
             coarse_stats.update(coarse_cond[local_training])
             fine_stats.update(fine_cond[local_training])
         print(f"statistics {stop}/{len(times)}", flush=True)
-    root_values = np.concatenate(roots)
-    amount_mean = float(root_values.mean())
-    amount_std = float(root_values.std())
+    amount_mean, amount_std = amount_stats.finish("positive coarse amounts")
+    intensity_mean, intensity_std = intensity_stats.finish(
+        "wet-cell centred log allocations"
+    )
     encoding = SubgridEncoding(
         factor=factor,
         wet_threshold_mm=args.wet_threshold,
@@ -368,7 +414,10 @@ def main() -> None:
         dequant_seed=args.dequant_seed,
         valid_area_threshold=args.valid_area_threshold,
         amount_sqrt_mean=amount_mean,
-        amount_sqrt_std=max(amount_std, 1.0e-6),
+        amount_sqrt_std=amount_std,
+        intensity_log_mean=intensity_mean,
+        intensity_log_std=intensity_std,
+        intensity_log_clip=args.intensity_log_clip,
     )
     coarse_mean, coarse_std = coarse_stats.finish()
     fine_mean, fine_std = fine_stats.finish()
@@ -380,7 +429,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     root = _zarr_group(output, args.overwrite)
     root.attrs.update(
-        schema="cpc_v3_subgrid_v1",
+        schema="cpc_v3_subgrid_v2",
         complete=False,
         subgrid_encoding=encoding_metadata(encoding),
         fine_grid={
@@ -403,6 +452,8 @@ def main() -> None:
         source_start_date=str(times[0].astype("datetime64[D]")),
         source_end_date=str(times[-1].astype("datetime64[D]")),
         target="CHIRPS 0.05 degree and its exact area-weighted CPC-block mean",
+        amount_stats_wet_block_count=amount_stats.count,
+        intensity_stats_wet_cell_count=intensity_stats.count,
     )
     nt = len(times)
     hc, wc = coarse_grid.shape
@@ -474,6 +525,8 @@ def main() -> None:
         "fine_shape": list(fine_grid.shape),
         "coarse_shape": list(coarse_grid.shape),
         "subgrid_encoding": encoding_metadata(encoding),
+        "amount_stats_wet_block_count": amount_stats.count,
+        "intensity_stats_wet_cell_count": intensity_stats.count,
         "coarse_cond_channels": coarse_names,
         "fine_cond_channels": fine_names,
     }

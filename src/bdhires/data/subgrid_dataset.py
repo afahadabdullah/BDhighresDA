@@ -13,7 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
 from ..grids import Grid, crop_offsets
@@ -33,6 +32,9 @@ class SubgridEncoding:
     valid_area_threshold: float = 0.50
     amount_sqrt_mean: float = 0.0
     amount_sqrt_std: float = 1.0
+    intensity_log_mean: float = 0.0
+    intensity_log_std: float = 1.0
+    intensity_log_clip: float = 12.0
 
     def validate(self) -> None:
         if self.factor <= 0:
@@ -47,6 +49,10 @@ class SubgridEncoding:
             raise ValueError("valid_area_threshold must lie in [0, 1]")
         if self.amount_sqrt_std <= 0.0:
             raise ValueError("amount_sqrt_std must be positive")
+        if self.intensity_log_std <= 0.0:
+            raise ValueError("intensity_log_std must be positive")
+        if self.intensity_log_clip <= 0.0:
+            raise ValueError("intensity_log_clip must be positive")
 
     @classmethod
     def from_mapping(cls, values) -> "SubgridEncoding":
@@ -226,11 +232,6 @@ def _logit(probability: torch.Tensor) -> torch.Tensor:
     return torch.log(probability) - torch.log1p(-probability)
 
 
-def _inverse_softplus(value: torch.Tensor) -> torch.Tensor:
-    # y + log(1-exp(-y)) is stable for both tiny and very large y.
-    return value + torch.log(-torch.expm1(-value))
-
-
 def _dequantized_binary_logits(
     target: torch.Tensor, encoding: SubgridEncoding, generator: torch.Generator
 ) -> torch.Tensor:
@@ -246,6 +247,64 @@ def _dequantized_binary_logits(
         logistic = torch.log(uniform) - torch.log1p(-uniform)
         logits = logits + float(encoding.dequant_noise) * logistic.to(logits.device, logits.dtype)
     return logits
+
+
+def _centered_allocation_log_weights(
+    fine: torch.Tensor,
+    coarse: torch.Tensor,
+    wet: torch.Tensor,
+    area: torch.Tensor,
+    encoding: SubgridEncoding,
+) -> torch.Tensor:
+    """Identifiable log allocation target with zero wet-cell block mean.
+
+    Only relative positive weights matter after conservative block
+    normalisation.  Removing each block's area-weighted wet-cell log mean
+    eliminates that unidentifiable scale.  Dry cells receive raw value zero,
+    a neutral positive weight if their occurrence state later becomes wet.
+    """
+    coarse_fine = coarse.repeat_interleave(encoding.factor, -2).repeat_interleave(
+        encoding.factor, -1
+    )
+    relative = fine / coarse_fine.clamp_min(float(encoding.intensity_floor))
+    raw = torch.log(relative.clamp_min(float(encoding.intensity_floor)))
+    ab = _blockify(area, encoding.factor)
+    wb = _blockify(wet.to(raw.dtype), encoding.factor)
+    rb = _blockify(raw, encoding.factor)
+    wet_area = (ab * wb).sum(dim=(-1, -2), keepdim=True)
+    centre = (ab * wb * rb).sum(dim=(-1, -2), keepdim=True) / wet_area.clamp_min(
+        float(encoding.denominator_floor)
+    )
+    centre_fine = _unblockify(
+        centre.expand(-1, -1, -1, -1, encoding.factor, encoding.factor)
+    )
+    return torch.where(wet, raw - centre_fine, torch.zeros_like(raw))
+
+
+def allocation_log_weight_target(
+    fine_mm: torch.Tensor,
+    valid: torch.Tensor,
+    area: torch.Tensor,
+    encoding: SubgridEncoding,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unstandardised centred log weights and their wet-cell mask."""
+    encoding.validate()
+    fine = _as_bchw(fine_mm, "fine_mm").float().clamp_min(0.0)
+    valid_b = _as_bchw(valid, "valid").to(device=fine.device, dtype=torch.bool)
+    area_b = _as_bchw(area, "area").to(device=fine.device, dtype=fine.dtype)
+    if valid_b.shape[0] == 1 and fine.shape[0] > 1:
+        valid_b = valid_b.expand(fine.shape[0], -1, -1, -1)
+    if area_b.shape[0] == 1 and fine.shape[0] > 1:
+        area_b = area_b.expand(fine.shape[0], -1, -1, -1)
+    valid_b = valid_b & torch.isfinite(fine)
+    fine = torch.where(valid_b, fine, torch.zeros_like(fine))
+    coarse, _, _ = area_weighted_block_mean(
+        fine, area_b, valid_b, encoding.factor, encoding.valid_area_threshold
+    )
+    wet = valid_b & (fine >= float(encoding.wet_threshold_mm))
+    return _centered_allocation_log_weights(
+        fine, coarse, wet, area_b, encoding
+    ), wet
 
 
 def encode_subgrid_targets(
@@ -277,6 +336,11 @@ def encode_subgrid_targets(
     amount = (torch.sqrt(coarse) - float(encoding.amount_sqrt_mean)) / float(
         encoding.amount_sqrt_std
     )
+    # Positive-amount statistics are fitted on wet blocks only.  The amount
+    # channel is inactive behind a hard-dry occurrence gate, so give dry
+    # blocks the neutral standardised wet mean instead of a large ignored
+    # negative spike at sqrt(0).
+    amount = torch.where(coarse_wet, amount, torch.zeros_like(amount))
 
     # One seed per time sample makes the target independent of preparation
     # chunking and worker count.
@@ -304,14 +368,16 @@ def encode_subgrid_targets(
     coarse_logits = torch.cat(coarse_logits_parts).to(fine.device)
     fine_logits = torch.cat(fine_logits_parts).to(fine.device)
 
-    coarse_fine = coarse.repeat_interleave(encoding.factor, -2).repeat_interleave(
-        encoding.factor, -1
+    centred_log_weight = _centered_allocation_log_weights(
+        fine, coarse, wet, area_b, encoding
     )
-    relative = torch.where(
-        wet & (coarse_fine > 0.0), fine / coarse_fine.clamp_min(encoding.intensity_floor),
-        torch.full_like(fine, encoding.intensity_floor),
+    intensity = (
+        centred_log_weight - float(encoding.intensity_log_mean)
+    ) / float(encoding.intensity_log_std)
+    neutral = -float(encoding.intensity_log_mean) / float(
+        encoding.intensity_log_std
     )
-    intensity = _inverse_softplus(relative.clamp_min(encoding.intensity_floor))
+    intensity = torch.where(wet, intensity, torch.full_like(intensity, neutral))
     intensity = torch.where(valid_b, intensity, torch.zeros_like(intensity))
     fine_logits = torch.where(valid_b, fine_logits, torch.zeros_like(fine_logits))
     amount = torch.where(coarse_valid, amount, torch.zeros_like(amount))
@@ -431,8 +497,14 @@ def reconstruct_from_amount(
         wet_st = (wet_hard - wet_soft).detach() + wet_soft
 
     occurrence = wet_st if hard else wet_soft
-    positive_weight = F.softplus(allocation_state[:, :1]).clamp_min(
-        float(encoding.intensity_floor)
+    log_weight = allocation_state[:, :1] * float(
+        encoding.intensity_log_std
+    ) + float(encoding.intensity_log_mean)
+    positive_weight = torch.exp(
+        log_weight.clamp(
+            min=-float(encoding.intensity_log_clip),
+            max=float(encoding.intensity_log_clip),
+        )
     )
     weights = occurrence * positive_weight
     weights = torch.where(valid_b, weights, torch.zeros_like(weights))
@@ -494,6 +566,7 @@ class SubgridDatasetConfig:
     factor: int = 10
     downsamplings: int = 3
     seed: int = 0
+    tile_domain: bool = False
 
 
 class SubgridDataset(Dataset):
@@ -507,6 +580,12 @@ class SubgridDataset(Dataset):
             store = zarr.open_group(str(Path(cfg.root)), mode="r")
         self.z = store
         attrs = getattr(store, "attrs", {})
+        schema = attrs.get("schema")
+        if schema != "cpc_v3_subgrid_v2":
+            raise ValueError(
+                f"target store schema must be cpc_v3_subgrid_v2, got {schema!r}; "
+                "rebuild the V3 target archive because the allocation target changed"
+            )
         self.encoding = SubgridEncoding.from_mapping(attrs.get("subgrid_encoding", {}))
         self.encoding.validate()
         if self.encoding.factor != cfg.factor:
@@ -530,9 +609,33 @@ class SubgridDataset(Dataset):
             validate_aligned_crop(
                 cfg.crop_origin, cfg.crop, cfg.factor, cfg.downsamplings
             )
+        if cfg.tile_domain and cfg.random_crop:
+            raise ValueError("tile_domain cannot be combined with random_crop")
+        if cfg.tile_domain and cfg.crop_origin is not None:
+            raise ValueError("tile_domain cannot be combined with crop_origin")
+        self.validation_origins: tuple[tuple[int, int], ...] = ()
+        if cfg.tile_domain:
+            def axis_origins(length: int) -> list[int]:
+                maximum = length - cfg.crop
+                values = list(range(0, maximum + 1, cfg.crop))
+                last = (maximum // cfg.factor) * cfg.factor
+                if last not in values:
+                    values.append(last)
+                return sorted(set(values))
+
+            self.validation_origins = tuple(
+                (row, column)
+                for row in axis_origins(self.height)
+                for column in axis_origins(self.width)
+            )
+            for origin in self.validation_origins:
+                validate_aligned_crop(
+                    origin, cfg.crop, cfg.factor, cfg.downsamplings
+                )
 
     def __len__(self):
-        return len(self.index)
+        multiplier = len(self.validation_origins) or 1
+        return len(self.index) * multiplier
 
     def _origin(self, i: int) -> tuple[int, int]:
         if not self.cfg.random_crop:
@@ -564,8 +667,13 @@ class SubgridDataset(Dataset):
         return int(generator.choice(rows)), int(generator.choice(columns))
 
     def __getitem__(self, i: int):
-        j = int(self.index[i])
-        row, column = self._origin(i)
+        if self.validation_origins:
+            count = len(self.validation_origins)
+            j = int(self.index[i // count])
+            row, column = self.validation_origins[i % count]
+        else:
+            j = int(self.index[i])
+            row, column = self._origin(i)
         size = self.cfg.crop
         fine_slice = (slice(row, row + size), slice(column, column + size))
         cr, cc = row // self.cfg.factor, column // self.cfg.factor

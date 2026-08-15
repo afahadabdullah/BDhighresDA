@@ -56,9 +56,10 @@ try:
     root = zarr.open_group(sys.argv[1], mode="r")
     valid = (
         root.attrs.get("complete", False)
-        and root.attrs.get("schema") == "cpc_v3_subgrid_v1"
+        and root.attrs.get("schema") == "cpc_v3_subgrid_v2"
         and root.attrs.get("source_start_date") == sys.argv[2]
         and root.attrs.get("source_end_date") == sys.argv[3]
+        and float(dict(root.attrs.get("subgrid_encoding", {})).get("intensity_log_std", 0.0)) > 0.0
         and root["fine_mm"].shape[-2:] == (240, 240)
         and root["coarse_mm"].shape[-2:] == (24, 24)
     )
@@ -137,11 +138,14 @@ import zarr
 
 root = zarr.open_group(sys.argv[1], mode="r")
 assert root.attrs.get("complete", False), "archive is not marked complete"
-assert root.attrs.get("schema") == "cpc_v3_subgrid_v1"
+assert root.attrs.get("schema") == "cpc_v3_subgrid_v2"
 assert root.attrs.get("source_start_date") == sys.argv[2]
 assert root.attrs.get("source_end_date") == sys.argv[3]
 encoding = dict(root.attrs["subgrid_encoding"])
 assert int(encoding["factor"]) == 10
+assert float(encoding["amount_sqrt_std"]) > 0.0
+assert float(encoding["intensity_log_std"]) > 0.0
+assert float(encoding["intensity_log_clip"]) > 0.0
 assert root["fine_mm"].shape[-2:] == (240, 240)
 assert root["coarse_mm"].shape[-2:] == (24, 24)
 print("Validated completed V3 archive:", sys.argv[1])

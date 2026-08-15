@@ -191,6 +191,14 @@ def main() -> None:
     samples = _open(args.sample_store)
     if not target.attrs.get("complete", False):
         raise ValueError("target store is not marked complete")
+    if target.attrs.get("schema") != "cpc_v3_subgrid_v2":
+        raise ValueError("target store must use the corrected cpc_v3_subgrid_v2 schema")
+    if not samples.attrs.get("complete", False):
+        raise ValueError("sample store is not marked complete")
+    if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v1":
+        raise ValueError("sample store was not produced by the audited V3 writer")
+    if samples.attrs.get("archive_uses_likelihood_hard_decoder") is not True:
+        raise ValueError("sample archive lacks a passing hard-decoder round-trip audit")
     methods = [value.strip() for value in args.methods.split(",") if value.strip()]
     if not methods:
         raise ValueError("--methods must name at least one sample array")

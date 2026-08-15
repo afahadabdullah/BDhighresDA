@@ -71,13 +71,13 @@ config_path, target_path, output_path = sys.argv[1:]
 cfg = yaml.safe_load(open(config_path))
 target = zarr.open_group(target_path, mode="r")
 assert target.attrs.get("complete", False), f"incomplete target archive: {target_path}"
-assert target.attrs.get("schema") == "cpc_v3_subgrid_v1"
+assert target.attrs.get("schema") == "cpc_v3_subgrid_v2"
 
 output = Path(output_path)
 last = output / "last.pt"
 if last.exists():
     checkpoint = torch.load(last, map_location="cpu")
-    assert checkpoint.get("schema") == "cpc_v3_subgrid_v1"
+    assert checkpoint.get("schema") == "cpc_v3_subgrid_v2"
     assert checkpoint.get("stage") == cfg["stage"]
     assert checkpoint.get("config") == cfg, (
         "refusing to resume because the resolved config differs from the checkpoint"

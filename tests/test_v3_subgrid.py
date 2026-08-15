@@ -11,13 +11,19 @@ from bdhires.da import (  # noqa: E402
     AreaWeightedBlockObsOperator,
     GuidanceConfig,
     HierarchicalObservations,
+    HierarchicalSamplerConfig,
     authority_decomposition,
     hierarchical_guidance_grad,
+    sample_hierarchical,
 )
 from bdhires.data import (  # noqa: E402
     SubgridEncoding,
+    SubgridDataset,
+    SubgridDatasetConfig,
     aligned_production_canvas,
+    allocation_log_weight_target,
     area_weighted_block_mean,
+    decode_and_reconstruct,
     encode_subgrid_targets,
     reconstruct_from_amount,
     validate_aligned_crop,
@@ -31,16 +37,24 @@ from bdhires.models import (  # noqa: E402
     HierarchicalRectifiedFlow,
     HierarchicalState,
 )
+from bdhires.models.hierarchical_subgrid import (  # noqa: E402
+    _hurdle_velocity_mse,
+    _occurrence_loss,
+    allocation_flow_matching_loss,
+)
+from bdhires.models.unet import UNet  # noqa: E402
+from bdhires.zarr_output import write_hierarchical_sample_zarr  # noqa: E402
 
 
 def _encoding(**kwargs):
-    return SubgridEncoding(
-        factor=10,
-        amount_sqrt_mean=0.0,
-        amount_sqrt_std=1.0,
-        dequant_noise=0.0,
-        **kwargs,
-    )
+    values = {
+        "factor": 10,
+        "amount_sqrt_mean": 0.0,
+        "amount_sqrt_std": 1.0,
+        "dequant_noise": 0.0,
+    }
+    values.update(kwargs)
+    return SubgridEncoding(**values)
 
 
 def test_v3_domains_close_on_cpc_edges_and_preserve_legacy_bd_crop():
@@ -136,6 +150,191 @@ def test_target_dequantisation_is_invariant_to_preparation_chunking():
     assert torch.equal(together.allocation_state, torch.cat(pieces))
 
 
+def test_allocation_target_is_centered_standardised_and_exactly_reconstructable():
+    encoding = _encoding(intensity_log_mean=0.4, intensity_log_std=1.7)
+    fine = torch.linspace(0.2, 8.0, 200).reshape(1, 1, 10, 20)
+    valid = torch.ones(10, 20, dtype=torch.bool)
+    area = torch.linspace(1.0, 1.2, 10)[:, None].expand(10, 20)
+    log_weight, wet = allocation_log_weight_target(fine, valid, area, encoding)
+    block_mean, _, _ = area_weighted_block_mean(
+        log_weight, area, wet, factor=10, valid_area_threshold=0.0
+    )
+    assert block_mean.abs().max() < 2.0e-6
+
+    targets = encode_subgrid_targets(fine, valid, area, encoding)
+    restored_log_weight = (
+        targets.allocation_state[:, :1] * encoding.intensity_log_std
+        + encoding.intensity_log_mean
+    )
+    assert torch.allclose(restored_log_weight, log_weight, atol=2.0e-6)
+    reconstructed = decode_and_reconstruct(
+        targets.coarse_state,
+        targets.allocation_state,
+        targets.coarse_valid,
+        targets.fine_valid,
+        area,
+        encoding,
+    )
+    assert torch.allclose(reconstructed, fine, atol=3.0e-5, rtol=3.0e-6)
+
+
+def test_dry_allocation_intensity_is_finite_neutral_not_inverse_softplus_tail():
+    encoding = _encoding(intensity_log_mean=0.6, intensity_log_std=1.5)
+    fine = torch.zeros(1, 1, 10, 10)
+    fine[..., 2, 3] = 2.0
+    fine[..., 5, 7] = 5.0
+    targets = encode_subgrid_targets(
+        fine, torch.ones(10, 10), torch.ones(10, 10), encoding
+    )
+    dry = fine < encoding.wet_threshold_mm
+    expected = -encoding.intensity_log_mean / encoding.intensity_log_std
+    assert torch.isfinite(targets.allocation_state).all()
+    assert torch.allclose(
+        targets.allocation_state[:, :1][dry],
+        torch.full_like(targets.allocation_state[:, :1][dry], expected),
+    )
+    assert targets.allocation_state[:, :1][dry].abs().max() < 1.0
+
+    dry_targets = encode_subgrid_targets(
+        torch.zeros(1, 1, 10, 10),
+        torch.ones(10, 10),
+        torch.ones(10, 10),
+        _encoding(amount_sqrt_mean=2.0, amount_sqrt_std=0.5),
+    )
+    assert torch.count_nonzero(dry_targets.coarse_state[:, :1]) == 0
+
+
+def test_occurrence_bce_is_minimised_at_the_finite_dequantised_target():
+    mask = torch.ones(1, 1, 1, 1, dtype=torch.bool)
+    target = torch.tensor([[[[0.0]], [[3.8918204]]]])
+    matched = target.clone()
+    saturated = target.clone()
+    saturated[:, 1] = 20.0
+    assert _occurrence_loss(matched, target, mask) < _occurrence_loss(
+        saturated, target, mask
+    )
+
+
+def test_hurdle_velocity_loss_ignores_decoder_inactive_positive_channel():
+    mask = torch.ones(1, 1, 1, 2, dtype=torch.bool)
+    clean = torch.tensor([[[[0.0, 0.0]], [[-4.0, 4.0]]]])
+    prediction = torch.zeros_like(clean)
+    baseline = torch.zeros_like(clean)
+    changed = baseline.clone()
+    changed[:, 0, 0, 0] = 1000.0  # dry: physically inactive
+    assert torch.equal(
+        _hurdle_velocity_mse(prediction, baseline, clean, mask),
+        _hurdle_velocity_mse(prediction, changed, clean, mask),
+    )
+    changed[:, 0, 0, 1] = 2.0  # wet: must be learned
+    assert _hurdle_velocity_mse(prediction, changed, clean, mask) > 0.0
+
+
+class _CaptureAllocation(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.level = None
+        self.context = None
+
+    def forward(self, state, time, fine_cond, context, level):
+        self.level = level.detach().clone()
+        self.context = context.detach().clone()
+        return torch.zeros_like(state)
+
+
+class _FixedFlow:
+    def sample_t(self, batch, device):
+        return torch.full((batch,), 0.25, device=device)
+
+    def interpolate(self, target, time):
+        zeros = torch.zeros_like(target)
+        return zeros, zeros, zeros
+
+    def x1_hat(self, state, time, velocity):
+        return velocity
+
+
+def test_phase2_coarse_corruption_matches_joint_one_minus_t(monkeypatch):
+    model = _CaptureAllocation()
+    monkeypatch.setattr(torch, "randn_like", lambda value: torch.zeros_like(value))
+    allocation_flow_matching_loss(
+        model,
+        torch.zeros(2, 2, 10, 10),
+        None,
+        torch.ones(2, 2, 1, 1),
+        torch.ones(2, 1, 10, 10, dtype=torch.bool),
+        flow=_FixedFlow(),
+        max_coarse_noise=1.0,
+        clean_probability=0.0,
+    )
+    assert torch.allclose(model.level, torch.full((2,), 0.75))
+    assert torch.allclose(model.context, torch.full((2, 2, 1, 1), 0.25))
+
+
+def test_allocation_coarse_context_has_exact_block_boundaries():
+    model = AllocationFlow(
+        0, image_size=40, base_channels=8, channel_mult=(1, 2),
+        num_res_blocks=1, attn_resolutions=(20,), num_heads=1,
+    )
+
+    class CaptureNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.condition = None
+
+        def forward(self, state, time, condition):
+            self.condition = condition.detach().clone()
+            return torch.zeros_like(state)
+
+    capture = CaptureNet()
+    model.net = capture
+    coarse = torch.arange(32, dtype=torch.float32).reshape(1, 2, 4, 4)
+    model(torch.zeros(1, 2, 40, 40), torch.tensor([0.5]), None, coarse, 0.5)
+    expected = coarse.repeat_interleave(10, -2).repeat_interleave(10, -1)
+    assert torch.equal(capture.condition[:, :2], expected)
+
+
+class _MemoryStore(dict):
+    def __init__(self, *args, attrs, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attrs = attrs
+
+
+def test_validation_dataset_tiles_the_complete_240_canvas():
+    store = _MemoryStore(
+        {
+            "time": np.asarray(
+                ["2020-01-01", "2020-01-02"], dtype="datetime64[ns]"
+            ).astype(np.int64),
+            "fine_valid": np.ones((240, 240), bool),
+            "cell_area": np.ones((240, 240), np.float32),
+            "coarse_valid": np.ones((24, 24), bool),
+        },
+        attrs={
+            "schema": "cpc_v3_subgrid_v2",
+            "subgrid_encoding": {"factor": 10},
+        },
+    )
+    dataset = SubgridDataset(
+        SubgridDatasetConfig(
+            root="unused", crop=120, random_crop=False, tile_domain=True
+        ),
+        store=store,
+    )
+    assert dataset.validation_origins == ((0, 0), (0, 120), (120, 0), (120, 120))
+    assert len(dataset) == 8
+
+
+def test_unet_rejects_raw_odd_cpc_core_with_actionable_error():
+    model = UNet(
+        in_channels=2, cond_channels=0, out_channels=2, image_size=14,
+        base_channels=8, channel_mult=(1, 2, 3), num_res_blocks=1,
+        num_heads=1,
+    )
+    with pytest.raises(ValueError, match="aligned production canvas"):
+        model(torch.zeros(1, 2, 14, 13), torch.tensor([0.5]))
+
+
 def test_branch_transfer_has_identical_initial_velocities():
     torch.manual_seed(9)
     coarse = CoarseHurdleFlow(
@@ -197,6 +396,40 @@ def test_point_likelihood_gradient_reaches_both_coarse_and_allocation_states():
     assert torch.isfinite(gradient.allocation).all()
 
 
+def test_sampler_evaluates_terminal_hard_observation_departures():
+    coarse = CoarseHurdleFlow(
+        0, image_size=1, base_channels=8, channel_mult=(1,),
+        num_res_blocks=1, num_heads=1,
+    )
+    allocation = AllocationFlow(
+        0, image_size=10, base_channels=8, channel_mult=(1,),
+        num_res_blocks=1, attn_resolutions=(), num_heads=1,
+    )
+    model = CoupledSubgridFlow(coarse, allocation)
+    sample = sample_hierarchical(
+        model,
+        None,
+        None,
+        (2, 2, 1, 1),
+        (2, 2, 10, 10),
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10),
+        _encoding(),
+        observations=HierarchicalObservations(
+            _Point(),
+            torch.zeros(2, 1, 1),
+            torch.ones(1),
+            GuidanceConfig(clip_norm=None),
+        ),
+        config=HierarchicalSamplerConfig(n_steps=1, heun=False, seed=12),
+    )
+    assert sample.diagnostics["terminal_decoder_consistent"] is True
+    assert sample.diagnostics["terminal_hard_decode_max_abs_mm_day"] == 0.0
+    assert sample.diagnostics["terminal_valid_observation_count"] == 2
+    assert np.isfinite(sample.diagnostics["terminal_log_likelihood_mean"])
+
+
 def test_area_weighted_04_and_aligned_05_operators_preserve_uniform_fields():
     field = torch.full((2, 1, 40, 40), 7.25)
     area = np.linspace(1.0, 1.3, 40)[:, None] * np.ones((1, 40))
@@ -226,3 +459,81 @@ def test_physical_authority_decomposition_closes_exactly():
     )
     assert amount.shape == allocation.shape == residual.shape
     assert residual.abs().max() < 1.0e-5
+
+
+def test_authority_decomposition_assigns_pure_amount_and_allocation_changes():
+    encoding = _encoding()
+    coarse = torch.tensor([[[[2.0]], [[4.0]]]])
+    allocation_state = torch.cat(
+        [torch.zeros(1, 1, 10, 10), torch.full((1, 1, 10, 10), 4.0)], 1
+    )
+    background = HierarchicalState(coarse, allocation_state)
+    masks = (
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10),
+    )
+
+    amount_analysis = HierarchicalState(
+        coarse + torch.tensor([[[[0.5]], [[0.0]]]]), allocation_state
+    )
+    amount, allocation, residual = authority_decomposition(
+        background, amount_analysis, *masks, encoding
+    )
+    assert amount.abs().sum() > 0.0
+    assert allocation.abs().max() < 1.0e-7
+    assert residual.abs().max() < 1.0e-6
+
+    changed_allocation = allocation_state.clone()
+    changed_allocation[:, 0, :5] = 1.0
+    allocation_analysis = HierarchicalState(coarse, changed_allocation)
+    amount, allocation, residual = authority_decomposition(
+        background, allocation_analysis, *masks, encoding
+    )
+    assert amount.abs().max() < 1.0e-7
+    assert allocation.abs().sum() > 0.0
+    assert residual.abs().max() < 1.0e-6
+
+
+def test_hierarchical_archive_requires_and_roundtrips_terminal_hard_field(tmp_path):
+    fields = {"background": np.ones((2, 2, 10, 10), np.float32)}
+    coarse_states = {"background": np.ones((2, 2, 2, 1, 1), np.float32)}
+    allocation_states = {"background": np.ones((2, 2, 2, 10, 10), np.float32)}
+    diagnostics = {
+        "background": {
+            "terminal_decoder_consistent": True,
+            "terminal_hard_decode_max_abs_mm_day": 0.0,
+        }
+    }
+    with pytest.raises(ValueError, match="terminal hard-decoder diagnostic"):
+        write_hierarchical_sample_zarr(
+            tmp_path / "rejected.zarr",
+            fields=fields,
+            coarse_states=coarse_states,
+            allocation_states=allocation_states,
+            selected_times=np.asarray(["2021-05-01", "2021-05-02"]),
+            lat=np.arange(10, dtype=np.float32),
+            lon=np.arange(10, dtype=np.float32),
+            valid=np.ones((10, 10), bool),
+            diagnostics={"background": {"terminal_decoder_consistent": False}},
+        )
+    output = tmp_path / "samples.zarr"
+    write_hierarchical_sample_zarr(
+        output,
+        fields=fields,
+        coarse_states=coarse_states,
+        allocation_states=allocation_states,
+        selected_times=np.asarray(["2021-05-01", "2021-05-02"], dtype="datetime64[D]"),
+        lat=np.arange(10, dtype=np.float32),
+        lon=np.arange(10, dtype=np.float32),
+        valid=np.ones((10, 10), bool),
+        diagnostics=diagnostics,
+        coarse_mm={"background": np.ones((2, 2, 1, 1), np.float32)},
+    )
+    import zarr
+
+    archive = zarr.open_group(str(output), mode="r")
+    assert archive.attrs["complete"] is True
+    assert archive.attrs["archive_uses_likelihood_hard_decoder"] is True
+    assert archive.attrs["serialization_max_abs_mm_day"] == 0.0
+    assert np.array_equal(archive["background"][:], fields["background"])
