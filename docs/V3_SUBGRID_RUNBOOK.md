@@ -5,55 +5,44 @@ V3-SG uses a new CPC-edge-aligned archive. Do not point it at
 legacy 0.05-degree grid and is intentionally rejected by the V3 preparation
 path.
 
-## 1. Prepare aligned raw inputs
+## 1. Reuse the existing raw inputs
 
-Use separate output directories so the 260-by-260 files cannot be confused
-with the legacy 256-by-256 files.
+No CHIRPS or DEM download is required. The V3 `wide_cpc` domain is the
+240-by-240 inward CPC-aligned subset of the existing 256-by-256 `wide` domain.
+Script 56 selects those CHIRPS cells exactly; it does not interpolate them.
+The inward subset retains the complete frozen 160-by-160 Bangladesh production
+canvas.
 
 ```bash
-python scripts/01_download_chirps.py \
-  --start 1981 --end 2024 --grid wide_cpc \
-  --out data/raw/chirps_v3sg
+# These existing inputs are used directly:
+ls data/raw/chirps/chirps_wide_*.nc
+ls data/raw/cpc/precip.*.nc
+ls data/raw/era5/era5_daily_*.nc
+ls data/raw/dem/copernicus_glo90_wide.nc
 
-# Existing data/raw/era5/era5_daily_*.nc files may be reused because their
-# one-degree preparation halo covers wide_cpc. Script 56 validates coverage.
-# For a fully separate copy instead, run:
-python scripts/00_download_era5.py \
-  --start 1981 --end 2024 --grid wide_cpc --out data/raw/era5_v3sg
-
-python scripts/02b_download_cpc.py \
-  --start 1981 --end 2024 --out data/raw/cpc --require-complete
-
-python scripts/03_download_dem.py \
-  --grid wide_cpc \
-  --out data/raw/dem/copernicus_glo90_wide_cpc.nc
-
+# The pipeline creates this file automatically if it is absent. This manual
+# command is only useful when static fields should be built separately.
 python scripts/03_build_static.py \
   --grid wide_cpc \
-  --dem data/raw/dem/copernicus_glo90_wide_cpc.nc \
-  --chirps data/raw/chirps_v3sg/chirps_wide_cpc_2010.nc \
+  --dem data/raw/dem/copernicus_glo90_wide.nc \
+  --chirps data/raw/chirps/chirps_wide_2010.nc \
   --out data/static/static_wide_cpc.nc
 ```
 
 ## 2. Build the paired target archive
 
-If the aligned CHIRPS and DEM/static inputs are absent on Prism, first submit
-the resumable CHIRPS year array and its dependent DEM/static job:
-
-```bash
-bash slurm/submit_v3_subgrid_inputs.sh
-```
-
-After both jobs finish successfully, submit the main pipeline in Section 3.
-
 ```bash
 python scripts/56_build_chirps_subgrid_targets.py \
-  --chirps-glob 'data/raw/chirps_v3sg/chirps_wide_cpc_*.nc' \
+  --chirps-glob 'data/raw/chirps/chirps_wide_*.nc' \
   --cpc-glob 'data/raw/cpc/precip.*.nc' \
   --era5-glob 'data/raw/era5/era5_daily_*.nc' \
   --static data/static/static_wide_cpc.nc \
+  --start 1981-01-01 --end 2024-12-31 \
   --out data/processed/cpc_v3_subgrid/wide_cpc.zarr
 ```
+
+The end date deliberately excludes the existing 2025 CHIRPS file so the
+archive remains matched to the originally frozen 1981--2024 CPC/ERA5 period.
 
 This is a two-pass, chunked writer. The first pass freezes training-period
 amount and conditioning statistics; the second writes raw rainfall, paired
@@ -73,9 +62,8 @@ GH200 jobs in parallel after preparation succeeds, and starts joint training
 only after both branches succeed. A completed target archive is reused.
 Interrupted training resumes from `last.pt` only when the saved and requested
 configs match exactly. If `data/static/static_wide_cpc.nc` is absent, the
-preparation job builds it from the first aligned CHIRPS file and
-`data/raw/dem/copernicus_glo90_wide_cpc.nc`; it still requires those aligned
-raw inputs to exist.
+preparation job builds it from an existing yearly CHIRPS file and
+`data/raw/dem/copernicus_glo90_wide.nc`.
 
 Monitor it with:
 
@@ -104,7 +92,15 @@ checkpoint where that probability is zero.
 
 ## 4. Preflight the scientific invariants
 
-Run this before an expensive training or DA submission:
+Run this before an expensive training or DA submission. On the Prism login
+node, submit the ARM test wrapper rather than trying to execute the ARM Python
+binary directly:
+
+```bash
+sbatch slurm/v3_subgrid_tests.sbatch
+```
+
+The equivalent command inside a compatible ARM environment is:
 
 ```bash
 PYTHONPATH=src pytest -q tests/test_v3_subgrid.py

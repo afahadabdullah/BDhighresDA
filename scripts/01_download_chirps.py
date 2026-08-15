@@ -92,7 +92,7 @@ def main():
         "--grid",
         default="wide",
         choices=("wide", "wide_cpc"),
-        help="wide_cpc is the CPC-edge-aligned 260x260 V3-SG domain",
+        help="wide_cpc is the CPC-edge-aligned 240x240 V3-SG domain",
     )
     ap.add_argument("--keep-global", action="store_true")
     ap.add_argument(

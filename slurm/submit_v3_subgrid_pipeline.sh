@@ -19,15 +19,17 @@ for required in \
     [[ -f "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
 
-export V3_CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps_v3sg/chirps_wide_cpc_*.nc}"
+export V3_CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps/chirps_wide_*.nc}"
 export V3_CPC_GLOB="${V3_CPC_GLOB:-data/raw/cpc/precip.*.nc}"
 export V3_ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5/era5_daily_*.nc}"
 export V3_STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
-export V3_DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide_cpc.nc}"
+export V3_DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide.nc}"
 export V3_STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
 export V3_PREP_OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc.zarr}"
 export V3_PREP_CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 export V3_PREP_OVERWRITE="${V3_PREP_OVERWRITE:-0}"
+export V3_START="${V3_START:-1981-01-01}"
+export V3_END="${V3_END:-2024-12-31}"
 
 # The three frozen configs all point here. An output override without matching
 # config overrides would prepare one archive and train against another.
@@ -55,7 +57,7 @@ if [[ ! -e "$V3_PREP_OUT" || "$V3_PREP_OVERWRITE" == "1" ]]; then
     done
     if [[ ! -f "$V3_STATIC" ]]; then
         [[ -f "$V3_DEM" ]] || {
-            echo "ERROR: missing aligned DEM needed to build static fields: $V3_DEM" >&2
+            echo "ERROR: missing source DEM needed to build static fields: $V3_DEM" >&2
             echo "No Slurm jobs were submitted." >&2
             exit 1
         }
@@ -68,8 +70,8 @@ if [[ ! -e "$V3_PREP_OUT" || "$V3_PREP_OVERWRITE" == "1" ]]; then
 fi
 
 echo "Submitting V3-SG training pipeline"
-echo "  prepare:    CHIRPS/CPC/ERA5 -> $V3_PREP_OUT"
-echo "  static:     reuse $V3_STATIC, or build it from aligned CHIRPS + $V3_DEM"
+echo "  prepare:    CHIRPS/CPC/ERA5 ($V3_START through $V3_END) -> $V3_PREP_OUT"
+echo "  static:     reuse $V3_STATIC, or build it from existing CHIRPS + $V3_DEM"
 echo "  branches:   coarse and allocation run in parallel"
 echo "  joint:      starts only after both branch jobs succeed"
 echo "  checkpoint: interrupted stages resume only with an identical config"

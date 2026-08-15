@@ -106,16 +106,21 @@ The current packed `cpc_precip` field was bilinearly interpolated onto the
 this experiment. V3-SG preparation must retain native CPC cell centres and
 edges and conservatively aggregate CHIRPS onto those exact footprints.
 
-The present domains are not suitable merely by trimming them. The `bd` lower
-edges (87.6 E, 20.3 N) are out of phase with the CPC grid, while the `wide`
-upper edges do not close on complete CPC cells. Subject to validation against
-the coordinates in the downloaded CPC files, define V3-specific physical
-domains on enclosing CPC edges:
+The `bd` lower edges (87.6 E, 20.3 N) are out of phase with the CPC grid, while
+the `wide` upper edges do not close on complete CPC cells. Define a
+V3-specific production domain on enclosing CPC edges and an inward-aligned
+training domain that is an exact subset of the existing `wide` files:
 
 ```text
 bd_cpc:    87.5--94.0 E, 20.0--27.0 N = (nlat, nlon) = (140, 130)
-wide_cpc:  84.0--97.0 E, 16.0--29.0 N = (nlat, nlon) = (260, 260)
+wide_cpc:  84.0--96.0 E, 16.0--28.0 N = (nlat, nlon) = (240, 240)
 ```
+
+The inward choice discards only the northernmost and easternmost 0.8 degrees
+of the legacy training halo. It retains the whole `bd_cpc` domain and the same
+frozen 160-by-160 production canvas, closes exactly on 0.5-degree cells, and
+reuses the existing 256-by-256 CHIRPS and DEM archives without resampling or
+duplicating 44 years of input data.
 
 All array shapes in this document use `(nlat, nlon)` order. Coordinate metadata
 and dimension-name assertions remain mandatory at every file boundary.
@@ -236,7 +241,7 @@ Its target is `m_truth = B10_cpc(CHIRPS)`. It is responsible for:
 - calibrated coarse uncertainty.
 
 Do not reuse the current 128-by-128 ADM-style U-Net unchanged. The native
-`bd_cpc` field is only 14 by 13 coarse cells and `wide_cpc` is 26 by 26, so the
+`bd_cpc` field is only 14 by 13 coarse cells and `wide_cpc` is 24 by 24, so the
 existing three-downsampling attention architecture is inappropriate. Begin
 with a shallow two-level **coarse rectified flow over hurdle latents**: a
 dequantised wetness logit and a transformed positive-amount latent. Both are

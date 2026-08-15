@@ -23,7 +23,7 @@ from bdhires.data import (  # noqa: E402
     validate_aligned_crop,
     validate_cpc_alignment,
 )
-from bdhires.grids import BD, BD_CPC, WIDE_CPC, crop_offsets  # noqa: E402
+from bdhires.grids import BD, BD_CPC, WIDE, WIDE_CPC, crop_offsets  # noqa: E402
 from bdhires.models import (  # noqa: E402
     AllocationFlow,
     CoarseHurdleFlow,
@@ -46,6 +46,9 @@ def _encoding(**kwargs):
 def test_v3_domains_close_on_cpc_edges_and_preserve_legacy_bd_crop():
     validate_cpc_alignment(BD_CPC)
     validate_cpc_alignment(WIDE_CPC)
+    assert WIDE_CPC.shape == (240, 240)
+    assert np.array_equal(WIDE_CPC.lat, WIDE.lat[:240])
+    assert np.array_equal(WIDE_CPC.lon, WIDE.lon[:240])
     assert crop_offsets(BD_CPC, BD) == (6, 2)
 
 

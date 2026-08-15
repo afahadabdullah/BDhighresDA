@@ -84,7 +84,11 @@ BD_CPC = Grid(
 )
 WIDE_CPC = Grid(
     name="wide_cpc", lon_min=84.0, lat_min=16.0,
-    nlon=260, nlat=260, res=0.05,
+    # Use the largest inward CPC-aligned square that is an exact subset of
+    # the legacy 256 x 256 WIDE grid.  This preserves the complete 160-cell
+    # production canvas while allowing the existing CHIRPS and DEM files to
+    # be reused without interpolation or another download.
+    nlon=240, nlat=240, res=0.05,
 )
 
 GRIDS = {g.name: g for g in (BD, WIDE, BD_CPC, WIDE_CPC)}

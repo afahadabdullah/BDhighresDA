@@ -8,7 +8,7 @@ channel as a 0.5-degree field.
 Example
 -------
 python scripts/56_build_chirps_subgrid_targets.py \
-  --chirps-glob 'data/raw/chirps_v3/chirps_*.nc' \
+  --chirps-glob 'data/raw/chirps/chirps_wide_*.nc' \
   --cpc-glob 'data/raw/cpc/precip.*.nc' \
   --era5-glob 'data/raw/era5/era5_daily_*.nc' \
   --static data/processed/static_wide_cpc.nc \
@@ -256,6 +256,8 @@ def main() -> None:
     parser.add_argument("--era5-vars", default=",".join(ERA5_DEFAULT))
     parser.add_argument("--static")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--start", default="1981-01-01")
+    parser.add_argument("--end", default="2024-12-31")
     parser.add_argument("--chunk-days", type=int, default=32)
     parser.add_argument("--train-end", default="2018-12-31")
     parser.add_argument("--wet-threshold", type=float, default=0.1)
@@ -287,7 +289,9 @@ def main() -> None:
         _variable(chirps_ds, ("precip", "precipitation", "chirps"), "CHIRPS"),
         fine_grid,
         "CHIRPS",
-    ).transpose("time", "lat", "lon")
+    ).sel(time=slice(args.start, args.end)).transpose("time", "lat", "lon")
+    if chirps.sizes.get("time", 0) == 0:
+        raise ValueError(f"CHIRPS has no dates in {args.start}..{args.end}")
     cpc = _exact_grid(
         _variable(cpc_ds, ("precip", "precipitation"), "CPC"),
         coarse_grid,
@@ -296,6 +300,16 @@ def main() -> None:
     times = np.asarray(chirps.time.values, dtype="datetime64[ns]")
     if len(np.unique(times)) != len(times) or np.any(np.diff(times) <= np.timedelta64(0, "D")):
         raise ValueError("CHIRPS time axis must be unique and increasing")
+    expected_start = np.datetime64(args.start, "D")
+    expected_end = np.datetime64(args.end, "D")
+    days = times.astype("datetime64[D]")
+    if days[0] != expected_start or days[-1] != expected_end:
+        raise ValueError(
+            f"CHIRPS period is {days[0]}..{days[-1]}, expected "
+            f"{expected_start}..{expected_end}"
+        )
+    if np.any(np.diff(days) != np.timedelta64(1, "D")):
+        raise ValueError("CHIRPS must contain every calendar day in the requested period")
     static, static_names = _load_static(args.static, fine_grid)
     area = cell_area_weights(fine_grid.lat, fine_grid.lon)
     # A pixel belongs to the physical target support only if every archived
@@ -386,6 +400,8 @@ def main() -> None:
         fine_cond_mean=fine_mean.tolist(),
         fine_cond_std=fine_std.tolist(),
         native_cpc=True,
+        source_start_date=str(times[0].astype("datetime64[D]")),
+        source_end_date=str(times[-1].astype("datetime64[D]")),
         target="CHIRPS 0.05 degree and its exact area-weighted CPC-block mean",
     )
     nt = len(times)

@@ -35,18 +35,20 @@ mkdir -p logs
     exit 1
 }
 
-CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps_v3sg/chirps_wide_cpc_*.nc}"
+CHIRPS_GLOB="${V3_CHIRPS_GLOB:-data/raw/chirps/chirps_wide_*.nc}"
 CPC_GLOB="${V3_CPC_GLOB:-data/raw/cpc/precip.*.nc}"
 ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5/era5_daily_*.nc}"
 STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
-DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide_cpc.nc}"
+DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide.nc}"
 STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
 OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc.zarr}"
 CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 OVERWRITE="${V3_PREP_OVERWRITE:-0}"
+START="${V3_START:-1981-01-01}"
+END="${V3_END:-2024-12-31}"
 
 if [[ -e "$OUT" ]]; then
-    COMPLETE="$($PYTHON_BIN - "$OUT" <<'PY'
+    COMPLETE="$($PYTHON_BIN - "$OUT" "$START" "$END" <<'PY'
 import sys
 import zarr
 
@@ -55,8 +57,10 @@ try:
     valid = (
         root.attrs.get("complete", False)
         and root.attrs.get("schema") == "cpc_v3_subgrid_v1"
-        and root["fine_mm"].shape[-2:] == (260, 260)
-        and root["coarse_mm"].shape[-2:] == (26, 26)
+        and root.attrs.get("source_start_date") == sys.argv[2]
+        and root.attrs.get("source_end_date") == sys.argv[3]
+        and root["fine_mm"].shape[-2:] == (240, 240)
+        and root["coarse_mm"].shape[-2:] == (24, 24)
     )
     print("1" if valid else "0")
 except Exception:
@@ -79,7 +83,7 @@ if [[ ! -f "$STATIC" ]]; then
         mapfile -t CHIRPS_CANDIDATES < <(compgen -G "$CHIRPS_GLOB" | sort || true)
         if (( ${#CHIRPS_CANDIDATES[@]} == 0 )); then
             echo "ERROR: cannot build $STATIC because $CHIRPS_GLOB matched no files" >&2
-            echo "Prepare the aligned wide_cpc CHIRPS inputs, then rerun the pipeline." >&2
+            echo "Expected the existing yearly CHIRPS files under data/raw/chirps." >&2
             exit 1
         fi
         STATIC_CHIRPS="${CHIRPS_CANDIDATES[0]}"
@@ -89,8 +93,8 @@ if [[ ! -f "$STATIC" ]]; then
         exit 1
     }
     [[ -f "$DEM" ]] || {
-        echo "ERROR: aligned DEM is missing: $DEM" >&2
-        echo "Create it with the V3-SG --grid wide_cpc DEM command in the runbook." >&2
+        echo "ERROR: source DEM is missing: $DEM" >&2
+        echo "The existing legacy wide-domain DEM is sufficient for V3-SG." >&2
         exit 1
     }
     echo "Building missing V3 static predictors"
@@ -110,6 +114,8 @@ ARGS=(
     --static "$STATIC"
     --out "$OUT"
     --chunk-days "$CHUNK_DAYS"
+    --start "$START"
+    --end "$END"
 )
 if [[ "$OVERWRITE" == "1" ]]; then
     ARGS+=(--overwrite)
@@ -121,20 +127,23 @@ echo "  CPC:    $CPC_GLOB"
 echo "  ERA5:   $ERA5_GLOB"
 echo "  static: $STATIC"
 echo "  output: $OUT"
+echo "  period: $START through $END"
 
 "$PYTHON_BIN" -u scripts/56_build_chirps_subgrid_targets.py "${ARGS[@]}"
 
-"$PYTHON_BIN" - "$OUT" <<'PY'
+"$PYTHON_BIN" - "$OUT" "$START" "$END" <<'PY'
 import sys
 import zarr
 
 root = zarr.open_group(sys.argv[1], mode="r")
 assert root.attrs.get("complete", False), "archive is not marked complete"
 assert root.attrs.get("schema") == "cpc_v3_subgrid_v1"
+assert root.attrs.get("source_start_date") == sys.argv[2]
+assert root.attrs.get("source_end_date") == sys.argv[3]
 encoding = dict(root.attrs["subgrid_encoding"])
 assert int(encoding["factor"]) == 10
-assert root["fine_mm"].shape[-2:] == (260, 260)
-assert root["coarse_mm"].shape[-2:] == (26, 26)
+assert root["fine_mm"].shape[-2:] == (240, 240)
+assert root["coarse_mm"].shape[-2:] == (24, 24)
 print("Validated completed V3 archive:", sys.argv[1])
 print("Days:", root["time"].shape[0])
 PY
