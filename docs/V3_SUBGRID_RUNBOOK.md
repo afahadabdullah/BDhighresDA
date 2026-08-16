@@ -114,6 +114,23 @@ Validation selects checkpoints over four deterministic 120-by-120 tiles that
 cover the complete 240-by-240 domain and over every validation batch. It no
 longer selects on one central crop or the first 32 batches.
 
+### Diagnostic use of the superseded pre-v4 checkpoint
+
+If the earlier `runs/prior_h100_cpc_v3_subgrid/joint/best.pt` completed, it can
+be inspected without mixing it into the corrected experiment:
+
+```bash
+bash slurm/submit_v3_subgrid_legacy_diagnostic.sh
+```
+
+This samples May 1--5, 2022 on the aligned 160-cell Bangladesh canvas using
+matched initial noise for an unguided background and a preliminary gauges-only
+analysis. It saves ordinary rainfall maps, below-0.5-degree anomaly maps, the
+physical ensembles and latent states, and separate assimilated/withheld gauge
+scores under `data/processed/v3_legacy_diagnostic/may2022_5day`. The archive is
+marked `legacy_pre_v4` and cannot be consumed by the corrected v4 evaluator.
+The physical-space gauge settings are diagnostic, not selected V3 DA settings.
+
 ## 4. Preflight the scientific invariants
 
 Run this before an expensive training or DA submission. On the Prism login
