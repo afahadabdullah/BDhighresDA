@@ -8,7 +8,7 @@ correct posterior nudge.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import torch
 
@@ -396,35 +396,20 @@ def sample_hierarchical(
                 oracle_coarse_truth, oracle_noise,
             )
 
-    physical = decode_and_reconstruct(
+    physical, reconstruction = decode_and_reconstruct(
         state.coarse, state.allocation, coarse_valid, fine_valid, area, encoding,
         temperature=cfg.occurrence_temperature, hard=True,
+        return_diagnostics=True,
     )
     soft = decode_and_reconstruct(
         state.coarse, state.allocation, coarse_valid, fine_valid, area, encoding,
         temperature=cfg.occurrence_temperature, hard=False,
     )
-    # Re-evaluate the exact hard terminal state used by the likelihood.  This
-    # catches any future divergence between the field returned to an archive
-    # writer and the decoder/operator path used during DA.
-    terminal_likelihood_field = decode_and_reconstruct(
-        state.coarse, state.allocation, coarse_valid, fine_valid, area, encoding,
-        temperature=cfg.occurrence_temperature, hard=True,
-    )
-    terminal_decoder_error = float(
-        (physical - terminal_likelihood_field).abs().max().detach().cpu()
-    )
-    if terminal_decoder_error > 1.0e-6:
-        raise RuntimeError(
-            "terminal hard-decoder mismatch between returned and likelihood fields: "
-            f"{terminal_decoder_error:.3g} mm/day"
-        )
     diagnostics = {
         "n_steps": cfg.n_steps,
         "heun": cfg.heun,
         "oracle_clean_context": oracle_coarse_truth is not None,
-        "terminal_hard_decode_max_abs_mm_day": terminal_decoder_error,
-        "terminal_decoder_consistent": True,
+        **{f"reconstruction_{key}": value for key, value in asdict(reconstruction).items()},
     }
     if last_likelihood_field is not None:
         diagnostics["last_guidance_to_final_field_max_abs_mm"] = float(
@@ -432,7 +417,10 @@ def sample_hierarchical(
         )
     if observations is not None:
         values = _expand_observations(observations, batch)
-        hard_hx = observations.operator(terminal_likelihood_field)
+        # This is the actual terminal hard field returned by the sampler.  The
+        # archive writer independently re-decodes the serialized latent state;
+        # comparing a decoder with itself here would not audit anything.
+        hard_hx = observations.operator(physical)
         soft_hx = observations.operator(soft)
         sigma = torch.sqrt(observations.variance.to(hard_hx).clamp_min(1.0e-12))
         terminal_time = torch.ones(batch, device=hard_hx.device, dtype=hard_hx.dtype)
@@ -446,7 +434,7 @@ def sample_hierarchical(
             & torch.isfinite(sigma)
         )
         terminal_residual = torch.where(
-            valid, (hard_hx - values) / sigma, torch.zeros_like(hard_hx)
+            valid, (values - hard_hx) / sigma, torch.zeros_like(hard_hx)
         )
         residual_values = terminal_residual[valid]
         diagnostics["terminal_log_likelihood_mean"] = float(

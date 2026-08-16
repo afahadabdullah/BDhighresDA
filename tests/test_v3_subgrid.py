@@ -178,6 +178,50 @@ def test_allocation_target_is_centered_standardised_and_exactly_reconstructable(
     assert torch.allclose(reconstructed, fine, atol=3.0e-5, rtol=3.0e-6)
 
 
+def test_hard_threshold_oracle_exposes_drizzle_representation_error():
+    encoding = _encoding(wet_threshold_mm=0.1)
+    fine = torch.zeros(1, 1, 10, 10)
+    fine[..., 2, 3] = 0.05
+    fine[..., 5, 7] = 1.0
+    valid = torch.ones(10, 10, dtype=torch.bool)
+    area = torch.ones(10, 10)
+    targets = encode_subgrid_targets(fine, valid, area, encoding)
+    decoded = decode_and_reconstruct(
+        targets.coarse_state,
+        targets.allocation_state,
+        targets.coarse_valid,
+        targets.fine_valid,
+        area,
+        encoding,
+    )
+    assert decoded[..., 2, 3].item() == 0.0
+    assert not torch.allclose(decoded, fine)
+    decoded_coarse, _, _ = area_weighted_block_mean(
+        decoded, area, valid, factor=10, valid_area_threshold=0.0
+    )
+    assert torch.allclose(decoded_coarse, targets.coarse_mm, atol=1.0e-6)
+
+
+def test_standardised_intensity_guard_cannot_overflow_exponential_decoder():
+    encoding = _encoding(intensity_log_std=1000.0, intensity_z_clip=6.0)
+    coarse = torch.tensor([[[[1.0]], [[4.0]]]])
+    allocation = torch.empty(1, 2, 10, 10)
+    allocation[:, 0] = torch.linspace(-100.0, 100.0, 100).reshape(10, 10)
+    allocation[:, 1] = 4.0
+    field, diagnostics = decode_and_reconstruct(
+        coarse,
+        allocation,
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10),
+        encoding,
+        return_diagnostics=True,
+    )
+    assert torch.isfinite(field).all()
+    assert torch.allclose(field.mean(), torch.tensor(1.0), atol=1.0e-6)
+    assert 0.0 < diagnostics.maximum_cell_mass_fraction <= 1.0
+
+
 def test_dry_allocation_intensity_is_finite_neutral_not_inverse_softplus_tail():
     encoding = _encoding(intensity_log_mean=0.6, intensity_log_std=1.5)
     fine = torch.zeros(1, 1, 10, 10)
@@ -215,19 +259,20 @@ def test_occurrence_bce_is_minimised_at_the_finite_dequantised_target():
     )
 
 
-def test_hurdle_velocity_loss_ignores_decoder_inactive_positive_channel():
+def test_hurdle_velocity_loss_weakly_regularises_inactive_positive_channel():
     mask = torch.ones(1, 1, 1, 2, dtype=torch.bool)
     clean = torch.tensor([[[[0.0, 0.0]], [[-4.0, 4.0]]]])
     prediction = torch.zeros_like(clean)
     baseline = torch.zeros_like(clean)
-    changed = baseline.clone()
-    changed[:, 0, 0, 0] = 1000.0  # dry: physically inactive
-    assert torch.equal(
-        _hurdle_velocity_mse(prediction, baseline, clean, mask),
-        _hurdle_velocity_mse(prediction, changed, clean, mask),
-    )
-    changed[:, 0, 0, 1] = 2.0  # wet: must be learned
-    assert _hurdle_velocity_mse(prediction, changed, clean, mask) > 0.0
+    dry_changed = baseline.clone()
+    dry_changed[:, 0, 0, 0] = 2.0
+    wet_changed = baseline.clone()
+    wet_changed[:, 0, 0, 1] = 2.0
+    baseline_loss = _hurdle_velocity_mse(prediction, baseline, clean, mask)
+    dry_loss = _hurdle_velocity_mse(prediction, dry_changed, clean, mask)
+    wet_loss = _hurdle_velocity_mse(prediction, wet_changed, clean, mask)
+    assert baseline_loss < dry_loss < wet_loss
+    assert torch.allclose(dry_loss, 0.05 * wet_loss)
 
 
 class _CaptureAllocation(torch.nn.Module):
@@ -311,7 +356,7 @@ def test_validation_dataset_tiles_the_complete_240_canvas():
             "coarse_valid": np.ones((24, 24), bool),
         },
         attrs={
-            "schema": "cpc_v3_subgrid_v2",
+            "schema": "cpc_v3_subgrid_v3",
             "subgrid_encoding": {"factor": 10},
         },
     )
@@ -323,6 +368,14 @@ def test_validation_dataset_tiles_the_complete_240_canvas():
     )
     assert dataset.validation_origins == ((0, 0), (0, 120), (120, 0), (120, 120))
     assert len(dataset) == 8
+
+    with pytest.raises(ValueError, match="overlapping validation tiles"):
+        SubgridDataset(
+            SubgridDatasetConfig(
+                root="unused", crop=160, random_crop=False, tile_domain=True
+            ),
+            store=store,
+        )
 
 
 def test_unet_rejects_raw_odd_cpc_core_with_actionable_error():
@@ -424,10 +477,11 @@ def test_sampler_evaluates_terminal_hard_observation_departures():
         ),
         config=HierarchicalSamplerConfig(n_steps=1, heun=False, seed=12),
     )
-    assert sample.diagnostics["terminal_decoder_consistent"] is True
-    assert sample.diagnostics["terminal_hard_decode_max_abs_mm_day"] == 0.0
+    assert sample.diagnostics["reconstruction_maximum_cell_mass_fraction"] <= 1.0 + 1.0e-6
     assert sample.diagnostics["terminal_valid_observation_count"] == 2
     assert np.isfinite(sample.diagnostics["terminal_log_likelihood_mean"])
+    expected_oa = float((-_Point()(sample.precipitation)).mean())
+    assert np.isclose(sample.diagnostics["terminal_oa_bias_sigma"], expected_oa)
 
 
 def test_area_weighted_04_and_aligned_05_operators_preserve_uniform_fields():
@@ -495,27 +549,28 @@ def test_authority_decomposition_assigns_pure_amount_and_allocation_changes():
     assert residual.abs().max() < 1.0e-6
 
 
-def test_hierarchical_archive_requires_and_roundtrips_terminal_hard_field(tmp_path):
+def test_hierarchical_archive_redecodes_serialized_states(tmp_path):
     fields = {"background": np.ones((2, 2, 10, 10), np.float32)}
     coarse_states = {"background": np.ones((2, 2, 2, 1, 1), np.float32)}
     allocation_states = {"background": np.ones((2, 2, 2, 10, 10), np.float32)}
-    diagnostics = {
-        "background": {
-            "terminal_decoder_consistent": True,
-            "terminal_hard_decode_max_abs_mm_day": 0.0,
-        }
+    diagnostics = {"background": {"n_steps": 1}}
+    geometry = {
+        "coarse_valid": np.ones((1, 1), bool),
+        "cell_area": np.ones((10, 10), np.float32),
+        "encoding": _encoding(),
     }
-    with pytest.raises(ValueError, match="terminal hard-decoder diagnostic"):
+    with pytest.raises(RuntimeError, match="serialized hard-decoded states"):
         write_hierarchical_sample_zarr(
             tmp_path / "rejected.zarr",
-            fields=fields,
+            fields={"background": 2.0 * fields["background"]},
             coarse_states=coarse_states,
             allocation_states=allocation_states,
             selected_times=np.asarray(["2021-05-01", "2021-05-02"]),
             lat=np.arange(10, dtype=np.float32),
             lon=np.arange(10, dtype=np.float32),
             valid=np.ones((10, 10), bool),
-            diagnostics={"background": {"terminal_decoder_consistent": False}},
+            diagnostics=diagnostics,
+            **geometry,
         )
     output = tmp_path / "samples.zarr"
     write_hierarchical_sample_zarr(
@@ -529,11 +584,14 @@ def test_hierarchical_archive_requires_and_roundtrips_terminal_hard_field(tmp_pa
         valid=np.ones((10, 10), bool),
         diagnostics=diagnostics,
         coarse_mm={"background": np.ones((2, 2, 1, 1), np.float32)},
+        **geometry,
     )
     import zarr
 
     archive = zarr.open_group(str(output), mode="r")
     assert archive.attrs["complete"] is True
     assert archive.attrs["archive_uses_likelihood_hard_decoder"] is True
+    assert archive.attrs["schema"] == "cpc_v3_hierarchical_samples_v2"
     assert archive.attrs["serialization_max_abs_mm_day"] == 0.0
+    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
     assert np.array_equal(archive["background"][:], fields["background"])

@@ -325,9 +325,17 @@ mean) behind a dry coarse gate. This keeps decoder-inactive channels from
 dominating flow matching with artificial dry spikes. The occurrence auxiliary
 BCE uses `sigmoid(z_truth)` as its soft label; hard 0/1 labels would push the
 terminal logit to infinity and conflict with the finite dequantised flow target.
-Velocity MSE for the positive amount/intensity channel is evaluated only where
-the corresponding clean occurrence target is wet; occurrence velocity and BCE
-remain evaluated over every valid block/cell.
+Velocity MSE gives dry decoder-inactive positive channels a frozen relative
+weight of 0.05 rather than dropping them completely. This weakly defines the
+dry latent marginal so a cell that becomes wet during sampling cannot reveal an
+unconstrained extreme intensity, while wet targets retain full weight.
+Both velocity channels use the valid-cell denominator, preserving the original
+channel scale instead of increasing per-wet-cell weight during dry periods.
+Occurrence velocity and BCE remain evaluated over every valid block/cell.
+Before exponentiation, standardised intensity is clipped to +/-6 and only then
+mapped through the frozen training mean/std; this makes the guard independent
+of the fitted raw log-weight scale. Report maximum within-block weight/mean and
+maximum single-cell mass fraction for every sampled analysis.
 
 ### Hard mass-conserving reconstruction
 
@@ -335,10 +343,16 @@ For a wet block, let `a_i` be the physical area of valid fine cell `i`,
 `A = sum_i(a_i)`, and
 
 ```text
-ell_i = intensity_std * z_i + intensity_mean
-q_i = wet_i * exp(clamp(ell_i, -L, L))
+z_clip_i = clamp(z_i, -6, 6)
+ell_i = intensity_std * z_clip_i + intensity_mean
+c_block = max(ell_i for wet valid cells i)
+q_i = wet_i * exp(min(ell_i - c_block, 0))
 x_i = A * m_block * q_i / sum_j(a_j * q_j)
 ```
+
+The block-maximum subtraction is exactly scale-invariant and prevents
+exponential overflow; the final `min` also keeps straight-through dry-cell
+weights finite without changing any hard-wet forward weight.
 
 Then
 
@@ -467,7 +481,10 @@ Before fitting a V3-SG network:
 3. derive and test `wide_cpc` and `bd_cpc`, including quantised crop origins;
    and
 4. build the oracle and operational repeated-block, smooth and
-   allocation-climatology nulls.
+   allocation-climatology nulls; and
+5. measure the hard-threshold representation ceiling by encoding and decoding
+   raw CHIRPS, including field and subgrid-anomaly errors plus the fraction of
+   positive cells and rainfall mass below 0.1 mm/day.
 
 Failure of the alignment tests blocks training. An underpowered gauge endpoint
 changes the claim ceiling and endpoint as declared below; it does not invalidate

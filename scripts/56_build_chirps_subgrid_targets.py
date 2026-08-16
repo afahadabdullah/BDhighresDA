@@ -34,6 +34,7 @@ from bdhires.data import (  # noqa: E402
     allocation_log_weight_target,
     area_weighted_block_mean,
     cell_area_weights,
+    decode_and_reconstruct,
     encode_subgrid_targets,
     encoding_metadata,
     validate_cpc_alignment,
@@ -150,6 +151,97 @@ class RunningScalar:
         mean = self.total / self.count
         variance = self.square / self.count - mean * mean
         return float(mean), float(np.sqrt(max(variance, 1.0e-8)))
+
+
+class RunningPair:
+    """Streaming paired metrics without retaining the multi-decade fields."""
+
+    def __init__(self):
+        self.count = 0
+        self.x = self.y = self.xx = self.yy = self.xy = 0.0
+        self.error = self.abs_error = self.square_error = 0.0
+
+    def update(self, prediction: np.ndarray, truth: np.ndarray, mask: np.ndarray) -> None:
+        keep = (
+            np.broadcast_to(mask, prediction.shape)
+            & np.isfinite(prediction)
+            & np.isfinite(truth)
+        )
+        x = np.asarray(prediction[keep], np.float64)
+        y = np.asarray(truth[keep], np.float64)
+        error = x - y
+        self.count += int(x.size)
+        self.x += float(x.sum())
+        self.y += float(y.sum())
+        self.xx += float(np.dot(x, x))
+        self.yy += float(np.dot(y, y))
+        self.xy += float(np.dot(x, y))
+        self.error += float(error.sum())
+        self.abs_error += float(np.abs(error).sum())
+        self.square_error += float(np.dot(error, error))
+
+    def finish(self) -> dict[str, float | int]:
+        count = max(self.count, 1)
+        covariance = self.xy - self.x * self.y / count
+        variance_x = self.xx - self.x * self.x / count
+        variance_y = self.yy - self.y * self.y / count
+        denominator = np.sqrt(max(variance_x * variance_y, 0.0))
+        return {
+            "count": self.count,
+            "correlation": (
+                float(covariance / denominator) if denominator > 0.0 else 0.0
+            ),
+            "bias_mm_day": self.error / count,
+            "mae_mm_day": self.abs_error / count,
+            "rmse_mm_day": float(np.sqrt(self.square_error / count)),
+        }
+
+
+class OracleCeiling:
+    """Representation ceiling imposed by the frozen wet threshold/decoder."""
+
+    def __init__(self, wet_threshold: float):
+        self.wet_threshold = float(wet_threshold)
+        self.field = RunningPair()
+        self.anomaly = RunningPair()
+        self.valid_cells = self.positive_cells = self.drizzle_cells = 0
+        self.rain_mass = self.drizzle_mass = 0.0
+
+    def update(
+        self,
+        decoded: np.ndarray,
+        truth: np.ndarray,
+        coarse_upscaled: np.ndarray,
+        valid: np.ndarray,
+    ) -> None:
+        mask = np.broadcast_to(valid, truth.shape)
+        self.field.update(decoded, truth, mask)
+        self.anomaly.update(decoded - coarse_upscaled, truth - coarse_upscaled, mask)
+        positive = mask & (truth > 0.0)
+        drizzle = positive & (truth < self.wet_threshold)
+        self.valid_cells += int(mask.sum())
+        self.positive_cells += int(positive.sum())
+        self.drizzle_cells += int(drizzle.sum())
+        self.rain_mass += float(np.asarray(truth[mask], np.float64).sum())
+        self.drizzle_mass += float(np.asarray(truth[drizzle], np.float64).sum())
+
+    def finish(self) -> dict:
+        return {
+            "description": (
+                "Hard-decoded encoded CHIRPS targets versus raw CHIRPS; this is the "
+                "target-projection ceiling under exact recovery of the frozen "
+                "threshold/decoder representation."
+            ),
+            "field": self.field.finish(),
+            "subgrid_anomaly": self.anomaly.finish(),
+            "drizzle_cell_fraction_of_positive": (
+                self.drizzle_cells / max(self.positive_cells, 1)
+            ),
+            "drizzle_rainfall_fraction": (
+                self.drizzle_mass / max(self.rain_mass, 1.0e-12)
+            ),
+            "wet_threshold_mm": self.wet_threshold,
+        }
 
 
 def _season(times: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -287,7 +379,7 @@ def main() -> None:
     parser.add_argument("--dequant-epsilon", type=float, default=0.02)
     parser.add_argument("--dequant-noise", type=float, default=0.05)
     parser.add_argument("--dequant-seed", type=int, default=314159)
-    parser.add_argument("--intensity-log-clip", type=float, default=12.0)
+    parser.add_argument("--intensity-z-clip", type=float, default=6.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -365,7 +457,7 @@ def main() -> None:
         dequant_noise=args.dequant_noise,
         dequant_seed=args.dequant_seed,
         valid_area_threshold=args.valid_area_threshold,
-        intensity_log_clip=args.intensity_log_clip,
+        intensity_z_clip=args.intensity_z_clip,
     )
     for start in range(0, len(times), args.chunk_days):
         stop = min(start + args.chunk_days, len(times))
@@ -417,7 +509,7 @@ def main() -> None:
         amount_sqrt_std=amount_std,
         intensity_log_mean=intensity_mean,
         intensity_log_std=intensity_std,
-        intensity_log_clip=args.intensity_log_clip,
+        intensity_z_clip=args.intensity_z_clip,
     )
     coarse_mean, coarse_std = coarse_stats.finish()
     fine_mean, fine_std = fine_stats.finish()
@@ -429,7 +521,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     root = _zarr_group(output, args.overwrite)
     root.attrs.update(
-        schema="cpc_v3_subgrid_v2",
+        schema="cpc_v3_subgrid_v3",
         complete=False,
         subgrid_encoding=encoding_metadata(encoding),
         fine_grid={
@@ -491,7 +583,10 @@ def main() -> None:
     arrays["valid_area_fraction"][:] = valid_fraction
     arrays["cell_area"][:] = area
 
-    # Pass 2: write chunk-invariant targets and normalized conditions.
+    # Pass 2: write chunk-invariant targets and normalized conditions.  Also
+    # quantify the exact representational ceiling caused by the frozen wet
+    # threshold and hard decoder before any model is trained.
+    oracle_ceiling = OracleCeiling(encoding.wet_threshold_mm)
     for start in range(0, nt, args.chunk_days):
         stop = min(start + args.chunk_days, nt)
         raw = np.asarray(chirps.isel(time=slice(start, stop)).values, np.float32)
@@ -500,6 +595,21 @@ def main() -> None:
             torch.from_numpy(raw)[:, None], torch.from_numpy(fine_valid),
             torch.from_numpy(area), encoding, sample_offset=start,
         )
+        decoded = decode_and_reconstruct(
+            targets.coarse_state,
+            targets.allocation_state,
+            targets.coarse_valid,
+            targets.fine_valid,
+            torch.from_numpy(area),
+            encoding,
+            hard=True,
+        )[:, 0].numpy()
+        coarse_upscaled = np.repeat(
+            np.repeat(targets.coarse_mm[:, 0].numpy(), factor, axis=-2),
+            factor,
+            axis=-1,
+        )
+        oracle_ceiling.update(decoded, raw, coarse_upscaled, fine_valid)
         coarse_cond, fine_cond, _, _ = _condition_chunk(
             times[start:stop], cpc, era5_ds, era5_names, static, static_names,
             fine_grid, coarse_grid, area, factor,
@@ -517,6 +627,8 @@ def main() -> None:
         arrays["coarse_cond"][start:stop] = coarse_cond
         arrays["fine_cond"][start:stop] = fine_cond
         print(f"wrote {stop}/{nt}", flush=True)
+    ceiling = oracle_ceiling.finish()
+    root.attrs["hard_threshold_oracle_ceiling"] = ceiling
     root.attrs["complete"] = True
     summary = {
         "output": str(output),
@@ -529,6 +641,7 @@ def main() -> None:
         "intensity_stats_wet_cell_count": intensity_stats.count,
         "coarse_cond_channels": coarse_names,
         "fine_cond_channels": fine_names,
+        "hard_threshold_oracle_ceiling": ceiling,
     }
     output.with_suffix(".json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2), flush=True)

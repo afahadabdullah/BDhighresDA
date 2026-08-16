@@ -113,6 +113,9 @@ def batch_loss(model, batch: dict, config: dict):
         return coarse_flow_matching_loss(
             model, batch["coarse_state"], batch["coarse_cond"], batch["coarse_valid"],
             occurrence_weight=float(config["train"].get("occurrence_weight", 0.1)),
+            inactive_positive_weight=float(
+                config["train"].get("inactive_positive_weight", 0.05)
+            ),
         )
     if stage == "allocation":
         augmentation = config["train"].get("conditioning_augmentation", {})
@@ -125,6 +128,9 @@ def batch_loss(model, batch: dict, config: dict):
             max_coarse_noise=float(augmentation.get("max_coarse_noise", 1.0)),
             clean_probability=float(augmentation.get("clean_probability", 0.15)),
             occurrence_weight=float(config["train"].get("occurrence_weight", 0.1)),
+            inactive_positive_weight=float(
+                config["train"].get("inactive_positive_weight", 0.05)
+            ),
         )
     return hierarchical_flow_matching_loss(
         model,
@@ -137,6 +143,9 @@ def batch_loss(model, batch: dict, config: dict):
         coarse_weight=float(config["train"].get("coarse_loss_weight", 1.0)),
         allocation_weight=float(config["train"].get("allocation_loss_weight", 1.0)),
         occurrence_weight=float(config["train"].get("occurrence_weight", 0.1)),
+        inactive_positive_weight=float(
+            config["train"].get("inactive_positive_weight", 0.05)
+        ),
         clean_context_probability=float(
             config["train"].get("clean_context_probability", 0.15)
         ),
@@ -286,7 +295,7 @@ def main() -> None:
                 None if maximum is None else int(maximum),
             )
             payload = {
-                "schema": "cpc_v3_subgrid_v2",
+                "schema": "cpc_v3_subgrid_v3",
                 "stage": config["stage"],
                 "epoch": epoch,
                 "model": online if online is not None else model.state_dict(),

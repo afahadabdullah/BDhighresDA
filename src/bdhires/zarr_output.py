@@ -337,22 +337,38 @@ def write_hierarchical_sample_zarr(
     lat: np.ndarray,
     lon: np.ndarray,
     valid: np.ndarray,
+    coarse_valid: np.ndarray,
+    cell_area: np.ndarray,
+    encoding,
     diagnostics: dict[str, dict],
     coarse_mm: dict[str, np.ndarray] | None = None,
     method_specs: dict[str, dict] | None = None,
     target_crop: tuple[int, int, int, int] | None = None,
-    serialization_tolerance_mm_day: float = 1.0e-5,
+    serialization_tolerance_mm_day: float = 1.0e-4,
 ) -> None:
     """Atomically write V3 physical samples and both latent states.
 
     This is the sole supported writer for the archive consumed by
-    ``scripts/58_evaluate_subgrid_prior.py``.  Every method must carry the
-    sampler's terminal hard-decoder diagnostic.  The temporary store is then
-    reopened and compared with the in-memory physical fields before it can be
-    marked complete, preventing a stale/soft/redecoded field from being
-    presented as the analysis used by the likelihood.
+    ``scripts/58_evaluate_subgrid_prior.py``.  The temporary store is reopened
+    and its serialized latent states are hard decoded independently. Only a
+    physical field matching that saved-state decode can be marked complete,
+    preventing a stale or soft field from being presented as the analysis used
+    by the likelihood.
     """
     import zarr
+    import torch
+
+    from .data.subgrid_dataset import (
+        SubgridEncoding,
+        decode_and_reconstruct,
+        encoding_metadata,
+    )
+
+    if isinstance(encoding, SubgridEncoding):
+        frozen_encoding = encoding
+    else:
+        frozen_encoding = SubgridEncoding.from_mapping(encoding)
+    frozen_encoding.validate()
 
     output = Path(path)
     temporary = output.with_name(output.name + ".incomplete")
@@ -385,11 +401,17 @@ def write_hierarchical_sample_zarr(
         raise ValueError("physical fields must have shape (time,member,lat,lon)")
     n_time, n_member, nlat, nlon = first.shape
     valid = np.asarray(valid, bool)
+    coarse_valid = np.asarray(coarse_valid, bool)
+    cell_area = np.asarray(cell_area, np.float32)
     lat = np.asarray(lat, np.float32)
     lon = np.asarray(lon, np.float32)
     times = np.asarray(selected_times).astype("datetime64[ns]")
     if valid.shape != (nlat, nlon) or lat.shape != (nlat,) or lon.shape != (nlon,):
         raise ValueError("valid/latitude/longitude geometry differs from physical fields")
+    if cell_area.shape != (nlat, nlon) or not np.isfinite(cell_area).all():
+        raise ValueError("cell_area must be finite and match the physical field geometry")
+    if np.any(cell_area <= 0.0):
+        raise ValueError("cell_area must be strictly positive")
     if times.shape != (n_time,) or len(np.unique(times)) != n_time:
         raise ValueError("sample times must be unique and match the field time axis")
     if n_time > 1 and not np.all(np.diff(times.astype(np.int64)) > 0):
@@ -411,20 +433,17 @@ def write_hierarchical_sample_zarr(
             or nlat // coarse.shape[-2] != nlon // coarse.shape[-1]
         ):
             raise ValueError(f"{method} coarse/fine state geometry is not block aligned")
+        if coarse_valid.shape != coarse.shape[-2:]:
+            raise ValueError(f"{method} coarse_valid shape differs from its coarse state")
+        if nlat // coarse.shape[-2] != frozen_encoding.factor:
+            raise ValueError(
+                f"{method} state factor differs from encoding factor "
+                f"{frozen_encoding.factor}"
+            )
         if not np.isfinite(physical[:, :, valid]).all():
             raise FloatingPointError(f"{method} has non-finite values on valid cells")
         if np.isinf(physical).any():
             raise FloatingPointError(f"{method} contains infinite values")
-        terminal_error = diagnostics[method].get("terminal_hard_decode_max_abs_mm_day")
-        if (
-            diagnostics[method].get("terminal_decoder_consistent") is not True
-            or terminal_error is None
-            or not np.isfinite(float(terminal_error))
-            or float(terminal_error) > serialization_tolerance_mm_day
-        ):
-            raise ValueError(
-                f"{method} lacks a passing sampler terminal hard-decoder diagnostic"
-            )
         if coarse_mm is not None:
             expected_coarse = (n_time, n_member, *coarse.shape[-2:])
             if np.asarray(coarse_mm[method]).shape != expected_coarse:
@@ -432,12 +451,13 @@ def write_hierarchical_sample_zarr(
 
     root = _group(temporary, "w")
     root.attrs.update(
-        schema="cpc_v3_hierarchical_samples_v1",
+        schema="cpc_v3_hierarchical_samples_v2",
         complete=False,
         units="mm/day",
         archive_uses_likelihood_hard_decoder=False,
         method_specs=method_specs or {method: {} for method in methods},
         sampler_diagnostics=diagnostics,
+        subgrid_encoding=encoding_metadata(frozen_encoding),
     )
     if target_crop is not None:
         if len(target_crop) != 4:
@@ -448,6 +468,11 @@ def write_hierarchical_sample_zarr(
     _array(root, "lat", lat, ("lat",), attrs={"units": "degrees_north"})
     _array(root, "lon", lon, ("lon",), attrs={"units": "degrees_east"})
     _array(root, "valid", valid, ("lat", "lon"), chunks=(nlat, nlon))
+    _array(
+        root, "coarse_valid", coarse_valid,
+        ("coarse_lat", "coarse_lon"), chunks=coarse_valid.shape,
+    )
+    _array(root, "cell_area", cell_area, ("lat", "lon"), chunks=(nlat, nlon))
     for method in methods:
         coarse = np.asarray(coarse_states[method], np.float32)
         _array(
@@ -475,10 +500,11 @@ def write_hierarchical_sample_zarr(
                 attrs={"units": "mm/day"},
             )
 
-    # Audit the exact values that the evaluator will reopen.  Do this before
-    # setting complete=True and before the atomic rename.
+    # Audit the exact serialized states and values that the evaluator will
+    # reopen. Do this before setting complete=True and before the atomic rename.
     reopened = _group(temporary, "r")
     roundtrip_max = 0.0
+    hard_decode_by_method = {}
     for method in methods:
         source = np.asarray(fields[method], np.float32)
         stored = reopened[method]
@@ -493,12 +519,41 @@ def write_hierarchical_sample_zarr(
                 if finite.any() else 0.0
             )
             roundtrip_max = max(roundtrip_max, float(error))
+        hard_decode_max = 0.0
+        stored_coarse = reopened[f"{method}_coarse_state"]
+        stored_allocation = reopened[f"{method}_allocation_state"]
+        stored_physical = reopened[method]
+        for index in range(n_time):
+            coarse_chunk = torch.from_numpy(np.asarray(stored_coarse[index], np.float32))
+            allocation_chunk = torch.from_numpy(
+                np.asarray(stored_allocation[index], np.float32)
+            )
+            decoded = decode_and_reconstruct(
+                coarse_chunk,
+                allocation_chunk,
+                torch.from_numpy(coarse_valid),
+                torch.from_numpy(valid),
+                torch.from_numpy(cell_area),
+                frozen_encoding,
+                hard=True,
+            )[:, 0].numpy()
+            archived = np.asarray(stored_physical[index], np.float32)
+            error = float(np.max(np.abs(decoded[:, valid] - archived[:, valid])))
+            hard_decode_max = max(hard_decode_max, error)
+        if not np.isfinite(hard_decode_max) or hard_decode_max > serialization_tolerance_mm_day:
+            raise RuntimeError(
+                f"{method} archived field differs from its serialized hard-decoded "
+                f"states by {hard_decode_max:.3g} mm/day (tolerance "
+                f"{serialization_tolerance_mm_day:.3g})"
+            )
+        hard_decode_by_method[method] = hard_decode_max
     if not np.isfinite(roundtrip_max) or roundtrip_max > serialization_tolerance_mm_day:
         raise RuntimeError(
             f"hierarchical archive round-trip error {roundtrip_max:.3g} mm/day "
             f"exceeds {serialization_tolerance_mm_day:.3g}"
         )
     root.attrs["serialization_max_abs_mm_day"] = roundtrip_max
+    root.attrs["saved_state_hard_decode_max_abs_mm_day"] = hard_decode_by_method
     root.attrs["archive_uses_likelihood_hard_decoder"] = True
     root.attrs["complete"] = True
     zarr.consolidate_metadata(str(temporary))

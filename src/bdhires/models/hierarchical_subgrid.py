@@ -304,18 +304,34 @@ def _masked_mse(prediction, target, mask) -> torch.Tensor:
     return ((prediction - target).square() * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def _hurdle_velocity_mse(prediction, target_velocity, clean_target, mask) -> torch.Tensor:
+def _hurdle_velocity_mse(
+    prediction,
+    target_velocity,
+    clean_target,
+    mask,
+    inactive_positive_weight: float = 0.05,
+) -> torch.Tensor:
     """Balance active positive intensity against occurrence velocity.
 
-    Channel zero has no physical authority behind a hard-dry occurrence gate.
-    Training it at every dry pixel would let the numerous inactive cells
-    dominate the allocation objective even when their neutral target is
-    numerically benign. Channel one remains supervised over every valid cell.
+    Channel zero has no physical authority behind a hard-dry occurrence gate,
+    but leaving it entirely unconstrained creates an undefined dry-cell
+    marginal that can become extreme before a cell turns wet during sampling.
+    Give inactive cells a small neutral-target weight while preserving full
+    emphasis on active cells. Channel one remains supervised at every valid
+    cell.
     """
+    if not 0.0 <= float(inactive_positive_weight) <= 1.0:
+        raise ValueError("inactive_positive_weight must lie in [0, 1]")
     wet = clean_target[:, 1:2] >= 0.0
-    positive = _masked_mse(
-        prediction[:, :1], target_velocity[:, :1], mask.to(torch.bool) & wet
+    valid = mask.to(prediction.dtype)
+    positive_weight = valid * torch.where(
+        wet,
+        torch.ones_like(valid),
+        torch.full_like(valid, float(inactive_positive_weight)),
     )
+    positive = (
+        (prediction[:, :1] - target_velocity[:, :1]).square() * positive_weight
+    ).sum() / valid.sum().clamp_min(1.0)
     occurrence = _masked_mse(
         prediction[:, 1:2], target_velocity[:, 1:2], mask
     )
@@ -347,6 +363,7 @@ def hierarchical_flow_matching_loss(
     coarse_weight: float = 1.0,
     allocation_weight: float = 1.0,
     occurrence_weight: float = 0.1,
+    inactive_positive_weight: float = 0.05,
     clean_context_probability: float = 0.15,
     return_components: bool = False,
 ):
@@ -392,10 +409,12 @@ def hierarchical_flow_matching_loss(
         clean_coarse_context=clean_context,
     )
     coarse_loss = _hurdle_velocity_mse(
-        prediction.coarse, target.coarse, state1.coarse, coarse_mask
+        prediction.coarse, target.coarse, state1.coarse, coarse_mask,
+        inactive_positive_weight,
     )
     allocation_loss = _hurdle_velocity_mse(
-        prediction.allocation, target.allocation, state1.allocation, fine_mask
+        prediction.allocation, target.allocation, state1.allocation, fine_mask,
+        inactive_positive_weight,
     )
     clean = flow.x1_hat(state_t, t, prediction)
     occurrence_loss = _occurrence_loss(clean.coarse, state1.coarse, coarse_mask)
@@ -419,13 +438,16 @@ def coarse_flow_matching_loss(
     mask: torch.Tensor,
     flow: RectifiedFlow | None = None,
     occurrence_weight: float = 0.1,
+    inactive_positive_weight: float = 0.05,
 ):
     flow = flow or RectifiedFlow()
     t = flow.sample_t(target.shape[0], target.device)
     state_t, velocity, _ = flow.interpolate(target, t)
     prediction = model(state_t, t, cond)
     clean = flow.x1_hat(state_t, t, prediction)
-    return _hurdle_velocity_mse(prediction, velocity, target, mask) + float(
+    return _hurdle_velocity_mse(
+        prediction, velocity, target, mask, inactive_positive_weight
+    ) + float(
         occurrence_weight
     ) * _occurrence_loss(clean, target, mask)
 
@@ -441,6 +463,7 @@ def allocation_flow_matching_loss(
     max_coarse_noise: float = 1.0,
     clean_probability: float = 0.15,
     occurrence_weight: float = 0.1,
+    inactive_positive_weight: float = 0.05,
 ):
     """Phase-2 objective with an interface identical to the joint fine branch."""
     flow = flow or RectifiedFlow()
@@ -461,6 +484,8 @@ def allocation_flow_matching_loss(
     coarse_context = (1.0 - scale) * coarse_truth + scale * torch.randn_like(coarse_truth)
     prediction = model(state_t, t, fine_cond, coarse_context, level)
     clean_state = flow.x1_hat(state_t, t, prediction)
-    return _hurdle_velocity_mse(prediction, velocity, target, mask) + float(
+    return _hurdle_velocity_mse(
+        prediction, velocity, target, mask, inactive_positive_weight
+    ) + float(
         occurrence_weight
     ) * _occurrence_loss(clean_state, target, mask)

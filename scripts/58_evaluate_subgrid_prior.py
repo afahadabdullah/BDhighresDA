@@ -25,6 +25,7 @@ from bdhires.da import authority_decomposition  # noqa: E402
 from bdhires.data import (  # noqa: E402
     SubgridEncoding,
     area_weighted_block_mean,
+    encoding_metadata,
 )
 from bdhires.models import HierarchicalState  # noqa: E402
 
@@ -191,11 +192,11 @@ def main() -> None:
     samples = _open(args.sample_store)
     if not target.attrs.get("complete", False):
         raise ValueError("target store is not marked complete")
-    if target.attrs.get("schema") != "cpc_v3_subgrid_v2":
-        raise ValueError("target store must use the corrected cpc_v3_subgrid_v2 schema")
+    if target.attrs.get("schema") != "cpc_v3_subgrid_v3":
+        raise ValueError("target store must use the corrected cpc_v3_subgrid_v3 schema")
     if not samples.attrs.get("complete", False):
         raise ValueError("sample store is not marked complete")
-    if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v1":
+    if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v2":
         raise ValueError("sample store was not produced by the audited V3 writer")
     if samples.attrs.get("archive_uses_likelihood_hard_decoder") is not True:
         raise ValueError("sample archive lacks a passing hard-decoder round-trip audit")
@@ -218,9 +219,26 @@ def main() -> None:
     fine_slice = _parse_crop(args.target_crop, samples.attrs)
     valid_np = np.asarray(target["fine_valid"][:], bool)[fine_slice]
     area_np = np.asarray(target["cell_area"][:], np.float32)[fine_slice]
+    target_lat = np.asarray(target["lat"][:], np.float32)[fine_slice[0]]
+    target_lon = np.asarray(target["lon"][:], np.float32)[fine_slice[1]]
     valid = torch.from_numpy(valid_np)
     area = torch.from_numpy(area_np)
     encoding = SubgridEncoding.from_mapping(target.attrs["subgrid_encoding"])
+    sample_encoding = SubgridEncoding.from_mapping(
+        samples.attrs.get("subgrid_encoding", {})
+    )
+    if encoding_metadata(sample_encoding) != encoding_metadata(encoding):
+        raise ValueError("sample and target stores use different subgrid encodings")
+    if not np.array_equal(np.asarray(samples["valid"][:], bool), valid_np):
+        raise ValueError("sample and target stores use different fine validity masks")
+    if not np.allclose(
+        np.asarray(samples["cell_area"][:], np.float32), area_np, rtol=0.0, atol=0.0
+    ):
+        raise ValueError("sample and target stores use different fine-cell areas")
+    if not np.array_equal(np.asarray(samples["lat"][:], np.float32), target_lat):
+        raise ValueError("sample and target stores use different latitude coordinates")
+    if not np.array_equal(np.asarray(samples["lon"][:], np.float32), target_lon):
+        raise ValueError("sample and target stores use different longitude coordinates")
     accumulators = {method: Accumulator() for method in methods}
     seams = {method: [] for method in methods}
 
@@ -299,6 +317,10 @@ def main() -> None:
         coarse_valid = torch.from_numpy(
             np.asarray(target["coarse_valid"][:], bool)[coarse_slice]
         )[None, None]
+        if not np.array_equal(
+            np.asarray(samples["coarse_valid"][:], bool), coarse_valid[0, 0].numpy()
+        ):
+            raise ValueError("sample and target stores use different coarse validity masks")
         authority = {}
         for method in methods:
             if method == "background":

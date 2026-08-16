@@ -47,15 +47,21 @@ archive remains matched to the originally frozen 1981--2024 CPC/ERA5 period.
 This is a two-pass, chunked writer. The first pass freezes training-period
 positive-amount, wet-cell centred-log-allocation and conditioning statistics;
 the second writes raw rainfall, paired flow states and normalized conditions.
-Dry decoder-inactive channels receive neutral standardized values. Target
-dequantisation is seeded per date, so changing `--chunk-days` cannot change the
-learned target.
-The positive amount/intensity velocity loss is wet-target-only; occurrence is
-still trained across every valid block/cell.
+Dry decoder-inactive channels receive neutral standardized values and a 0.05
+relative loss weight, enough to define their marginal without letting dry cells
+dominate training. Allocation intensity is clipped at +/-6 in standardized
+latent units before the frozen mean/std are undone. Target dequantisation is
+seeded per date, so changing `--chunk-days` cannot change the learned target.
+The positive and occurrence channels retain the same valid-cell denominator,
+so their configured balance does not vary with seasonal wet fraction.
+Occurrence remains trained across every valid block/cell.
 
-The corrected archive schema is `cpc_v3_subgrid_v2`. A pre-fix
-`cpc_v3_subgrid_v1` archive and checkpoints are intentionally rejected and must
-be moved aside before restarting; they encode a different allocation target.
+The corrected archive schema is `cpc_v3_subgrid_v3`. Earlier V3 target archives
+and checkpoints are intentionally rejected and must be moved aside before
+restarting; they encode a different allocation/decoder contract. Preparation
+also records `hard_threshold_oracle_ceiling`, the target-projection loss against
+raw CHIRPS caused by the 0.1 mm/day hard wet threshold and decoder before any
+model is trained.
 
 ## 3. Train the three phases
 
@@ -120,7 +126,8 @@ PYTHONPATH=src pytest -q tests/test_v3_subgrid.py
 
 The tests cover CPC alignment, the 160-cell production halo, quantized crops,
 coastal mass conservation, exact dry atoms with occurrence gradients,
-chunk-invariant normalized targets, literal branch transfer, full Phase-2
+the drizzle representation ceiling, chunk-invariant normalized targets,
+literal branch transfer, full Phase-2
 coarse-corruption support, joint gauge gradients, 0.4/0.5-degree
 uniform-footprint behavior, pure amount/allocation attribution and physical
 authority closure.
@@ -130,10 +137,11 @@ authority closure.
 A generated Zarr must be written with
 `bdhires.zarr_output.write_hierarchical_sample_zarr`. It stores `time`, one
 `(time, member, lat, lon)` hard-terminal field per method, both latent states,
-and optional `<method>_coarse_mm` arrays. The writer requires the sampler's
-terminal decoder diagnostic, reopens the temporary archive, and checks every
-physical field before atomically marking it complete. Script 58 rejects an
-unverified or manually assembled store.
+and optional `<method>_coarse_mm` arrays. The writer reopens the temporary
+archive, hard-decodes every serialized coarse/allocation state with the stored
+masks, areas and encoding, and checks that result against every physical field
+before atomically marking it complete. Script 58 rejects an unverified,
+pre-v2-sample-schema or manually assembled store.
 
 ```bash
 python scripts/58_evaluate_subgrid_prior.py \

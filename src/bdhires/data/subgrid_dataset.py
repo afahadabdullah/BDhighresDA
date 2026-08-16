@@ -34,7 +34,10 @@ class SubgridEncoding:
     amount_sqrt_std: float = 1.0
     intensity_log_mean: float = 0.0
     intensity_log_std: float = 1.0
-    intensity_log_clip: float = 12.0
+    # Clip the standardized allocation latent before undoing its training
+    # normalization.  A clip in raw log-weight units changes meaning whenever
+    # the fitted mean/std change and can still permit pathological exponentials.
+    intensity_z_clip: float = 6.0
 
     def validate(self) -> None:
         if self.factor <= 0:
@@ -51,8 +54,8 @@ class SubgridEncoding:
             raise ValueError("amount_sqrt_std must be positive")
         if self.intensity_log_std <= 0.0:
             raise ValueError("intensity_log_std must be positive")
-        if self.intensity_log_clip <= 0.0:
-            raise ValueError("intensity_log_clip must be positive")
+        if self.intensity_z_clip <= 0.0:
+            raise ValueError("intensity_z_clip must be positive")
 
     @classmethod
     def from_mapping(cls, values) -> "SubgridEncoding":
@@ -78,6 +81,8 @@ class ReconstructionDiagnostics:
     positive_blocks: int
     fallback_fraction: float
     minimum_denominator: float
+    maximum_weight_to_mean_ratio: float
+    maximum_cell_mass_fraction: float
 
 
 def cell_area_weights(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
@@ -497,15 +502,30 @@ def reconstruct_from_amount(
         wet_st = (wet_hard - wet_soft).detach() + wet_soft
 
     occurrence = wet_st if hard else wet_soft
-    log_weight = allocation_state[:, :1] * float(
+    standardized_intensity = allocation_state[:, :1].clamp(
+        min=-float(encoding.intensity_z_clip),
+        max=float(encoding.intensity_z_clip),
+    )
+    log_weight = standardized_intensity * float(
         encoding.intensity_log_std
     ) + float(encoding.intensity_log_mean)
-    positive_weight = torch.exp(
-        log_weight.clamp(
-            min=-float(encoding.intensity_log_clip),
-            max=float(encoding.intensity_log_clip),
-        )
+    # Allocation is invariant to a common log-weight shift within a block.
+    # Subtract the candidate-cell block maximum before exp, so even an unusual
+    # fitted scale cannot overflow.  For the hard decoder, dry cells must not
+    # set that maximum because their weights are gated to zero.
+    log_blocks = _blockify(log_weight, encoding.factor)
+    candidate_blocks = _blockify(
+        (occurrence.detach() > 0.0) & valid_b, encoding.factor
     )
+    block_max = torch.where(
+        candidate_blocks,
+        log_blocks,
+        torch.full_like(log_blocks, -torch.inf),
+    ).amax(dim=(-1, -2), keepdim=True)
+    block_max = torch.where(
+        torch.isfinite(block_max), block_max, torch.zeros_like(block_max)
+    )
+    positive_weight = _unblockify(torch.exp((log_blocks - block_max).clamp_max(0.0)))
     weights = occurrence * positive_weight
     weights = torch.where(valid_b, weights, torch.zeros_like(weights))
     ab = _blockify(area_b, encoding.factor)
@@ -527,11 +547,34 @@ def reconstruct_from_amount(
         return field
     fallback_count = int(fallback_blocks.sum().detach().cpu())
     positive_count = int(positive.sum().detach().cpu())
+    positive_mask = positive & (denominator > float(encoding.denominator_floor))
+    wet_count = _blockify(occurrence.detach(), encoding.factor).sum(
+        dim=(-1, -2), keepdim=True
+    )
+    mean_wet_weight = qb.sum(dim=(-1, -2), keepdim=True) / wet_count.clamp_min(1.0)
+    weight_ratio = qb.amax(dim=(-1, -2), keepdim=True) / mean_wet_weight.clamp_min(
+        float(encoding.denominator_floor)
+    )
+    mass_fraction = (ab * qb).amax(dim=(-1, -2), keepdim=True) / denominator.clamp_min(
+        float(encoding.denominator_floor)
+    )
+
+    def _masked_max(values: torch.Tensor) -> float:
+        selected = values.detach()[positive_mask]
+        return float(selected.amax().cpu()) if selected.numel() else 0.0
+
+    selected_denominator = denominator.detach()[positive_mask]
+    minimum_denominator = (
+        float(selected_denominator.amin().cpu())
+        if selected_denominator.numel() else 0.0
+    )
     diagnostics = ReconstructionDiagnostics(
         empty_wet_fallbacks=fallback_count,
         positive_blocks=positive_count,
         fallback_fraction=fallback_count / max(positive_count, 1),
-        minimum_denominator=float(denominator.detach().amin().cpu()),
+        minimum_denominator=minimum_denominator,
+        maximum_weight_to_mean_ratio=_masked_max(weight_ratio),
+        maximum_cell_mass_fraction=_masked_max(mass_fraction),
     )
     return field, diagnostics
 
@@ -546,13 +589,15 @@ def decode_and_reconstruct(
     *,
     temperature: float = 1.0,
     hard: bool = True,
-) -> torch.Tensor:
+    return_diagnostics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, ReconstructionDiagnostics]:
     amount = decode_coarse_amount(
         coarse_state, coarse_valid, encoding, temperature=temperature, hard=hard
     )
     return reconstruct_from_amount(
         amount, allocation_state, fine_valid, area, encoding,
         temperature=temperature, hard=hard,
+        return_diagnostics=return_diagnostics,
     )
 
 
@@ -581,10 +626,10 @@ class SubgridDataset(Dataset):
         self.z = store
         attrs = getattr(store, "attrs", {})
         schema = attrs.get("schema")
-        if schema != "cpc_v3_subgrid_v2":
+        if schema != "cpc_v3_subgrid_v3":
             raise ValueError(
-                f"target store schema must be cpc_v3_subgrid_v2, got {schema!r}; "
-                "rebuild the V3 target archive because the allocation target changed"
+                f"target store schema must be cpc_v3_subgrid_v3, got {schema!r}; "
+                "rebuild the V3 target archive because the decoder contract changed"
             )
         self.encoding = SubgridEncoding.from_mapping(attrs.get("subgrid_encoding", {}))
         self.encoding.validate()
@@ -615,13 +660,14 @@ class SubgridDataset(Dataset):
             raise ValueError("tile_domain cannot be combined with crop_origin")
         self.validation_origins: tuple[tuple[int, int], ...] = ()
         if cfg.tile_domain:
+            if self.height % cfg.crop or self.width % cfg.crop:
+                raise ValueError(
+                    "tile_domain requires crop to divide both spatial dimensions; "
+                    "overlapping validation tiles would otherwise weight some cells twice"
+                )
+
             def axis_origins(length: int) -> list[int]:
-                maximum = length - cfg.crop
-                values = list(range(0, maximum + 1, cfg.crop))
-                last = (maximum // cfg.factor) * cfg.factor
-                if last not in values:
-                    values.append(last)
-                return sorted(set(values))
+                return list(range(0, length, cfg.crop))
 
             self.validation_origins = tuple(
                 (row, column)
