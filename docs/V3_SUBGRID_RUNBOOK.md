@@ -114,6 +114,54 @@ Validation selects checkpoints over four deterministic 120-by-120 tiles that
 cover the complete 240-by-240 domain and over every validation batch. It no
 longer selects on one central crop or the first 32 batches.
 
+### Test the corrected v4 joint checkpoint
+
+After joint training creates
+`runs/prior_h100_cpc_v3_subgrid_v4/joint/best.pt`, run the bounded May 1--5,
+2022 diagnostic:
+
+```bash
+bash slurm/submit_v4_subgrid_da_test.sh
+```
+
+It draws six arms from identical per-day joint latent noise: background,
+supported-holdout gauges, IMERG S04, supported-holdout simultaneous, all-gauge
+maps and all-gauge simultaneous maps. The two all-gauge arms are used only for
+spatial structure; they are never presented as independent gauge validation.
+The satellite operator uses the exact legacy-BD 0.4-degree footprint phase on
+the 160-cell v4 canvas, physical area means and the S04 file's frozen
+correlation-length metadata. Simultaneous and single-stream arms reuse the same
+perturbed observations.
+
+The job writes an audited hard-decoder Zarr plus:
+
+```text
+data/processed/v4_da_test/may2022_5day/evaluation/
+  v4_da_test_metrics.{json,md}
+  v4_da_test_matrix.png
+  v4_da_test_daily_maps.png
+  v4_da_test_subgrid_maps.png
+```
+
+The matrix reports withheld-gauge CRPS/RMSE/bias/coverage separately from
+CHIRPS, CPC and IMERG pattern agreement. The latter are comparison products,
+not independent truth. The daily maps use all assimilated gauges; the
+withheld-gauge arms remain separate. Script 58 also supplies memberwise
+below-0.5-degree anomaly scores, conservation, seam and coarse/allocation
+authority diagnostics.
+
+To queue the diagnostic before a running joint job finishes, pass that numeric
+Slurm job ID:
+
+```bash
+V4_JOINT_JOB_ID=3790XXXX bash slurm/submit_v4_subgrid_da_test.sh
+```
+
+This creates an `afterok` dependency. The five-day, four-member, 25-step run is
+a smoke/pilot evaluation, not a DA hyperparameter selection or publishable
+confirmation. Change `V4_TEST_OUT_ROOT` whenever changing its dates, members,
+steps or DA settings; completed sample archives are never overwritten.
+
 ### Diagnostic use of the superseded pre-v4 checkpoint
 
 If the earlier `runs/prior_h100_cpc_v3_subgrid/joint/best.pt` completed, it can
@@ -147,7 +195,7 @@ sbatch slurm/v3_subgrid_tests.sbatch
 The equivalent command inside a compatible ARM environment is:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_v3_subgrid.py
+PYTHONPATH=src pytest -q tests/test_v3_subgrid.py tests/test_v4_da_test.py
 ```
 
 The tests cover CPC alignment, the 160-cell production halo, quantized crops,
@@ -155,8 +203,9 @@ coastal mass conservation, exact dry atoms with occurrence gradients,
 the drizzle representation ceiling, chunk-invariant normalized targets,
 literal branch transfer, full Phase-2
 coarse-corruption support, joint gauge gradients, 0.4/0.5-degree
-uniform-footprint behavior, pure amount/allocation attribution and physical
-authority closure.
+uniform-footprint behavior, pure amount/allocation attribution, physical
+authority closure, the v4/IMERG canvas phase, diagnostic date alignment and
+station-ensemble scoring.
 
 ## 5. Evaluate a generated archive
 

@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""Matched-noise CPC-V3-SG/v4 background and physical-space DA pilot.
+
+This is a bounded post-training diagnostic, not a configuration-selection or
+confirmatory experiment.  It samples the corrected schema-v4 joint checkpoint
+over a short independent period and writes six audited arms:
+
+``background``
+    Unguided joint prior.
+``gauges_withheld``
+    BMD guidance with a supported, independently withheld station subset.
+``imerg_only``
+    IMERG S04 0.4-degree area-mean guidance.
+``simultaneous_withheld``
+    One likelihood over the same assimilated gauges plus the same IMERG values.
+``gauges_all`` and ``simultaneous_all``
+    All-gauge products used only for spatial-map diagnostics.  They are never
+    reported as independent gauge verification.
+
+Every arm starts from identical per-day joint latent noise.  Simultaneous arms
+reuse the exact observation perturbations from their corresponding single-
+stream arms.  The output is written through the hard-decoder round-trip writer
+and can be evaluated by scripts 58 and 61 without rerunning the GPU sampler.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import torch
+import xarray as xr
+import zarr
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from bdhires.bmd import (  # noqa: E402
+    max_bearing_gap_deg,
+    nearest_neighbour_km,
+    neighbored_holdout,
+)
+from bdhires.da import (  # noqa: E402
+    AreaWeightedBlockObsOperator,
+    BilinearObsOperator,
+    CompositeObsOperator,
+    GuidanceConfig,
+    HierarchicalObservations,
+    HierarchicalSamplerConfig,
+    perturb_observations,
+    sample_hierarchical,
+)
+from bdhires.data import (  # noqa: E402
+    SUBGRID_SCHEMA,
+    SubgridEncoding,
+    aligned_production_canvas,
+    decode_coarse_amount,
+    encoding_metadata,
+    load_stations,
+)
+from bdhires.grids import BD, BD_CPC, WIDE_CPC, Grid, crop_offsets  # noqa: E402
+from bdhires.models import (  # noqa: E402
+    AllocationFlow,
+    CoarseHurdleFlow,
+    CoupledSubgridFlow,
+    HierarchicalState,
+    select_weights,
+)
+from bdhires.zarr_output import write_hierarchical_sample_zarr  # noqa: E402
+
+
+METHODS = (
+    "background",
+    "gauges_withheld",
+    "imerg_only",
+    "simultaneous_withheld",
+    "gauges_all",
+    "simultaneous_all",
+)
+MM_PER_DAY = {"mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--target-store",
+        default="data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="runs/prior_h100_cpc_v3_subgrid_v4/joint/best.pt",
+    )
+    parser.add_argument("--stations", required=True, help="canonical BMD daily CSV")
+    parser.add_argument(
+        "--imerg",
+        default=(
+            "data/processed/imerg_prepared_ing2022/"
+            "imerg_0p4deg_20220501_20220510.nc"
+        ),
+    )
+    parser.add_argument("--start", default="2022-05-01")
+    parser.add_argument("--end", default="2022-05-05")
+    parser.add_argument("--background-day-offset", type=int, default=-1)
+    parser.add_argument("--members", type=int, default=4)
+    parser.add_argument("--n-steps", type=int, default=25)
+    parser.add_argument("--canvas", type=int, default=160)
+    parser.add_argument("--withhold", type=float, default=0.20)
+    parser.add_argument("--min-coverage", type=float, default=0.80)
+    parser.add_argument("--holdout-neighbor-km", type=float, default=75.0)
+    parser.add_argument("--holdout-max-gap-deg", type=float, default=200.0)
+    parser.add_argument("--gauge-sigma-mm", type=float, default=3.0)
+    parser.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0)
+    parser.add_argument("--imerg-representativeness-mm", type=float, default=0.0)
+    parser.add_argument("--imerg-factor", type=int, default=8)
+    parser.add_argument("--imerg-error-corr-cells", type=float, default=0.75)
+    parser.add_argument("--imerg-r-multiplier", type=float, default=1.0)
+    parser.add_argument("--guidance-gamma", type=float, default=1.0)
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--guidance-clip-norm", type=float, default=100.0)
+    parser.add_argument("--huber-delta", type=float, default=3.0)
+    parser.add_argument("--seed", type=int, default=4202205)
+    parser.add_argument(
+        "--out-store",
+        default="data/processed/v4_da_test/may2022_5day/v4_da_samples.zarr",
+    )
+    parser.add_argument(
+        "--report",
+        default="data/processed/v4_da_test/may2022_5day/v4_da_sampling.json",
+    )
+    parser.add_argument("--preflight-only", action="store_true")
+    return parser.parse_args()
+
+
+def require_v4_contract(root, checkpoint: dict) -> SubgridEncoding:
+    if not root.attrs.get("complete", False):
+        raise ValueError("v4 target store is not marked complete")
+    target_schema = root.attrs.get("schema")
+    checkpoint_schema = checkpoint.get("schema")
+    if target_schema != SUBGRID_SCHEMA or checkpoint_schema != SUBGRID_SCHEMA:
+        raise ValueError(
+            f"v4 test requires matched {SUBGRID_SCHEMA}; got target="
+            f"{target_schema!r}, checkpoint={checkpoint_schema!r}"
+        )
+    if checkpoint.get("stage") != "joint":
+        raise ValueError("v4 test requires a joint-stage best checkpoint")
+    if "subgrid_encoding" not in root.attrs or "subgrid_encoding" not in checkpoint:
+        raise ValueError("target/checkpoint lacks frozen subgrid encoding metadata")
+    target_encoding = SubgridEncoding.from_mapping(root.attrs["subgrid_encoding"])
+    checkpoint_encoding = SubgridEncoding.from_mapping(checkpoint["subgrid_encoding"])
+    target_encoding.validate()
+    checkpoint_encoding.validate()
+    if encoding_metadata(target_encoding) != encoding_metadata(checkpoint_encoding):
+        raise ValueError("v4 target and checkpoint use different subgrid encodings")
+    config = checkpoint.get("config")
+    if not isinstance(config, dict) or config.get("stage") != "joint":
+        raise ValueError("checkpoint lacks its resolved joint training config")
+    return target_encoding
+
+
+def build_joint_model(checkpoint: dict, root, device: torch.device):
+    config = checkpoint["config"]
+    model_config = config["model"]
+    crop = int(config["data"]["crop"])
+    factor = int(config["data"].get("factor", 10))
+    coarse = CoarseHurdleFlow(
+        int(root["coarse_cond"].shape[1]),
+        image_size=crop // factor,
+        **model_config["coarse"],
+    )
+    allocation = AllocationFlow(
+        int(root["fine_cond"].shape[1]),
+        image_size=crop,
+        **model_config["allocation"],
+    )
+    model = CoupledSubgridFlow(
+        coarse,
+        allocation,
+        clean_context_probability=float(
+            config["train"].get("clean_context_probability", 0.0)
+        ),
+    )
+    model.load_state_dict(select_weights(checkpoint), strict=True)
+    return model.to(device).eval(), config
+
+
+def date_indices(root, start: str, end: str, offset: int):
+    observation_days = np.arange(
+        np.datetime64(start, "D"),
+        np.datetime64(end, "D") + np.timedelta64(1, "D"),
+    )
+    if observation_days.size == 0:
+        raise ValueError("requested v4 diagnostic period is empty")
+    source_days = np.asarray(root["time"][:], np.int64).astype(
+        "datetime64[ns]"
+    ).astype("datetime64[D]")
+    if len(np.unique(source_days)) != len(source_days):
+        raise ValueError("v4 target contains duplicate dates")
+    lookup = {day: index for index, day in enumerate(source_days)}
+    condition_days = observation_days + np.timedelta64(offset, "D")
+    missing = [
+        day
+        for day in np.concatenate([observation_days, condition_days])
+        if day not in lookup
+    ]
+    if missing:
+        raise ValueError(f"v4 target lacks requested observation/condition dates: {missing}")
+    observation_index = np.asarray([lookup[day] for day in observation_days], np.int64)
+    condition_index = np.asarray([lookup[day] for day in condition_days], np.int64)
+    return observation_days, condition_days, observation_index, condition_index
+
+
+def canvas_grid(canvas_slice: tuple[slice, slice]) -> Grid:
+    rows, columns = canvas_slice
+    return Grid(
+        name="v4_bd_canvas",
+        lon_min=WIDE_CPC.lon_min + int(columns.start) * WIDE_CPC.res,
+        lat_min=WIDE_CPC.lat_min + int(rows.start) * WIDE_CPC.res,
+        nlon=int(columns.stop) - int(columns.start),
+        nlat=int(rows.stop) - int(rows.start),
+        res=WIDE_CPC.res,
+    )
+
+
+def legacy_bd_crop(canvas_slice: tuple[slice, slice]) -> tuple[int, int, int, int]:
+    """Return the exact legacy 128-cell BD/IMERG window inside the v4 canvas."""
+    wide_row, wide_column = crop_offsets(WIDE_CPC, BD)
+    rows, columns = canvas_slice
+    row0 = wide_row - int(rows.start)
+    column0 = wide_column - int(columns.start)
+    crop = (row0, row0 + BD.nlat, column0, column0 + BD.nlon)
+    if (
+        row0 < 0
+        or column0 < 0
+        or crop[1] > rows.stop - rows.start
+        or crop[3] > columns.stop - columns.start
+    ):
+        raise ValueError("the aligned v4 canvas does not contain the legacy BD IMERG grid")
+    return crop
+
+
+def load_imerg_subset(
+    path: str,
+    days: np.ndarray,
+    factor: int,
+) -> dict:
+    """Load an exact requested subset from a validated BMD-aligned S04 file."""
+    with xr.open_dataset(path) as dataset:
+        required = {"precipitation", "randomError", "precipitation_cnt"}
+        missing_variables = sorted(required - set(dataset.variables))
+        if missing_variables:
+            raise ValueError(f"{path} lacks IMERG variables {missing_variables}")
+        for name in ("precipitation", "randomError"):
+            units = str(dataset[name].attrs.get("units", ""))
+            if units.lower().replace(" ", "") not in MM_PER_DAY:
+                raise ValueError(f"{path} {name} units are {units!r}; expected mm/day")
+        end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
+        try:
+            end_hour = int(end_hour)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{path} does not declare a valid BMD accumulation end hour"
+            ) from exc
+        if end_hour != 3:
+            raise ValueError(f"{path} is not aligned to the BMD 03:00 UTC window")
+        source_frequency = str(dataset.attrs.get("source_frequency", ""))
+        if source_frequency != "half-hourly":
+            raise ValueError(
+                f"{path} was not prepared from half-hourly IMERG; the real-data "
+                "v4 test rejects daily day-shift approximations"
+            )
+        stored_factor = dataset.attrs.get("observation_factor")
+        if stored_factor is None:
+            raise ValueError(f"{path} does not declare its observation_factor")
+        if int(stored_factor) != factor:
+            raise ValueError(
+                f"{path} declares factor {stored_factor}, requested factor {factor}"
+            )
+        source_days = np.asarray(dataset.time.values).astype("datetime64[D]")
+        if len(np.unique(source_days)) != len(source_days):
+            raise ValueError("IMERG file contains duplicate dates")
+        lookup = {day: index for index, day in enumerate(source_days)}
+        missing_days = [day for day in days if day not in lookup]
+        if missing_days:
+            raise ValueError(f"IMERG file lacks requested days {missing_days}")
+        index = np.asarray([lookup[day] for day in days], int)
+        precipitation = np.asarray(
+            dataset["precipitation"]
+            .isel(time=index)
+            .transpose("time", "lat", "lon"),
+            np.float32,
+        )
+        random_error = np.asarray(
+            dataset["randomError"].isel(time=index).transpose("time", "lat", "lon"),
+            np.float32,
+        )
+        count = np.asarray(
+            dataset["precipitation_cnt"]
+            .isel(time=index)
+            .transpose("time", "lat", "lon")
+        )
+        lat = np.asarray(dataset.lat.values, np.float64)
+        lon = np.asarray(dataset.lon.values, np.float64)
+        required_corr = dataset.attrs.get("required_error_corr_cells")
+    if required_corr is None:
+        raise ValueError(f"{path} does not declare required_error_corr_cells")
+    if np.any(np.isfinite(precipitation) & (precipitation < 0.0)):
+        raise ValueError("IMERG precipitation contains finite negative values")
+    if np.any(np.isfinite(random_error) & (random_error < 0.0)):
+        raise ValueError("IMERG randomError contains finite negative values")
+    if BD.nlat % factor or BD.nlon % factor:
+        raise ValueError(f"IMERG factor {factor} does not tile legacy BD")
+    expected_lat = BD.lat.reshape(-1, factor).mean(axis=1)
+    expected_lon = BD.lon.reshape(-1, factor).mean(axis=1)
+    if precipitation.shape[1:] != (len(expected_lat), len(expected_lon)):
+        raise ValueError(
+            f"IMERG shape {precipitation.shape[1:]} does not match the exact "
+            f"legacy-BD factor-{factor} grid {(len(expected_lat), len(expected_lon))}"
+        )
+    if not np.allclose(lat, expected_lat, atol=1.0e-5) or not np.allclose(
+        lon, expected_lon, atol=1.0e-5
+    ):
+        raise ValueError("IMERG footprint centres do not nest on the legacy BD grid")
+    return {
+        "precipitation": precipitation,
+        "random_error": random_error,
+        "count": count,
+        "lat": lat.astype(np.float32),
+        "lon": lon.astype(np.float32),
+        "required_error_corr_cells": float(required_corr),
+    }
+
+
+def initial_noise(
+    members: int,
+    fine_shape: tuple[int, int],
+    factor: int,
+    seed: int,
+    device: torch.device,
+) -> HierarchicalState:
+    generator = torch.Generator(device=device)
+    generator.manual_seed(int(seed))
+    height, width = fine_shape
+    return HierarchicalState(
+        torch.randn(
+            members,
+            2,
+            height // factor,
+            width // factor,
+            generator=generator,
+            device=device,
+        ),
+        torch.randn(
+            members,
+            2,
+            height,
+            width,
+            generator=generator,
+            device=device,
+        ),
+    )
+
+
+def clone_state(state: HierarchicalState) -> HierarchicalState:
+    return HierarchicalState(state.coarse.clone(), state.allocation.clone())
+
+
+def append_array(group, name: str, values, dimensions: tuple[str, ...], chunks=None):
+    values = np.asarray(values)
+    array = group.create_dataset(
+        name,
+        data=values,
+        shape=values.shape,
+        chunks=chunks or values.shape,
+        fill_value=None,
+        overwrite=False,
+    )
+    array.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
+    return array
+
+
+def main() -> None:
+    args = parse_args()
+    if args.members < 2:
+        raise ValueError("--members must be at least 2")
+    if args.n_steps < 2:
+        raise ValueError("--n-steps must be at least 2")
+    if not 0.0 < args.withhold < 1.0:
+        raise ValueError("--withhold must lie in (0,1)")
+    if not 0.0 < args.min_coverage <= 1.0:
+        raise ValueError("--min-coverage must lie in (0,1]")
+    if args.holdout_neighbor_km <= 0.0:
+        raise ValueError("--holdout-neighbor-km must be positive")
+    if not 0.0 < args.holdout_max_gap_deg <= 360.0:
+        raise ValueError("--holdout-max-gap-deg must lie in (0,360]")
+    if args.gauge_sigma_mm <= 0.0 or args.imerg_sigma_floor_mm <= 0.0:
+        raise ValueError("observation-error scales must be positive")
+    if args.imerg_representativeness_mm < 0.0:
+        raise ValueError("--imerg-representativeness-mm cannot be negative")
+    if args.imerg_error_corr_cells < 0.0 or args.imerg_r_multiplier <= 0.0:
+        raise ValueError("IMERG correlation length must be non-negative and R multiplier positive")
+    if args.guidance_gamma < 0.0 or args.guidance_scale < 0.0:
+        raise ValueError("guidance gamma/scale cannot be negative")
+    if args.guidance_clip_norm <= 0.0 or args.huber_delta <= 0.0:
+        raise ValueError("guidance clip norm and Huber delta must be positive")
+    if args.imerg_factor != 8:
+        raise ValueError("the frozen pilot is IMERG S04 and requires --imerg-factor 8")
+
+    root = zarr.open_group(args.target_store, mode="r")
+    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    encoding = require_v4_contract(root, checkpoint)
+    if encoding.factor != 10:
+        raise ValueError(f"the frozen CPC-v4 test requires factor 10, got {encoding.factor}")
+    checkpoint_factor = int(checkpoint["config"]["data"].get("factor", 10))
+    if checkpoint_factor != encoding.factor:
+        raise ValueError("joint checkpoint model factor differs from its frozen encoding")
+    days, condition_days, target_index, condition_index = date_indices(
+        root, args.start, args.end, args.background_day_offset
+    )
+    canvas_slice, core_slice = aligned_production_canvas(
+        WIDE_CPC, BD_CPC, canvas=args.canvas, factor=encoding.factor
+    )
+    grid = canvas_grid(canvas_slice)
+    imerg_crop = legacy_bd_crop(canvas_slice)
+    imerg = load_imerg_subset(args.imerg, days, args.imerg_factor)
+    stored_corr = imerg["required_error_corr_cells"]
+    if stored_corr is not None and not np.isclose(
+        stored_corr, args.imerg_error_corr_cells, atol=1.0e-6
+    ):
+        raise ValueError(
+            f"IMERG file requires error_corr_cells={stored_corr}, but the pilot "
+            f"was configured with {args.imerg_error_corr_cells}"
+        )
+    if args.preflight_only:
+        print(
+            f"[preflight] matched {SUBGRID_SCHEMA} joint checkpoint; "
+            f"{days[0]}..{days[-1]}; IMERG crop={imerg_crop}",
+            flush=True,
+        )
+        return
+
+    rows, columns = canvas_slice
+    coarse_slice = (
+        slice(rows.start // encoding.factor, rows.stop // encoding.factor),
+        slice(columns.start // encoding.factor, columns.stop // encoding.factor),
+    )
+    valid = np.asarray(root["fine_valid"][rows, columns], bool)
+    coarse_valid = np.asarray(root["coarse_valid"][coarse_slice], bool)
+    area = np.asarray(root["cell_area"][rows, columns], np.float32)
+    lat = np.asarray(root["lat"][rows], np.float32)
+    lon = np.asarray(root["lon"][columns], np.float32)
+    # This bounded pilot is small. Explicit per-day reads avoid relying on
+    # Zarr-version-specific mixed fancy/slice indexing semantics.
+    chirps = np.stack(
+        [
+            np.asarray(root["fine_mm"][int(index), rows, columns], np.float32)
+            for index in target_index
+        ]
+    )
+    coarse_condition = np.stack(
+        [
+            np.asarray(
+                root["coarse_cond"][
+                    int(index), :, coarse_slice[0], coarse_slice[1]
+                ],
+                np.float32,
+            )
+            for index in condition_index
+        ]
+    )
+    fine_condition = np.stack(
+        [
+            np.asarray(
+                root["fine_cond"][int(index), :, rows, columns], np.float32
+            )
+            for index in condition_index
+        ]
+    )
+    channels = list(root.attrs["coarse_cond_channels"])
+    if "sqrt_cpc_precip" not in channels:
+        raise ValueError("v4 target lacks the frozen sqrt_cpc_precip condition channel")
+    cpc_channel = channels.index("sqrt_cpc_precip")
+    cpc_mean = float(root.attrs["coarse_cond_mean"][cpc_channel])
+    cpc_std = float(root.attrs["coarse_cond_std"][cpc_channel])
+    cpc_root = coarse_condition[:, cpc_channel] * cpc_std + cpc_mean
+    cpc_mm = np.clip(cpc_root, 0.0, None) ** 2
+
+    stations, gauge_mm = load_stations(
+        args.stations, days, grid=grid, min_coverage=args.min_coverage
+    )
+    if len(stations) < 5:
+        raise ValueError(f"only {len(stations)} stations survive coverage filtering")
+    n_withheld = max(1, min(len(stations) - 1, int(round(args.withhold * len(stations)))))
+    withheld = neighbored_holdout(
+        stations.lat,
+        stations.lon,
+        n_withheld,
+        radius_km=args.holdout_neighbor_km,
+        max_gap_deg=args.holdout_max_gap_deg,
+    )
+    assimilated = np.setdiff1d(np.arange(len(stations)), withheld)
+    all_stations = np.arange(len(stations))
+    nearest = nearest_neighbour_km(stations.lat, stations.lon)
+    bearing_gap = max_bearing_gap_deg(stations.lat, stations.lon)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda":
+        raise RuntimeError("the v4 joint diagnostic requires an allocated GPU")
+    model, training_config = build_joint_model(checkpoint, root, device)
+    sampling = training_config.get("sampling", {})
+    sampler_config = HierarchicalSamplerConfig(
+        n_steps=args.n_steps,
+        heun=bool(sampling.get("heun", True)),
+        n_corrections=0,
+        occurrence_temperature=float(sampling.get("occurrence_temperature", 1.0)),
+        soft_hard_median_sigma=float(sampling.get("soft_hard_median_sigma", 0.10)),
+        soft_hard_p95_sigma=float(sampling.get("soft_hard_p95_sigma", 0.50)),
+    )
+    guidance = GuidanceConfig(
+        gamma=args.guidance_gamma,
+        scale=args.guidance_scale,
+        t_start=0.10,
+        t_end=0.999,
+        clip_norm=args.guidance_clip_norm,
+        huber_delta=args.huber_delta,
+    )
+    fine_valid_t = torch.from_numpy(valid).to(device)
+    coarse_valid_t = torch.from_numpy(coarse_valid).to(device)
+    area_t = torch.from_numpy(area).to(device)
+
+    gauge_operators = {
+        "withheld": BilinearObsOperator(
+            grid, stations.lat[assimilated], stations.lon[assimilated]
+        ).to(device),
+        "all": BilinearObsOperator(grid, stations.lat, stations.lon).to(device),
+    }
+    satellite_operator = AreaWeightedBlockObsOperator(
+        args.imerg_factor,
+        area,
+        valid=valid,
+        min_valid_frac=encoding.valid_area_threshold,
+        crop=imerg_crop,
+    ).to(device)
+    footprint_keep = satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
+    expected_footprints = int(np.prod(imerg["precipitation"].shape[1:]))
+    if footprint_keep.shape != (expected_footprints,):
+        raise ValueError("IMERG operator and observation file have different footprints")
+    combined_operators = {
+        key: CompositeObsOperator([operator, satellite_operator]).to(device)
+        for key, operator in gauge_operators.items()
+    }
+    correlation_inflation = max(
+        1.0, 2.0 * np.pi * args.imerg_error_corr_cells**2
+    ) * args.imerg_r_multiplier
+
+    n_days = len(days)
+    fine_shape = tuple(valid.shape)
+    coarse_shape = tuple(coarse_valid.shape)
+    fields = {
+        name: np.full((n_days, args.members, *fine_shape), np.nan, np.float32)
+        for name in METHODS
+    }
+    coarse_states = {
+        name: np.empty((n_days, args.members, 2, *coarse_shape), np.float32)
+        for name in METHODS
+    }
+    allocation_states = {
+        name: np.empty((n_days, args.members, 2, *fine_shape), np.float32)
+        for name in METHODS
+    }
+    coarse_amounts = {
+        name: np.empty((n_days, args.members, *coarse_shape), np.float32)
+        for name in METHODS
+    }
+    diagnostics = {name: {"daily": []} for name in METHODS}
+
+    gauge_variance = {
+        "withheld": np.full(len(assimilated), args.gauge_sigma_mm**2, np.float32),
+        "all": np.full(len(all_stations), args.gauge_sigma_mm**2, np.float32),
+    }
+    gauge_indices = {"withheld": assimilated, "all": all_stations}
+
+    for day_position, day in enumerate(days):
+        coarse_cond = torch.from_numpy(coarse_condition[day_position : day_position + 1]).to(device)
+        fine_cond = torch.from_numpy(fine_condition[day_position : day_position + 1]).to(device)
+        day_seed = args.seed + int(target_index[day_position])
+        noise = initial_noise(
+            args.members, fine_shape, encoding.factor, day_seed, device
+        )
+
+        satellite_mm = imerg["precipitation"][day_position].reshape(-1).copy()
+        satellite_error = imerg["random_error"][day_position].reshape(-1)
+        satellite_variance = (
+            np.maximum(satellite_error, args.imerg_sigma_floor_mm) ** 2
+            + args.imerg_representativeness_mm**2
+        ).astype(np.float32)
+        satellite_variance *= np.float32(correlation_inflation)
+        satellite_valid = (
+            footprint_keep
+            & np.isfinite(satellite_mm)
+            & np.isfinite(satellite_variance)
+            & (imerg["count"][day_position].reshape(-1) > 0)
+        )
+        satellite_mm[~satellite_valid] = np.nan
+        satellite_variance[~satellite_valid] = 1.0
+        satellite_perturbed = perturb_observations(
+            satellite_mm,
+            satellite_variance,
+            args.members,
+            seed=day_seed + 2_000_000,
+            corr_blocks=[
+                (
+                    0,
+                    imerg["precipitation"].shape[1],
+                    imerg["precipitation"].shape[2],
+                    args.imerg_error_corr_cells,
+                )
+            ],
+        ).astype(np.float32)
+        satellite_perturbed[:, ~satellite_valid] = np.nan
+        satellite_y = torch.from_numpy(satellite_perturbed[:, None]).to(device)
+        satellite_r = torch.from_numpy(satellite_variance).to(device)
+
+        gauge_perturbed = {}
+        for key, index in gauge_indices.items():
+            observation = gauge_mm[day_position, index].astype(np.float32)
+            perturbed = perturb_observations(
+                observation,
+                gauge_variance[key],
+                args.members,
+                seed=day_seed + (1_000_000 if key == "withheld" else 3_000_000),
+            ).astype(np.float32)
+            perturbed[:, ~np.isfinite(observation)] = np.nan
+            gauge_perturbed[key] = perturbed
+
+        observations = {
+            "gauges_withheld": HierarchicalObservations(
+                gauge_operators["withheld"],
+                torch.from_numpy(gauge_perturbed["withheld"][:, None]).to(device),
+                torch.from_numpy(gauge_variance["withheld"]).to(device),
+                guidance,
+            ),
+            "imerg_only": HierarchicalObservations(
+                satellite_operator, satellite_y, satellite_r, guidance
+            ),
+            "simultaneous_withheld": HierarchicalObservations(
+                combined_operators["withheld"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["withheld"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["withheld"]).to(device), satellite_r]
+                ),
+                guidance,
+            ),
+            "gauges_all": HierarchicalObservations(
+                gauge_operators["all"],
+                torch.from_numpy(gauge_perturbed["all"][:, None]).to(device),
+                torch.from_numpy(gauge_variance["all"]).to(device),
+                guidance,
+            ),
+            "simultaneous_all": HierarchicalObservations(
+                combined_operators["all"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["all"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["all"]).to(device), satellite_r]
+                ),
+                guidance,
+            ),
+        }
+
+        for name in METHODS:
+            sample = sample_hierarchical(
+                model,
+                coarse_cond,
+                fine_cond,
+                (args.members, 2, *coarse_shape),
+                (args.members, 2, *fine_shape),
+                coarse_valid_t,
+                fine_valid_t,
+                area_t,
+                encoding,
+                observations=observations.get(name),
+                config=sampler_config,
+                initial_noise=clone_state(noise),
+            )
+            fields[name][day_position] = sample.precipitation[:, 0].cpu().numpy()
+            coarse_states[name][day_position] = sample.state.coarse.cpu().numpy()
+            allocation_states[name][day_position] = sample.state.allocation.cpu().numpy()
+            coarse_amounts[name][day_position] = decode_coarse_amount(
+                sample.state.coarse,
+                coarse_valid_t,
+                encoding,
+                temperature=sampler_config.occurrence_temperature,
+                hard=True,
+            )[:, 0].cpu().numpy()
+            diagnostics[name]["daily"].append(sample.diagnostics)
+        print(
+            f"[v4-test] {day}: {len(METHODS)} matched arms complete "
+            f"({args.members} members, {args.n_steps} Heun steps)",
+            flush=True,
+        )
+
+    method_specs = {
+        "background": {"observations": "none", "verification_role": "independent"},
+        "gauges_withheld": {
+            "observations": "BMD except supported holdout",
+            "verification_role": "independent withheld gauges",
+        },
+        "imerg_only": {
+            "observations": "IMERG S04",
+            "verification_role": "independent BMD gauges",
+        },
+        "simultaneous_withheld": {
+            "observations": "BMD except supported holdout + IMERG S04",
+            "verification_role": "independent withheld gauges",
+        },
+        "gauges_all": {
+            "observations": "all BMD",
+            "verification_role": "spatial maps only; gauge fit is in-sample",
+        },
+        "simultaneous_all": {
+            "observations": "all BMD + IMERG S04",
+            "verification_role": "spatial maps only; gauge fit is in-sample",
+        },
+    }
+    output = Path(args.out_store)
+    write_hierarchical_sample_zarr(
+        output,
+        fields=fields,
+        coarse_states=coarse_states,
+        allocation_states=allocation_states,
+        selected_times=days,
+        lat=lat,
+        lon=lon,
+        valid=valid,
+        coarse_valid=coarse_valid,
+        cell_area=area,
+        encoding=encoding,
+        diagnostics=diagnostics,
+        coarse_mm=coarse_amounts,
+        method_specs=method_specs,
+        target_crop=(rows.start, rows.stop, columns.start, columns.stop),
+    )
+    archive = zarr.open_group(str(output), mode="a")
+    archive.attrs.update(
+        diagnostic_complete=False,
+        diagnostic_kind="v4_short_da_pilot",
+        source_checkpoint=str(args.checkpoint),
+        source_target_store=str(args.target_store),
+        condition_day_offset=int(args.background_day_offset),
+        imerg_source=str(args.imerg),
+        imerg_canvas_crop=list(imerg_crop),
+        imerg_factor=int(args.imerg_factor),
+        imerg_error_corr_cells=float(args.imerg_error_corr_cells),
+        imerg_r_inflation=float(correlation_inflation),
+        holdout_design="neighbored_holdout; supported interpolation diagnostic",
+    )
+    append_array(
+        archive,
+        "context_chirps_mm",
+        chirps,
+        ("time", "lat", "lon"),
+        chunks=(1, *fine_shape),
+    )
+    append_array(
+        archive,
+        "context_cpc_mm",
+        cpc_mm.astype(np.float32),
+        ("time", "coarse_lat", "coarse_lon"),
+        chunks=(1, *coarse_shape),
+    )
+    append_array(
+        archive,
+        "context_imerg_mm",
+        imerg["precipitation"],
+        ("time", "imerg_lat", "imerg_lon"),
+        chunks=(1, *imerg["precipitation"].shape[1:]),
+    )
+    append_array(
+        archive,
+        "context_imerg_random_error_mm",
+        imerg["random_error"],
+        ("time", "imerg_lat", "imerg_lon"),
+        chunks=(1, *imerg["random_error"].shape[1:]),
+    )
+    append_array(archive, "imerg_lat", imerg["lat"], ("imerg_lat",))
+    append_array(archive, "imerg_lon", imerg["lon"], ("imerg_lon",))
+    append_array(archive, "station_lat", stations.lat.astype(np.float32), ("station",))
+    append_array(archive, "station_lon", stations.lon.astype(np.float32), ("station",))
+    append_array(
+        archive,
+        "station_value_mm",
+        gauge_mm.astype(np.float32),
+        ("time", "station"),
+    )
+    append_array(
+        archive,
+        "station_withheld",
+        np.isin(np.arange(len(stations)), withheld),
+        ("station",),
+    )
+    archive.attrs["station_ids"] = [str(value) for value in stations.ids]
+    archive.attrs["diagnostic_complete"] = True
+    zarr.consolidate_metadata(str(output))
+
+    report = {
+        "schema": "cpc_v3_subgrid_v4_da_pilot_v1",
+        "status": "diagnostic_only_not_configuration_selection",
+        "target_store": args.target_store,
+        "checkpoint": args.checkpoint,
+        "sample_store": args.out_store,
+        "dates": [str(days[0]), str(days[-1])],
+        "condition_dates": [str(condition_days[0]), str(condition_days[-1])],
+        "members": args.members,
+        "n_steps": args.n_steps,
+        "seed": args.seed,
+        "methods": list(METHODS),
+        "canvas": {
+            "grid": grid.name,
+            "shape": list(grid.shape),
+            "target_crop": [rows.start, rows.stop, columns.start, columns.stop],
+            "bd_cpc_core": [
+                core_slice[0].start,
+                core_slice[0].stop,
+                core_slice[1].start,
+                core_slice[1].stop,
+            ],
+            "imerg_crop": list(imerg_crop),
+        },
+        "stations": {
+            "total": len(stations),
+            "assimilated_fold": int(len(assimilated)),
+            "withheld": int(len(withheld)),
+            "withheld_ids": [str(stations.ids[index]) for index in withheld],
+            "withheld_nearest_neighbor_km": nearest[withheld].tolist(),
+            "withheld_max_bearing_gap_deg": bearing_gap[withheld].tolist(),
+            "withhold_fraction": args.withhold,
+            "minimum_coverage": args.min_coverage,
+            "holdout_neighbor_km": args.holdout_neighbor_km,
+            "holdout_max_gap_deg": args.holdout_max_gap_deg,
+        },
+        "observation_model": {
+            "gauge_sigma_mm": args.gauge_sigma_mm,
+            "imerg_factor": args.imerg_factor,
+            "imerg_sigma_floor_mm": args.imerg_sigma_floor_mm,
+            "imerg_representativeness_mm": args.imerg_representativeness_mm,
+            "imerg_error_corr_cells": args.imerg_error_corr_cells,
+            "imerg_r_multiplier": args.imerg_r_multiplier,
+            "imerg_r_inflation": correlation_inflation,
+            "guidance": asdict(guidance),
+            "warning": "raw IMERG V07B is not bias corrected in this pilot",
+        },
+    }
+    report_path = Path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(f"[done] wrote {output}")
+    print(f"[done] wrote {report_path}")
+
+
+if __name__ == "__main__":
+    main()

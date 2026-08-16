@@ -30,4 +30,6 @@ mkdir -p logs
     exit 1
 }
 
-"$PYTHON_BIN" -m pytest -q tests/test_v3_subgrid.py
+"$PYTHON_BIN" -m pytest -q \
+    tests/test_v3_subgrid.py \
+    tests/test_v4_da_test.py
