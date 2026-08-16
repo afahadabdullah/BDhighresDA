@@ -162,6 +162,43 @@ def _build_joint_model(checkpoint: dict, root, device: torch.device):
     return model.to(device).eval(), config
 
 
+def _legacy_cpc_context_contract(root) -> tuple[int, float, float]:
+    """Return the exact schema-v2 CPC channel and its frozen normalization.
+
+    The completed legacy target was built by script 56 with square-root CPC,
+    then standardized.  Accepting a generic ``cpc_precip`` alias would change
+    the inverse transform and make a diagnostic replay of a frozen checkpoint
+    scientifically ambiguous.
+    """
+    if "coarse_cond_channels" not in root.attrs:
+        raise ValueError("legacy target lacks coarse_cond_channels metadata")
+    names = list(root.attrs["coarse_cond_channels"])
+    expected = "sqrt_cpc_precip"
+    if expected not in names:
+        raise ValueError(
+            f"legacy schema-v2 target must contain {expected!r}; recorded channels="
+            f"{names}"
+        )
+    if names.count(expected) != 1:
+        raise ValueError(f"legacy target records {expected!r} more than once")
+    mean = np.asarray(root.attrs.get("coarse_cond_mean", []), np.float32)
+    std = np.asarray(root.attrs.get("coarse_cond_std", []), np.float32)
+    if mean.shape != (len(names),) or std.shape != (len(names),):
+        raise ValueError("legacy target CPC normalization metadata has the wrong shape")
+    index = names.index(expected)
+    if not np.isfinite(mean[index]) or not np.isfinite(std[index]) or std[index] <= 0.0:
+        raise ValueError("legacy target CPC normalization is non-finite or degenerate")
+    return index, float(mean[index]), float(std[index])
+
+
+def _decode_legacy_cpc_context(
+    normalized: np.ndarray, mean: float, std: float
+) -> np.ndarray:
+    """Undo standardization and the frozen square-root CPC transform."""
+    root = np.asarray(normalized, np.float32) * np.float32(std) + np.float32(mean)
+    return np.square(np.clip(root, 0.0, None)).astype(np.float32)
+
+
 def _date_indices(root, start: str, end: str, offset: int):
     observation_days = np.arange(
         np.datetime64(start, "D"), np.datetime64(end, "D") + np.timedelta64(1, "D")
@@ -502,10 +539,11 @@ def main() -> None:
     encoding = _require_legacy_contract(root, checkpoint)
     if encoding.factor != 10:
         raise ValueError(f"legacy diagnostic expects factor 10, got {encoding.factor}")
+    cpc_channel, cpc_mean, cpc_std = _legacy_cpc_context_contract(root)
     if args.preflight_only:
         print(
             f"[preflight] matched {LEGACY_SCHEMA} joint target/checkpoint; "
-            "original raw-log-weight decoder selected",
+            "original raw-log-weight decoder and sqrt-CPC condition selected",
             flush=True,
         )
         return
@@ -597,13 +635,6 @@ def main() -> None:
     diagnostics = {name: {"daily": []} for name in methods}
     cpc = np.empty((len(days), *coarse_shape), np.float32)
 
-    coarse_names = list(root.attrs["coarse_cond_channels"])
-    if "cpc_precip" not in coarse_names:
-        raise ValueError("legacy target has no cpc_precip conditioning channel")
-    cpc_channel = coarse_names.index("cpc_precip")
-    coarse_mean = np.asarray(root.attrs["coarse_cond_mean"], np.float32)
-    coarse_std = np.asarray(root.attrs["coarse_cond_std"], np.float32)
-
     for position, (day, source_index) in enumerate(zip(days, condition_index)):
         coarse_cond_np = np.asarray(
             root["coarse_cond"][int(source_index), :, coarse_slice[0], coarse_slice[1]],
@@ -612,9 +643,8 @@ def main() -> None:
         fine_cond_np = np.asarray(
             root["fine_cond"][int(source_index), :, rows, columns], np.float32
         )
-        cpc[position] = (
-            coarse_cond_np[cpc_channel] * coarse_std[cpc_channel]
-            + coarse_mean[cpc_channel]
+        cpc[position] = _decode_legacy_cpc_context(
+            coarse_cond_np[cpc_channel], cpc_mean, cpc_std
         )
         coarse_cond = torch.from_numpy(coarse_cond_np[None]).to(device)
         fine_cond = torch.from_numpy(fine_cond_np[None]).to(device)

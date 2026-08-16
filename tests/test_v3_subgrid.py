@@ -681,6 +681,43 @@ def test_legacy_v2_decoder_preserves_its_raw_log_clip_contract():
     assert recovered.item() == pytest.approx(1.0, abs=1.0e-6)
 
 
+def test_legacy_diagnostic_replays_the_frozen_sqrt_cpc_channel():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts/59_legacy_v3_subgrid_diagnostic.py"
+    spec = importlib.util.spec_from_file_location("legacy_v3_diagnostic", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    root = _MemoryStore(
+        {},
+        attrs={
+            "coarse_cond_channels": ["sqrt_cpc_precip", "cpc_valid"],
+            "coarse_cond_mean": [1.0, 0.0],
+            "coarse_cond_std": [2.0, 1.0],
+        },
+    )
+    index, mean, std = module._legacy_cpc_context_contract(root)
+    assert (index, mean, std) == (0, 1.0, 2.0)
+    decoded = module._decode_legacy_cpc_context(
+        np.asarray([[0.5, 1.0, -1.0]], np.float32), mean, std
+    )
+    assert np.array_equal(decoded, np.asarray([[4.0, 9.0, 0.0]], np.float32))
+
+    wrong = _MemoryStore(
+        {},
+        attrs={
+            "coarse_cond_channels": ["cpc_precip", "cpc_valid"],
+            "coarse_cond_mean": [1.0, 0.0],
+            "coarse_cond_std": [2.0, 1.0],
+        },
+    )
+    with pytest.raises(ValueError, match="sqrt_cpc_precip"):
+        module._legacy_cpc_context_contract(wrong)
+
+
 def test_dataset_rejects_missing_frozen_encoding_metadata():
     store = _MemoryStore({}, attrs={"schema": SUBGRID_SCHEMA})
     with pytest.raises(ValueError, match="lacks frozen subgrid_encoding"):
