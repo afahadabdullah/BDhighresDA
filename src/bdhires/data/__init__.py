@@ -2,6 +2,8 @@ from .stations import load_stations, pseudo_stations, station_summary  # noqa: F
 from .zarr_dataset import DatasetConfig, PrecipDataset, year_split  # noqa: F401
 from .subgrid_dataset import (  # noqa: F401
     SUBGRID_SCHEMA,
+    LEGACY_V2_SUBGRID_SCHEMA,
+    LegacyV2SubgridEncoding,
     ReconstructionDiagnostics,
     SubgridDataset,
     SubgridDatasetConfig,

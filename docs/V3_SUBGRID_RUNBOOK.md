@@ -130,6 +130,9 @@ physical ensembles and latent states, and separate assimilated/withheld gauge
 scores under `data/processed/v3_legacy_diagnostic/may2022_5day`. The archive is
 marked `legacy_pre_v4` and cannot be consumed by the corrected v4 evaluator.
 The physical-space gauge settings are diagnostic, not selected V3 DA settings.
+The completed legacy run uses schema `cpc_v3_subgrid_v2`; this diagnostic
+replays its original raw-log-weight clip exactly rather than reinterpreting it
+with the corrected v4 standardized-latent decoder.
 
 ## 4. Preflight the scientific invariants
 

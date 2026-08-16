@@ -68,6 +68,12 @@ print("PyTorch:", torch.__version__)
 print("GPU:", torch.cuda.get_device_name(0))
 PY
 
+"$PYTHON_BIN" -u scripts/59_legacy_v3_subgrid_diagnostic.py \
+    --target-store "$TARGET" \
+    --checkpoint "$CHECKPOINT" \
+    --stations "$DAILY" \
+    --preflight-only
+
 if [[ ! -s "$DAILY" ]]; then
     "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
         --data-dir "$DATA_DIR" \

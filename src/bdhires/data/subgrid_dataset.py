@@ -19,6 +19,7 @@ from ..grids import Grid, crop_offsets
 
 
 SUBGRID_SCHEMA = "cpc_v3_subgrid_v4"
+LEGACY_V2_SUBGRID_SCHEMA = "cpc_v3_subgrid_v2"
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,69 @@ class SubgridEncoding:
                 "rather than reinterpreted with current defaults"
             )
         return cls(**values)
+
+
+@dataclass(frozen=True)
+class LegacyV2SubgridEncoding:
+    """Exact decoder metadata for completed schema-v2 checkpoints.
+
+    This type is deliberately separate from :class:`SubgridEncoding`.  V2
+    clips the *unnormalized* log weight, while v4 clips the standardized
+    allocation latent.  Treating the renamed field as a current encoding would
+    silently change both the sampled field and its observation gradient.
+    """
+
+    factor: int = 10
+    wet_threshold_mm: float = 0.1
+    dequant_epsilon: float = 0.02
+    dequant_noise: float = 0.05
+    dequant_seed: int = 314159
+    intensity_floor: float = 1.0e-5
+    denominator_floor: float = 1.0e-8
+    valid_area_threshold: float = 0.50
+    amount_sqrt_mean: float = 0.0
+    amount_sqrt_std: float = 1.0
+    intensity_log_mean: float = 0.0
+    intensity_log_std: float = 1.0
+    intensity_log_clip: float = 12.0
+
+    def validate(self) -> None:
+        if self.factor <= 0:
+            raise ValueError("factor must be positive")
+        if not 0.0 < self.dequant_epsilon < 0.5:
+            raise ValueError("dequant_epsilon must lie in (0, 0.5)")
+        if self.dequant_noise < 0.0:
+            raise ValueError("dequant_noise must be non-negative")
+        if self.intensity_floor <= 0.0 or self.denominator_floor <= 0.0:
+            raise ValueError("intensity and denominator floors must be positive")
+        if not 0.0 <= self.valid_area_threshold <= 1.0:
+            raise ValueError("valid_area_threshold must lie in [0, 1]")
+        if self.amount_sqrt_std <= 0.0:
+            raise ValueError("amount_sqrt_std must be positive")
+        if self.intensity_log_std <= 0.0:
+            raise ValueError("intensity_log_std must be positive")
+        if self.intensity_log_clip <= 0.0:
+            raise ValueError("intensity_log_clip must be positive")
+
+    @classmethod
+    def from_mapping(cls, values) -> "LegacyV2SubgridEncoding":
+        values = dict(values or {})
+        known = {field.name for field in cls.__dataclass_fields__.values()}
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise ValueError(f"unknown legacy-v2 subgrid encoding fields {unknown}")
+        missing = sorted(known - set(values))
+        if missing:
+            raise ValueError(
+                "legacy-v2 subgrid encoding metadata is incomplete; missing "
+                f"{missing}"
+            )
+        encoding = cls(**values)
+        encoding.validate()
+        return encoding
+
+
+DecoderEncoding = SubgridEncoding | LegacyV2SubgridEncoding
 
 
 @dataclass
@@ -447,7 +511,7 @@ def hard_forward_soft_backward(
 def decode_coarse_amount(
     coarse_state: torch.Tensor,
     coarse_valid: torch.Tensor,
-    encoding: SubgridEncoding,
+    encoding: DecoderEncoding,
     *,
     temperature: float = 1.0,
     hard: bool = True,
@@ -475,7 +539,7 @@ def reconstruct_from_amount(
     allocation_state: torch.Tensor,
     valid: torch.Tensor,
     area: torch.Tensor,
-    encoding: SubgridEncoding,
+    encoding: DecoderEncoding,
     *,
     temperature: float = 1.0,
     hard: bool = True,
@@ -532,36 +596,54 @@ def reconstruct_from_amount(
         wet_st = (wet_hard - wet_soft).detach() + wet_soft
 
     occurrence = wet_st if hard else wet_soft
-    # The clamp is a hard guard: any cell beyond it has an exactly zero
-    # likelihood gradient during DA and can no longer be corrected by an
-    # observation.  That has to be observable, not silent.
-    clipped_intensity = (
-        allocation_state[:, :1].detach().abs() > float(encoding.intensity_z_clip)
-    ) & valid_b
-    standardized_intensity = allocation_state[:, :1].clamp(
-        min=-float(encoding.intensity_z_clip),
-        max=float(encoding.intensity_z_clip),
-    )
-    log_weight = standardized_intensity * float(
-        encoding.intensity_log_std
-    ) + float(encoding.intensity_log_mean)
-    # Allocation is invariant to a common log-weight shift within a block.
-    # Subtract the candidate-cell block maximum before exp, so even an unusual
-    # fitted scale cannot overflow.  For the hard decoder, dry cells must not
-    # set that maximum because their weights are gated to zero.
-    log_blocks = _blockify(log_weight, encoding.factor)
-    candidate_blocks = _blockify(
-        (occurrence.detach() > 0.0) & valid_b, encoding.factor
-    )
-    block_max = torch.where(
-        candidate_blocks,
-        log_blocks,
-        torch.full_like(log_blocks, -torch.inf),
-    ).amax(dim=(-1, -2), keepdim=True)
-    block_max = torch.where(
-        torch.isfinite(block_max), block_max, torch.zeros_like(block_max)
-    )
-    positive_weight = _unblockify(torch.exp((log_blocks - block_max).clamp_max(0.0)))
+    if isinstance(encoding, LegacyV2SubgridEncoding):
+        # Reproduce the schema-v2 decoder literally.  Do not apply the v4
+        # standardized clip or block-maximum stabilization: either would make
+        # this old checkpoint a different model during both sampling and DA.
+        raw_log_weight = allocation_state[:, :1] * float(
+            encoding.intensity_log_std
+        ) + float(encoding.intensity_log_mean)
+        clipped_intensity = (
+            raw_log_weight.detach().abs() > float(encoding.intensity_log_clip)
+        ) & valid_b
+        log_weight = raw_log_weight.clamp(
+            min=-float(encoding.intensity_log_clip),
+            max=float(encoding.intensity_log_clip),
+        )
+        positive_weight = torch.exp(log_weight)
+    else:
+        # The clamp is a hard guard: any cell beyond it has an exactly zero
+        # likelihood gradient during DA and can no longer be corrected by an
+        # observation.  That has to be observable, not silent.
+        clipped_intensity = (
+            allocation_state[:, :1].detach().abs() > float(encoding.intensity_z_clip)
+        ) & valid_b
+        standardized_intensity = allocation_state[:, :1].clamp(
+            min=-float(encoding.intensity_z_clip),
+            max=float(encoding.intensity_z_clip),
+        )
+        log_weight = standardized_intensity * float(
+            encoding.intensity_log_std
+        ) + float(encoding.intensity_log_mean)
+        # Allocation is invariant to a common log-weight shift within a block.
+        # Subtract the candidate-cell block maximum before exp, so even an unusual
+        # fitted scale cannot overflow.  For the hard decoder, dry cells must not
+        # set that maximum because their weights are gated to zero.
+        log_blocks = _blockify(log_weight, encoding.factor)
+        candidate_blocks = _blockify(
+            (occurrence.detach() > 0.0) & valid_b, encoding.factor
+        )
+        block_max = torch.where(
+            candidate_blocks,
+            log_blocks,
+            torch.full_like(log_blocks, -torch.inf),
+        ).amax(dim=(-1, -2), keepdim=True)
+        block_max = torch.where(
+            torch.isfinite(block_max), block_max, torch.zeros_like(block_max)
+        )
+        positive_weight = _unblockify(
+            torch.exp((log_blocks - block_max).clamp_max(0.0))
+        )
     weights = occurrence * positive_weight
     weights = torch.where(valid_b, weights, torch.zeros_like(weights))
     ab = _blockify(area_b, encoding.factor)
@@ -604,10 +686,9 @@ def reconstruct_from_amount(
         float(selected_denominator.amin().cpu())
         if selected_denominator.numel() else 0.0
     )
-    # Subtracting the block maximum before exp forces at least one candidate
-    # weight to 1, so the raw denominator is now bounded below by a cell area
-    # and ``denominator_floor`` can never bind.  Report the scale-free ratio,
-    # which still detects a block collapsing onto a single cell.
+    # In v4, subtracting the block maximum before exp forces at least one
+    # candidate weight to 1.  The same scale-free ratio remains informative
+    # for the exactly replayed v2 decoder.
     denominator_fraction = denominator / valid_area.clamp_min(
         float(encoding.denominator_floor)
     )
@@ -638,7 +719,7 @@ def decode_and_reconstruct(
     coarse_valid: torch.Tensor,
     fine_valid: torch.Tensor,
     area: torch.Tensor,
-    encoding: SubgridEncoding,
+    encoding: DecoderEncoding,
     *,
     temperature: float = 1.0,
     hard: bool = True,
@@ -820,7 +901,7 @@ class SubgridDataset(Dataset):
         return item
 
 
-def encoding_metadata(encoding: SubgridEncoding) -> dict:
+def encoding_metadata(encoding: DecoderEncoding) -> dict:
     """JSON/Zarr-safe representation used by preparation and checkpoints."""
     encoding.validate()
     return asdict(encoding)

@@ -2,7 +2,7 @@
 """Five-day visual diagnostic for the completed, pre-v4 V3-SG checkpoint.
 
 This script exists only to inspect an already completed legacy experiment.  It
-requires the old ``cpc_v3_subgrid_v3`` target/checkpoint schema, writes into a
+requires the old ``cpc_v3_subgrid_v2`` target/checkpoint schema, writes into a
 clearly labelled legacy directory, and is intentionally rejected by the v4
 evaluation contract.  It is not a way to promote the old model to a corrected
 result.
@@ -43,7 +43,8 @@ from bdhires.da import (  # noqa: E402
     sample_hierarchical,
 )
 from bdhires.data import (  # noqa: E402
-    SubgridEncoding,
+    LEGACY_V2_SUBGRID_SCHEMA,
+    LegacyV2SubgridEncoding,
     aligned_production_canvas,
     area_weighted_block_mean,
     encoding_metadata,
@@ -60,7 +61,7 @@ from bdhires.models import (  # noqa: E402
 from bdhires.zarr_output import write_hierarchical_sample_zarr  # noqa: E402
 
 
-LEGACY_SCHEMA = "cpc_v3_subgrid_v3"
+LEGACY_SCHEMA = LEGACY_V2_SUBGRID_SCHEMA
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,15 +98,20 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         default="data/processed/v3_legacy_diagnostic/may2022_5day",
     )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validate the legacy target/checkpoint contract, then exit",
+    )
     return parser.parse_args()
 
 
-def _require_legacy_contract(root, checkpoint: dict) -> SubgridEncoding:
+def _require_legacy_contract(root, checkpoint: dict) -> LegacyV2SubgridEncoding:
     target_schema = root.attrs.get("schema")
     checkpoint_schema = checkpoint.get("schema")
     if target_schema != LEGACY_SCHEMA or checkpoint_schema != LEGACY_SCHEMA:
         raise ValueError(
-            "this diagnostic accepts only the completed legacy v3 target and "
+            "this diagnostic accepts only the completed legacy schema-v2 target and "
             f"checkpoint; got target={target_schema!r}, checkpoint={checkpoint_schema!r}"
         )
     if not root.attrs.get("complete", False):
@@ -114,8 +120,12 @@ def _require_legacy_contract(root, checkpoint: dict) -> SubgridEncoding:
         raise ValueError("legacy checkpoint must be a completed joint-stage checkpoint")
     if "subgrid_encoding" not in root.attrs or "subgrid_encoding" not in checkpoint:
         raise ValueError("legacy target/checkpoint lacks frozen subgrid encoding metadata")
-    target_encoding = SubgridEncoding.from_mapping(root.attrs["subgrid_encoding"])
-    checkpoint_encoding = SubgridEncoding.from_mapping(checkpoint["subgrid_encoding"])
+    target_encoding = LegacyV2SubgridEncoding.from_mapping(
+        root.attrs["subgrid_encoding"]
+    )
+    checkpoint_encoding = LegacyV2SubgridEncoding.from_mapping(
+        checkpoint["subgrid_encoding"]
+    )
     target_encoding.validate()
     if encoding_metadata(target_encoding) != encoding_metadata(checkpoint_encoding):
         raise ValueError("legacy target and checkpoint use different subgrid encodings")
@@ -487,6 +497,19 @@ def main() -> None:
     if args.gauge_sigma_mm <= 0.0:
         raise ValueError("--gauge-sigma-mm must be positive")
 
+    root = zarr.open_group(args.target_store, mode="r")
+    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    encoding = _require_legacy_contract(root, checkpoint)
+    if encoding.factor != 10:
+        raise ValueError(f"legacy diagnostic expects factor 10, got {encoding.factor}")
+    if args.preflight_only:
+        print(
+            f"[preflight] matched {LEGACY_SCHEMA} joint target/checkpoint; "
+            "original raw-log-weight decoder selected",
+            flush=True,
+        )
+        return
+
     output_dir = Path(args.out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / "legacy_v3_may2022_5day.zarr"
@@ -499,12 +522,6 @@ def main() -> None:
                 f"refusing to overwrite existing diagnostic output {path}; "
                 "choose a different --out-dir"
             )
-
-    root = zarr.open_group(args.target_store, mode="r")
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    encoding = _require_legacy_contract(root, checkpoint)
-    if encoding.factor != 10:
-        raise ValueError(f"legacy diagnostic expects factor 10, got {encoding.factor}")
 
     days, condition_days, target_index, condition_index = _date_indices(
         root, args.start, args.end, args.background_day_offset
@@ -688,6 +705,7 @@ def main() -> None:
         diagnostics=diagnostics,
         method_specs=method_specs,
         target_crop=(rows.start, rows.stop, columns.start, columns.stop),
+        allow_legacy_v2_encoding=True,
     )
     archive = zarr.open_group(archive_path, mode="a")
     archive.attrs.update(

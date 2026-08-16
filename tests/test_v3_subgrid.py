@@ -18,6 +18,8 @@ from bdhires.da import (  # noqa: E402
 )
 from bdhires.data import (  # noqa: E402
     SUBGRID_SCHEMA,
+    LEGACY_V2_SUBGRID_SCHEMA,
+    LegacyV2SubgridEncoding,
     SubgridEncoding,
     SubgridDataset,
     SubgridDatasetConfig,
@@ -597,6 +599,42 @@ def test_hierarchical_archive_redecodes_serialized_states(tmp_path):
     assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
     assert np.array_equal(archive["background"][:], fields["background"])
 
+    legacy_encoding = LegacyV2SubgridEncoding()
+    legacy_output = tmp_path / "legacy-v2-samples.zarr"
+    with pytest.raises(ValueError, match="explicitly labelled diagnostic"):
+        write_hierarchical_sample_zarr(
+            legacy_output,
+            fields=fields,
+            coarse_states=coarse_states,
+            allocation_states=allocation_states,
+            selected_times=np.asarray(["2021-05-01", "2021-05-02"]),
+            lat=np.arange(10, dtype=np.float32),
+            lon=np.arange(10, dtype=np.float32),
+            valid=np.ones((10, 10), bool),
+            coarse_valid=np.ones((1, 1), bool),
+            cell_area=np.ones((10, 10), np.float32),
+            encoding=legacy_encoding,
+            diagnostics=diagnostics,
+        )
+    write_hierarchical_sample_zarr(
+        legacy_output,
+        fields=fields,
+        coarse_states=coarse_states,
+        allocation_states=allocation_states,
+        selected_times=np.asarray(["2021-05-01", "2021-05-02"]),
+        lat=np.arange(10, dtype=np.float32),
+        lon=np.arange(10, dtype=np.float32),
+        valid=np.ones((10, 10), bool),
+        coarse_valid=np.ones((1, 1), bool),
+        cell_area=np.ones((10, 10), np.float32),
+        encoding=legacy_encoding,
+        diagnostics=diagnostics,
+        allow_legacy_v2_encoding=True,
+    )
+    legacy_archive = zarr.open_group(str(legacy_output), mode="r")
+    assert legacy_archive.attrs["legacy_v2_decoder"] is True
+    assert legacy_archive.attrs["subgrid_encoding"]["intensity_log_clip"] == 12.0
+
 
 def test_encoding_rejects_renamed_or_unknown_frozen_fields():
     # A v2 archive carries ``intensity_log_clip``.  Silently dropping it would
@@ -605,6 +643,42 @@ def test_encoding_rejects_renamed_or_unknown_frozen_fields():
     with pytest.raises(ValueError, match="unknown subgrid encoding fields"):
         SubgridEncoding.from_mapping({"factor": 10, "intensity_log_clip": 12.0})
     assert SubgridEncoding.from_mapping({}).factor == 10
+
+
+def test_legacy_v2_decoder_preserves_its_raw_log_clip_contract():
+    values = {
+        "factor": 10,
+        "wet_threshold_mm": 0.1,
+        "dequant_epsilon": 0.02,
+        "dequant_noise": 0.05,
+        "dequant_seed": 314159,
+        "intensity_floor": 1.0e-5,
+        "denominator_floor": 1.0e-8,
+        "valid_area_threshold": 0.5,
+        "amount_sqrt_mean": 0.0,
+        "amount_sqrt_std": 1.0,
+        "intensity_log_mean": 5.0,
+        "intensity_log_std": 2.0,
+        "intensity_log_clip": 6.0,
+    }
+    assert LEGACY_V2_SUBGRID_SCHEMA == "cpc_v3_subgrid_v2"
+    encoding = LegacyV2SubgridEncoding.from_mapping(values)
+    allocation = torch.zeros(1, 2, 10, 10)
+    allocation[:, 1] = 4.0
+    allocation[:, 0, 0, 0] = 10.0
+    field, diagnostics = reconstruct_from_amount(
+        torch.ones(1, 1, 1, 1), allocation,
+        torch.ones(10, 10, dtype=torch.bool), torch.ones(10, 10),
+        encoding, return_diagnostics=True,
+    )
+    # V2 computes clamp(z * std + mean, -clip, clip), giving exp(6)/exp(5).
+    assert (field[0, 0, 0, 0] / field[0, 0, 0, 1]).item() == pytest.approx(np.e)
+    assert diagnostics.clipped_intensity_fraction == pytest.approx(0.01)
+    recovered, _, _ = area_weighted_block_mean(
+        field, torch.ones(10, 10), torch.ones(10, 10, dtype=torch.bool),
+        factor=10, valid_area_threshold=0.0,
+    )
+    assert recovered.item() == pytest.approx(1.0, abs=1.0e-6)
 
 
 def test_dataset_rejects_missing_frozen_encoding_metadata():

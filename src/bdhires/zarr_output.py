@@ -345,6 +345,7 @@ def write_hierarchical_sample_zarr(
     method_specs: dict[str, dict] | None = None,
     target_crop: tuple[int, int, int, int] | None = None,
     serialization_tolerance_mm_day: float = 1.0e-4,
+    allow_legacy_v2_encoding: bool = False,
 ) -> None:
     """Atomically write V3 physical samples and both latent states.
 
@@ -353,18 +354,27 @@ def write_hierarchical_sample_zarr(
     and its serialized latent states are hard decoded independently. Only a
     physical field matching that saved-state decode can be marked complete,
     preventing a stale or soft field from being presented as the analysis used
-    by the likelihood.
+    by the likelihood. The explicit legacy-v2 opt-in is reserved for labelled
+    diagnostic archives, which the current evaluator still rejects.
     """
     import zarr
     import torch
 
     from .data.subgrid_dataset import (
+        LegacyV2SubgridEncoding,
         SubgridEncoding,
         decode_and_reconstruct,
         encoding_metadata,
     )
 
-    if isinstance(encoding, SubgridEncoding):
+    if isinstance(encoding, LegacyV2SubgridEncoding):
+        if not allow_legacy_v2_encoding:
+            raise ValueError(
+                "legacy-v2 encoding is permitted only for an explicitly labelled "
+                "diagnostic archive"
+            )
+        frozen_encoding = encoding
+    elif isinstance(encoding, SubgridEncoding):
         frozen_encoding = encoding
     else:
         frozen_encoding = SubgridEncoding.from_mapping(encoding)
@@ -459,6 +469,8 @@ def write_hierarchical_sample_zarr(
         sampler_diagnostics=diagnostics,
         subgrid_encoding=encoding_metadata(frozen_encoding),
     )
+    if isinstance(frozen_encoding, LegacyV2SubgridEncoding):
+        root.attrs["legacy_v2_decoder"] = True
     if target_crop is not None:
         if len(target_crop) != 4:
             raise ValueError("target_crop must be (row_start,row_stop,col_start,col_stop)")
