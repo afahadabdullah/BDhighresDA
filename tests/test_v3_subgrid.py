@@ -988,3 +988,69 @@ def test_legacy_v2_replay_keeps_the_block_constant_base():
     assert "smooth_base_iterations" not in {
         field.name for field in LegacyV2SubgridEncoding.__dataclass_fields__.values()
     }
+
+
+def test_every_reader_resolves_the_archive_schema_the_same_way():
+    """Sampler and evaluator must never disagree about what they accept.
+
+    A schema rule written out separately in each script drifts: script 60 was
+    taught to read a legacy v4 archive while scripts 58 and 61 still demanded
+    v5, so sampling succeeded and evaluation died on its own output.  Worse,
+    both evaluators then rebuilt the encoding with a bare ``from_mapping``,
+    which hands a v4 archive the current smooth-base default and decodes it
+    differently from the sampler that wrote it.
+    """
+    from bdhires.data import LEGACY_V4_SUBGRID_SCHEMA, resolve_archive_encoding
+
+    current, schema = resolve_archive_encoding(
+        {"schema": SUBGRID_SCHEMA, "subgrid_encoding": {"factor": 10}}
+    )
+    assert schema == SUBGRID_SCHEMA
+    assert current.smooth_base_iterations == 2
+
+    legacy, schema = resolve_archive_encoding(
+        {"schema": LEGACY_V4_SUBGRID_SCHEMA, "subgrid_encoding": {"factor": 10}}
+    )
+    assert schema == LEGACY_V4_SUBGRID_SCHEMA
+    assert legacy.smooth_base_iterations == 0
+
+    # The pin wins even if the archive carries a conflicting value.
+    pinned, _ = resolve_archive_encoding(
+        {
+            "schema": LEGACY_V4_SUBGRID_SCHEMA,
+            "subgrid_encoding": {"factor": 10, "smooth_base_iterations": 2},
+        }
+    )
+    assert pinned.smooth_base_iterations == 0
+
+    # Training never fits a new model on a superseded target.
+    with pytest.raises(ValueError, match="is not one of"):
+        resolve_archive_encoding(
+            {"schema": LEGACY_V4_SUBGRID_SCHEMA, "subgrid_encoding": {}},
+            allow_legacy_v4=False,
+        )
+    with pytest.raises(ValueError, match="is not one of"):
+        resolve_archive_encoding(
+            {"schema": LEGACY_V2_SUBGRID_SCHEMA, "subgrid_encoding": {}}
+        )
+
+
+def test_pipeline_scripts_share_one_schema_gate():
+    """No script may re-implement the archive schema check locally."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for name in (
+        "58_evaluate_subgrid_prior.py",
+        "60_v4_subgrid_da_test.py",
+        "61_evaluate_v4_subgrid_da_test.py",
+    ):
+        source = (root / "scripts" / name).read_text()
+        assert "resolve_archive_encoding(" in source, name
+        assert not re.search(
+            r'attrs\.get\("schema"\)\s*!=\s*SUBGRID_SCHEMA', source
+        ), f"{name} re-implements the schema gate"
+        assert not re.search(
+            r'SubgridEncoding\.from_mapping\(\s*target\.attrs', source
+        ), f"{name} rebuilds the encoding outside the resolver"

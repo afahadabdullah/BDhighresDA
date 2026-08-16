@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.da import AreaWeightedBlockObsOperator, BilinearObsOperator  # noqa: E402
 from bdhires.data import (  # noqa: E402
-    SUBGRID_SCHEMA,
+    resolve_archive_encoding,
     SubgridEncoding,
     area_weighted_block_mean,
     encoding_metadata,
@@ -619,8 +619,9 @@ def main() -> None:
     args = parse_args()
     target = zarr.open_group(args.target_store, mode="r")
     samples = zarr.open_group(args.sample_store, mode="r")
-    if target.attrs.get("schema") != SUBGRID_SCHEMA or not target.attrs.get("complete", False):
-        raise ValueError(f"target must be a completed {SUBGRID_SCHEMA} archive")
+    if not target.attrs.get("complete", False):
+        raise ValueError("target archive is not marked complete")
+    _resolved_encoding, target_schema = resolve_archive_encoding(target.attrs)
     if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v3":
         raise ValueError("sample store was not written by the audited hierarchical writer")
     if not samples.attrs.get("complete", False) or not samples.attrs.get(
@@ -632,10 +633,12 @@ def main() -> None:
     for name in set(POINT_METHODS + MAP_METHODS):
         if name not in samples:
             raise ValueError(f"sample store is missing required method {name}")
-    encoding = SubgridEncoding.from_mapping(target.attrs["subgrid_encoding"])
-    sample_encoding = SubgridEncoding.from_mapping(samples.attrs["subgrid_encoding"])
-    encoding.validate()
-    sample_encoding.validate()
+    # Resolved once against the target's schema, so a legacy v4 archive keeps
+    # the block-constant base the sampler actually used.
+    encoding = _resolved_encoding
+    sample_encoding, _ = resolve_archive_encoding(
+        {"schema": target_schema, "subgrid_encoding": samples.attrs["subgrid_encoding"]}
+    )
     if encoding_metadata(encoding) != encoding_metadata(sample_encoding):
         raise ValueError("target and samples use different v4 encodings")
 

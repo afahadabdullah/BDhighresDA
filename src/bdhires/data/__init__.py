@@ -22,6 +22,7 @@ from .subgrid_dataset import (  # noqa: F401
     encoding_metadata,
     hard_forward_soft_backward,
     reconstruct_from_amount,
+    resolve_archive_encoding,
     validate_aligned_crop,
     validate_cpc_alignment,
 )

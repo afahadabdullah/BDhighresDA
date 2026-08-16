@@ -54,8 +54,7 @@ from bdhires.da import (  # noqa: E402
     sample_hierarchical,
 )
 from bdhires.data import (
-    LEGACY_V4_SUBGRID_SCHEMA,  # noqa: E402
-    SUBGRID_SCHEMA,
+    resolve_archive_encoding,  # noqa: E402
     SubgridEncoding,
     aligned_production_canvas,
     decode_coarse_amount,
@@ -156,31 +155,17 @@ def require_v4_contract(root, checkpoint: dict) -> SubgridEncoding:
         raise ValueError("v4 target store is not marked complete")
     target_schema = root.attrs.get("schema")
     checkpoint_schema = checkpoint.get("schema")
-    accepted = (SUBGRID_SCHEMA, LEGACY_V4_SUBGRID_SCHEMA)
-    if target_schema != checkpoint_schema or target_schema not in accepted:
+    if target_schema != checkpoint_schema:
         raise ValueError(
-            f"v4 test requires a matched schema from {accepted}; got target="
-            f"{target_schema!r}, checkpoint={checkpoint_schema!r}"
+            f"target and checkpoint schemas differ: target={target_schema!r}, "
+            f"checkpoint={checkpoint_schema!r}"
         )
-    # A v4 archive predates the conservative smooth base and its checkpoint was
-    # trained against the block-constant decoder.  Decoding it with the current
-    # default would silently change the field the model was fitted to, so pin
-    # the legacy base rather than letting from_mapping supply a new default.
-    legacy_base = {} if target_schema == SUBGRID_SCHEMA else {
-        "smooth_base_iterations": 0
-    }
     if checkpoint.get("stage") != "joint":
         raise ValueError("v4 test requires a joint-stage best checkpoint")
     if "subgrid_encoding" not in root.attrs or "subgrid_encoding" not in checkpoint:
         raise ValueError("target/checkpoint lacks frozen subgrid encoding metadata")
-    target_encoding = SubgridEncoding.from_mapping(
-        {**dict(root.attrs["subgrid_encoding"]), **legacy_base}
-    )
-    checkpoint_encoding = SubgridEncoding.from_mapping(
-        {**dict(checkpoint["subgrid_encoding"]), **legacy_base}
-    )
-    target_encoding.validate()
-    checkpoint_encoding.validate()
+    target_encoding, _ = resolve_archive_encoding(root.attrs)
+    checkpoint_encoding, _ = resolve_archive_encoding(checkpoint)
     if encoding_metadata(target_encoding) != encoding_metadata(checkpoint_encoding):
         raise ValueError("v4 target and checkpoint use different subgrid encodings")
     config = checkpoint.get("config")
@@ -737,7 +722,9 @@ def main() -> None:
         )
     if args.preflight_only:
         print(
-            f"[preflight] matched {SUBGRID_SCHEMA} joint checkpoint; "
+            f"[preflight] matched {root.attrs.get('schema')!r} joint "
+            f"checkpoint (decoder smooth_base_iterations="
+            f"{encoding.smooth_base_iterations}); "
             f"{days[0]}..{days[-1]}; IMERG crop={imerg_crop}",
             flush=True,
         )

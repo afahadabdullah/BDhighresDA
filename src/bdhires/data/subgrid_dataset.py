@@ -466,6 +466,37 @@ def allocation_log_weight_target(
     ), wet
 
 
+def resolve_archive_encoding(attrs, *, allow_legacy_v4: bool = True):
+    """Return ``(encoding, schema)`` for a completed target archive.
+
+    Evaluation and diagnostic paths must be able to read a v4 archive whose
+    checkpoint predates the conservative smooth base.  Decoding one with the
+    current default would silently change the field the model was fitted to, so
+    the legacy block-constant base is pinned here.  Every reader shares this
+    function: a schema rule enforced separately in each script is a rule that
+    drifts, which is exactly how a sampler and its evaluator end up disagreeing
+    about what they will accept.
+
+    Training paths pass ``allow_legacy_v4=False`` -- never fit a new model on a
+    superseded target.
+    """
+    schema = attrs.get("schema")
+    accepted = (SUBGRID_SCHEMA,)
+    if allow_legacy_v4:
+        accepted = accepted + (LEGACY_V4_SUBGRID_SCHEMA,)
+    if schema not in accepted:
+        raise ValueError(
+            f"archive schema {schema!r} is not one of {accepted}; rebuild the "
+            "target archive or use a reader that accepts this schema"
+        )
+    values = dict(attrs.get("subgrid_encoding") or {})
+    if schema == LEGACY_V4_SUBGRID_SCHEMA:
+        values["smooth_base_iterations"] = 0
+    encoding = SubgridEncoding.from_mapping(values)
+    encoding.validate()
+    return encoding, schema
+
+
 def coarse_wet_from_fine(wet: torch.Tensor, factor: int = 10) -> torch.Tensor:
     """A coarse block is wet iff it contains at least one wet fine cell.
 
