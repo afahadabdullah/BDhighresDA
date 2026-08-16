@@ -13,12 +13,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
 from ..grids import Grid, crop_offsets
 
 
-SUBGRID_SCHEMA = "cpc_v3_subgrid_v4"
+SUBGRID_SCHEMA = "cpc_v3_subgrid_v5"
+LEGACY_V4_SUBGRID_SCHEMA = "cpc_v3_subgrid_v4"
 LEGACY_V2_SUBGRID_SCHEMA = "cpc_v3_subgrid_v2"
 
 
@@ -42,6 +44,11 @@ class SubgridEncoding:
     # normalization.  A clip in raw log-weight units changes meaning whenever
     # the fitted mean/std change and can still permit pathological exponentials.
     intensity_z_clip: float = 6.0
+    # Iterations of the conservative smooth base.  0 reproduces the legacy
+    # block-constant reconstruction, whose 0.5-degree steps are the visible
+    # blockiness.  2 is enough to push the residual per-block correction to
+    # well under a percent.
+    smooth_base_iterations: int = 2
 
     def validate(self) -> None:
         if self.factor <= 0:
@@ -60,6 +67,8 @@ class SubgridEncoding:
             raise ValueError("intensity_log_std must be positive")
         if self.intensity_z_clip <= 0.0:
             raise ValueError("intensity_z_clip must be positive")
+        if self.smooth_base_iterations < 0:
+            raise ValueError("smooth_base_iterations must be non-negative")
 
     @classmethod
     def from_mapping(cls, values) -> "SubgridEncoding":
@@ -137,6 +146,16 @@ class LegacyV2SubgridEncoding:
         encoding = cls(**values)
         encoding.validate()
         return encoding
+
+    @property
+    def smooth_base_iterations(self) -> int:
+        """V2 reconstructed on a repeated block constant.
+
+        Exposed as a property rather than a field so it stays out of the
+        legacy completeness contract: a real v2 archive never carries this key,
+        and pinning it to zero keeps the replay bit-for-bit.
+        """
+        return 0
 
 
 DecoderEncoding = SubgridEncoding | LegacyV2SubgridEncoding
@@ -313,6 +332,60 @@ def area_weighted_block_mean(
     return mean, retained, fraction
 
 
+def conservative_smooth_upsample(
+    coarse_mm: torch.Tensor,
+    area: torch.Tensor,
+    valid: torch.Tensor,
+    factor: int = 10,
+    iterations: int = 2,
+) -> torch.Tensor:
+    """Continuous fine field whose area-weighted block means equal ``coarse_mm``.
+
+    Repeating the block mean makes the reconstruction base piecewise constant,
+    so ``x = base * weight`` jumps by the ratio of neighbouring block amounts at
+    every 0.5-degree edge.  That step is the blockiness: it is a property of the
+    conservation support, not of the allocation, and no amount of training
+    removes it.  Real 0.05-degree rainfall has no discontinuity there.
+
+    Bilinear interpolation of the block means is continuous but not
+    conservative.  Alternating a bilinear lift with a bilinearly-smoothed
+    multiplicative correction converges to a field that is both, because the
+    correction factor tends to one wherever the lift already has the right block
+    mean.  A final exact per-block renormalisation restores machine-precision
+    conservation with a factor within ~1e-3 of unity, so the residual step is
+    three orders of magnitude smaller than the one it replaces.
+
+    Non-negativity is preserved throughout: bilinear interpolation of a
+    non-negative field is non-negative and every correction factor is a ratio of
+    non-negative block means.
+    """
+    if iterations < 0:
+        raise ValueError("iterations must be non-negative")
+    if coarse_mm.ndim != 4 or coarse_mm.shape[1] != 1:
+        raise ValueError("coarse_mm must have shape (B,1,Hc,Wc)")
+    if iterations == 0:
+        return coarse_mm.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+
+    floor = torch.finfo(coarse_mm.dtype).tiny
+
+    def lift(block_field: torch.Tensor) -> torch.Tensor:
+        return F.interpolate(
+            block_field, scale_factor=factor, mode="bilinear", align_corners=False
+        )
+
+    def block_mean(field: torch.Tensor) -> torch.Tensor:
+        mean, _, _ = area_weighted_block_mean(field, area, valid, factor, 0.0)
+        return mean
+
+    base = lift(coarse_mm).clamp_min(0.0)
+    for _ in range(iterations):
+        correction = coarse_mm / block_mean(base).clamp_min(floor)
+        base = (base * lift(correction)).clamp_min(0.0)
+    exact = coarse_mm / block_mean(base).clamp_min(floor)
+    base = base * exact.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+    return base.clamp_min(0.0)
+
+
 def _logit(probability: torch.Tensor) -> torch.Tensor:
     return torch.log(probability) - torch.log1p(-probability)
 
@@ -348,8 +421,9 @@ def _centered_allocation_log_weights(
     eliminates that unidentifiable scale.  Dry cells receive raw value zero,
     a neutral positive weight if their occurrence state later becomes wet.
     """
-    coarse_fine = coarse.repeat_interleave(encoding.factor, -2).repeat_interleave(
-        encoding.factor, -1
+    coarse_fine = conservative_smooth_upsample(
+        coarse, area, wet.new_ones(wet.shape), encoding.factor,
+        encoding.smooth_base_iterations,
     )
     relative = fine / coarse_fine.clamp_min(float(encoding.intensity_floor))
     raw = torch.log(relative.clamp_min(float(encoding.intensity_floor)))
@@ -644,7 +718,23 @@ def reconstruct_from_amount(
         positive_weight = _unblockify(
             torch.exp((log_blocks - block_max).clamp_max(0.0))
         )
-    weights = occurrence * positive_weight
+    # The allocation modulates a continuous base rather than a block constant,
+    # so the field no longer steps by the ratio of neighbouring block amounts at
+    # every 0.5-degree edge.  The base enters as a dimensionless *shape* --
+    # smooth(m) / U(m), which is ~1 everywhere -- rather than as the amount
+    # itself.  Multiplying the weights by the amount would drive them to exactly
+    # zero in a dry block and destroy the occurrence gradient that lets a
+    # dry-cell positive innovation turn that block on; ``scale`` below is the
+    # only place the amount enters, exactly as before.  Conservation is imposed
+    # by the per-block normalisation and holds for any positive weight field.
+    shape_amount = coarse_mm.detach().clamp_min(float(encoding.denominator_floor))
+    smooth_shape = conservative_smooth_upsample(
+        shape_amount, area_b, valid_b, encoding.factor,
+        encoding.smooth_base_iterations,
+    ) / shape_amount.repeat_interleave(
+        encoding.factor, -2
+    ).repeat_interleave(encoding.factor, -1)
+    weights = occurrence * positive_weight * smooth_shape
     weights = torch.where(valid_b, weights, torch.zeros_like(weights))
     ab = _blockify(area_b, encoding.factor)
     qb = _blockify(weights, encoding.factor)

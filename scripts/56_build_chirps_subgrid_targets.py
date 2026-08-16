@@ -382,6 +382,7 @@ def main() -> None:
     parser.add_argument("--dequant-noise", type=float, default=0.05)
     parser.add_argument("--dequant-seed", type=int, default=314159)
     parser.add_argument("--intensity-z-clip", type=float, default=6.0)
+    parser.add_argument("--smooth-base-iterations", type=int, default=2)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -460,6 +461,7 @@ def main() -> None:
         dequant_seed=args.dequant_seed,
         valid_area_threshold=args.valid_area_threshold,
         intensity_z_clip=args.intensity_z_clip,
+        smooth_base_iterations=args.smooth_base_iterations,
     )
     for start in range(0, len(times), args.chunk_days):
         stop = min(start + args.chunk_days, len(times))
@@ -517,6 +519,7 @@ def main() -> None:
         intensity_log_mean=intensity_mean,
         intensity_log_std=intensity_std,
         intensity_z_clip=args.intensity_z_clip,
+        smooth_base_iterations=args.smooth_base_iterations,
     )
     coarse_mean, coarse_std = coarse_stats.finish()
     fine_mean, fine_std = fine_stats.finish()
@@ -529,6 +532,12 @@ def main() -> None:
     root = _zarr_group(output, args.overwrite)
     root.attrs.update(
         schema=SUBGRID_SCHEMA,
+        # _condition_chunk reindexes CPC/ERA5 onto the same ``times`` slice used
+        # for the CHIRPS target, so every model trained on this store expects
+        # same-day conditioning.  Sampling with a different offset is a
+        # train/test mismatch and must be declared, not inherited from a shell
+        # default.
+        condition_day_offset=0,
         complete=False,
         subgrid_encoding=encoding_metadata(encoding),
         fine_grid={

@@ -108,6 +108,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", default="2022-05-05")
     parser.add_argument("--background-day-offset", type=int, default=-1)
     parser.add_argument("--members", type=int, default=4)
+    parser.add_argument(
+        "--allow-conditioning-lag",
+        action="store_true",
+        help="permit a conditioning offset that differs from the target store's",
+    )
     parser.add_argument("--n-steps", type=int, default=25)
     parser.add_argument("--canvas", type=int, default=160)
     parser.add_argument("--withhold", type=float, default=0.20)
@@ -679,6 +684,27 @@ def main() -> None:
     checkpoint_factor = int(checkpoint["config"]["data"].get("factor", 10))
     if checkpoint_factor != encoding.factor:
         raise ValueError("joint checkpoint model factor differs from its frozen encoding")
+    training_offset = int(root.attrs.get("condition_day_offset", 0))
+    if int(args.background_day_offset) != training_offset:
+        if not args.allow_conditioning_lag:
+            raise ValueError(
+                f"conditioning offset {args.background_day_offset} day(s) does "
+                f"not match the offset the targets were built with "
+                f"({training_offset}).  The model was trained on same-day CPC "
+                "and ERA5, so sampling on a lagged day scores it against a "
+                "rainfall field its forcing never saw: CHIRPS pattern "
+                "correlation collapses toward zero for reasons that have "
+                "nothing to do with the model.  Pass "
+                "--allow-conditioning-lag only for a deliberate "
+                "operational-latency experiment, and never report its skill "
+                "numbers as the reanalysis result."
+            )
+        print(
+            f"WARNING: sampling with a {args.background_day_offset}-day "
+            f"conditioning lag against same-day targets; skill numbers are "
+            "an operational-latency diagnostic, not reanalysis skill.",
+            flush=True,
+        )
     days, condition_days, target_index, condition_index = date_indices(
         root, args.start, args.end, args.background_day_offset
     )

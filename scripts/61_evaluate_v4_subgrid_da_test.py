@@ -206,6 +206,55 @@ def block_anomaly(
     return anomaly[:, 0].numpy()
 
 
+def relative_block_anomaly(
+    values: np.ndarray,
+    area: np.ndarray,
+    valid: np.ndarray,
+    factor: int,
+) -> np.ndarray:
+    """Amplitude-free within-block structure: x / block_mean - 1.
+
+    The decoder is multiplicative, so the plain anomaly ``x - block_mean``
+    scales with the block amount.  Neighbouring blocks with different amounts
+    therefore show different anomaly amplitudes and the 0.5-degree lattice is
+    visible even when the allocation itself is perfectly smooth.  Dividing by
+    the block mean removes that scaling, so any remaining blockiness is a real
+    seam rather than a property of the diagnostic.
+    """
+    tensor = torch.from_numpy(np.asarray(values, np.float32))[:, None]
+    coarse, retained, _ = area_weighted_block_mean(
+        tensor, torch.from_numpy(area), torch.from_numpy(valid),
+        factor=factor, valid_area_threshold=0.0,
+    )
+    expanded = coarse.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+    retained_fine = retained.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+    usable = retained_fine & (expanded > 0.0)
+    relative = torch.where(usable, tensor / expanded.clamp_min(1.0e-6) - 1.0, torch.nan)
+    return relative[:, 0].numpy()
+
+
+def seam_index(values: np.ndarray, valid: np.ndarray, factor: int) -> float:
+    """Mean |gradient| across conservation-block edges over the same inside.
+
+    1.0 means the block lattice is invisible; >1 means the reconstruction has
+    imprinted its own conservation support on the field.
+    """
+    mean = np.nanmean(np.asarray(values, np.float64), axis=0)
+    vertical = np.abs(np.diff(mean, axis=1))
+    horizontal = np.abs(np.diff(mean, axis=0))
+    vvalid = valid[:, 1:] & valid[:, :-1] & np.isfinite(vertical)
+    hvalid = valid[1:] & valid[:-1] & np.isfinite(horizontal)
+    vseam = np.zeros(vertical.shape, bool)
+    hseam = np.zeros(horizontal.shape, bool)
+    vseam[:, factor - 1 :: factor] = True
+    hseam[factor - 1 :: factor, :] = True
+    seam = np.concatenate([vertical[vvalid & vseam], horizontal[hvalid & hseam]])
+    interior = np.concatenate([vertical[vvalid & ~vseam], horizontal[hvalid & ~hseam]])
+    if not seam.size or not interior.size:
+        return float("nan")
+    return float(np.mean(seam) / max(float(np.mean(interior)), 1.0e-12))
+
+
 def mean_daily_correlation(
     candidate: np.ndarray,
     reference: np.ndarray,
@@ -394,6 +443,16 @@ def plot_matrix(payload: dict, output: Path) -> None:
     axes[1, 0].set_xlim(-0.2, 1.0)
     axes[1, 0].set_xlabel("mean daily correlation")
     axes[1, 0].legend()
+    reference = structure.get("_reference", {})
+    for value, colour, label in (
+        (reference.get("chirps_vs_cpc_pattern_r"), "#2E7D32", "CHIRPS vs CPC"),
+        (reference.get("chirps_vs_imerg_pattern_r"), "#EF6C00", "CHIRPS vs IMERG"),
+    ):
+        if value is not None and np.isfinite(value):
+            axes[1, 0].axvline(
+                value, color=colour, linestyle="--", linewidth=1.2, label=label
+            )
+    axes[1, 0].legend(fontsize=7)
     axes[1, 0].set_title("D. CHIRPS pattern agreement (not truth)")
 
     axes[1, 1].barh(
@@ -652,9 +711,17 @@ def main() -> None:
         name: mean_daily_correlation(field, target_anomaly, valid)
         for name, field in candidate_anomaly.items()
     }
+    relative_target = relative_block_anomaly(chirps, area, valid, encoding.factor)
     cpc_corr = coarse_product_correlation(
         means, cpc, area, valid, encoding.factor
     )
+    # Reference pairings.  CHIRPS and CPC are independent products of the SAME
+    # day and must agree substantially at 0.5 degrees.  Without this reference a
+    # broken date pairing is indistinguishable from a model with no skill: every
+    # model-vs-CHIRPS correlation collapses to zero and nothing says why.
+    reference_cpc = coarse_product_correlation(
+        {"chirps": chirps}, cpc, area, valid, encoding.factor
+    )["chirps"]
     imerg_crop = tuple(int(value) for value in samples.attrs["imerg_canvas_crop"])
     imerg_corr = imerg_product_correlation(
         means,
@@ -664,15 +731,43 @@ def main() -> None:
         int(samples.attrs["imerg_factor"]),
         imerg_crop,
     )
+    reference_imerg = imerg_product_correlation(
+        {"chirps": chirps}, imerg, area, valid,
+        int(samples.attrs["imerg_factor"]), imerg_crop,
+    )["chirps"]
     structure = {
         name: {
             "chirps_mean_pattern_r": chirps_full[name],
             "chirps_subgrid_pattern_r": chirps_subgrid[name],
+            # Amplitude-free: separates a real seam from the multiplicative
+            # decoder making anomaly amplitude proportional to block amount.
+            "chirps_relative_subgrid_pattern_r": mean_daily_correlation(
+                relative_block_anomaly(
+                    means[name], area, valid, encoding.factor
+                ),
+                relative_target,
+                valid,
+            ),
+            "seam_index": seam_index(means[name], valid, encoding.factor),
             "cpc_pattern_r": cpc_corr[name],
             "imerg_pattern_r": imerg_corr[name],
         }
         for name in MAP_METHODS
     }
+    structure["_reference"] = {
+        "chirps_vs_cpc_pattern_r": reference_cpc,
+        "chirps_vs_imerg_pattern_r": reference_imerg,
+        "chirps_seam_index": seam_index(chirps, valid, encoding.factor),
+        "condition_day_offset": int(samples.attrs.get("condition_day_offset", 0)),
+    }
+    if reference_cpc is not None and reference_cpc < 0.2:
+        raise ValueError(
+            f"CHIRPS and CPC agree at only r={reference_cpc:.3f} on the common "
+            "0.5-degree support.  Two independent same-day products cannot "
+            "disagree this strongly: the evaluation is pairing fields from "
+            "different dates or grids.  Every model-vs-CHIRPS score below is "
+            "meaningless until this reference is restored."
+        )
 
     gridded_payload = json.loads(Path(args.gridded_json).read_text())
     if gridded_payload.get("schema") != "cpc_v3_subgrid_evaluation_v1":

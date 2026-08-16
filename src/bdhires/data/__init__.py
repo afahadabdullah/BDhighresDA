@@ -14,6 +14,7 @@ from .subgrid_dataset import (  # noqa: F401
     area_weighted_block_mean,
     cell_area_weights,
     coarse_wet_from_fine,
+    conservative_smooth_upsample,
     decode_and_reconstruct,
     decode_coarse_amount,
     encode_subgrid_targets,

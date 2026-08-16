@@ -599,8 +599,10 @@ def test_hierarchical_archive_redecodes_serialized_states(tmp_path):
     assert archive.attrs["archive_uses_likelihood_hard_decoder"] is True
     assert archive.attrs["schema"] == "cpc_v3_hierarchical_samples_v3"
     assert archive.attrs["serialization_max_abs_mm_day"] == 0.0
-    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
-    assert np.array_equal(archive["background"][:], fields["background"])
+    # Frozen contract is the 1e-5 mm/day serialization bound, not bit identity:
+    # re-decoding a float32 state reruns the iterative smooth base.
+    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] < 1.0e-5
+    assert np.allclose(archive["background"][:], fields["background"], atol=1.0e-5)
 
     legacy_encoding = LegacyV2SubgridEncoding()
     legacy_output = tmp_path / "legacy-v2-samples.zarr"
@@ -674,7 +676,9 @@ def test_archive_canonicalizes_bounded_device_decode_roundoff(tmp_path):
 
     archive = zarr.open_group(str(output), mode="r")
     assert np.array_equal(archive["background"][:], expected)
-    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
+    # Frozen contract is the 1e-5 mm/day serialization bound, not bit identity:
+    # re-decoding a float32 state reruns the iterative smooth base.
+    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] < 1.0e-5
     assert archive.attrs[
         "source_to_canonical_hard_decode_max_abs_mm_day"
     ]["background"] == pytest.approx(2.0e-4, abs=1.0e-5)
@@ -714,7 +718,7 @@ def test_explicit_recovery_reuses_fully_written_incomplete_states(tmp_path):
     assert recovered["background"] == pytest.approx(5.0e-5, abs=1.0e-5)
     assert archive.attrs["complete"] is True
     assert archive.attrs["recovered_from_device_roundoff_audit"] is True
-    assert np.array_equal(archive["background"][:], np.ones((1, 2, 10, 10)))
+    assert np.allclose(archive["background"][:], np.ones((1, 2, 10, 10)), atol=1.0e-5)
 
 
 def test_encoding_rejects_renamed_or_unknown_frozen_fields():
@@ -912,3 +916,75 @@ def test_training_checkpoint_contract_rejects_old_schema_and_encoding():
             dataset=dataset,
             label="wrong encoding",
         )
+
+
+def test_smooth_base_removes_the_conservation_lattice_without_losing_mass():
+    """The 0.5-degree steps are the conservation support, not the allocation.
+
+    A repeated block mean has *zero* interior gradient, so every change in the
+    field happens at a block edge: that is the blockiness, and it survives any
+    amount of training.  The conservative smooth base has to remove it while
+    keeping the block means exact.
+    """
+    from bdhires.data import conservative_smooth_upsample
+
+    def seam_ratio(field, factor=10):
+        plane = field[0, 0].numpy().astype(np.float64)
+        vertical = np.abs(np.diff(plane, axis=1))
+        horizontal = np.abs(np.diff(plane, axis=0))
+        vseam = np.zeros(vertical.shape, bool)
+        hseam = np.zeros(horizontal.shape, bool)
+        vseam[:, factor - 1 :: factor] = True
+        hseam[factor - 1 :: factor, :] = True
+        interior = np.concatenate([vertical[~vseam], horizontal[~hseam]])
+        edge = np.concatenate([vertical[vseam], horizontal[hseam]])
+        if interior.mean() <= 1.0e-12:
+            return float("inf")
+        return float(edge.mean() / interior.mean())
+
+    blocks, factor = 6, 10
+    rows, cols = torch.meshgrid(
+        torch.linspace(0.0, 3.0, blocks), torch.linspace(0.0, 3.0, blocks),
+        indexing="ij",
+    )
+    coarse = (2.0 + 2.0 * torch.sin(rows) * torch.cos(cols)).clamp_min(0.05)[None, None]
+    area = torch.ones(1, 1, blocks * factor, blocks * factor)
+    valid = torch.ones(1, 1, blocks * factor, blocks * factor, dtype=torch.bool)
+
+    flat = conservative_smooth_upsample(coarse, area, valid, factor, 0)
+    smooth = conservative_smooth_upsample(coarse, area, valid, factor, 2)
+    assert seam_ratio(flat) == float("inf")  # piecewise constant by construction
+    assert seam_ratio(smooth) < 1.5
+    for candidate in (flat, smooth):
+        recovered, _, _ = area_weighted_block_mean(
+            candidate, area, valid, factor=factor, valid_area_threshold=0.0
+        )
+        assert torch.allclose(recovered, coarse, atol=1.0e-5)
+    assert (smooth >= 0.0).all()
+
+    # ...and the decoded field inherits it, still conserving exactly.
+    allocation = torch.zeros(1, 2, blocks * factor, blocks * factor)
+    allocation[:, 1] = 4.0
+    coarse_state = torch.cat([torch.sqrt(coarse), torch.full_like(coarse, 4.0)], 1)
+    coarse_valid = torch.ones(1, 1, blocks, blocks, dtype=torch.bool)
+    decoded = {}
+    for iterations in (0, 2):
+        encoding = _encoding(smooth_base_iterations=iterations)
+        decoded[iterations] = decode_and_reconstruct(
+            coarse_state, allocation, coarse_valid, valid, area, encoding
+        )
+        recovered, _, _ = area_weighted_block_mean(
+            decoded[iterations], area, valid, factor=factor, valid_area_threshold=0.0
+        )
+        assert torch.allclose(recovered, coarse, atol=1.0e-5)
+    assert seam_ratio(decoded[0]) == float("inf")
+    assert seam_ratio(decoded[2]) < 1.5
+
+
+def test_legacy_v2_replay_keeps_the_block_constant_base():
+    from bdhires.data import LegacyV2SubgridEncoding
+
+    assert LegacyV2SubgridEncoding().smooth_base_iterations == 0
+    assert "smooth_base_iterations" not in {
+        field.name for field in LegacyV2SubgridEncoding.__dataclass_fields__.values()
+    }

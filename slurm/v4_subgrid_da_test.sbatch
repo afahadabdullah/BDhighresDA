@@ -36,7 +36,11 @@ START="${V4_TEST_START:-2022-05-01}"
 END="${V4_TEST_END:-2022-05-05}"
 MEMBERS="${V4_TEST_MEMBERS:-4}"
 STEPS="${V4_TEST_STEPS:-25}"
-OFFSET="${V4_TEST_BACKGROUND_OFFSET:--1}"
+# Same-day conditioning: script 56 builds coarse_cond/fine_cond at the target
+# date, so V3-SG/V4 is trained same-day.  The -1 default inherited from the V2
+# operational-latency runs silently scored this model against a day its forcing
+# never saw.
+OFFSET="${V4_TEST_BACKGROUND_OFFSET:-0}"
 CHECKPOINT="${V4_TEST_CHECKPOINT:-runs/prior_h100_cpc_v3_subgrid_v4/joint/best.pt}"
 TARGET="${V4_TEST_TARGET:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
 IMERG="${V4_TEST_IMERG:-data/processed/imerg_prepared_ing2022/imerg_0p4deg_20220501_20220510.nc}"
