@@ -62,6 +62,70 @@ def test_station_crps_uses_members_and_withheld_observations():
     assert metrics["coverage90"] == pytest.approx(1.0)
 
 
+def test_evaluation_grid_uses_frozen_target_not_float32_differences():
+    evaluator = load_script(61, "evaluate_v4_subgrid_da_test")
+
+    class Group(dict):
+        def __init__(self, values, attrs):
+            super().__init__(values)
+            self.attrs = attrs
+
+    metadata = {
+        "name": "wide_cpc",
+        "lon_min": 84.0,
+        "lat_min": 16.0,
+        "nlon": 240,
+        "nlat": 240,
+        "res": 0.05,
+    }
+    full_lat = (16.0 + 0.05 * (np.arange(240) + 0.5)).astype(np.float32)
+    full_lon = (84.0 + 0.05 * (np.arange(240) + 0.5)).astype(np.float32)
+    crop = [70, 230, 60, 220]
+    target = Group({"lat": full_lat, "lon": full_lon}, {"fine_grid": metadata})
+    samples = Group(
+        {"lat": full_lat[70:230], "lon": full_lon[60:220]},
+        {"target_crop": crop},
+    )
+
+    # This is why the former 1e-6 adjacent-difference check rejected a valid grid.
+    lon_steps = np.diff(samples["lon"])
+    assert np.max(np.abs(lon_steps - np.median(lon_steps))) > 1.0e-6
+
+    grid = evaluator.sample_grid_from_target(target, samples)
+    assert grid.shape == (160, 160)
+    assert grid.res == pytest.approx(0.05)
+    assert np.array_equal(grid.lat.astype(np.float32), samples["lat"])
+    assert np.array_equal(grid.lon.astype(np.float32), samples["lon"])
+
+
+def test_evaluation_grid_rejects_coordinates_not_in_target_crop():
+    evaluator = load_script(61, "evaluate_v4_subgrid_da_test")
+
+    class Group(dict):
+        def __init__(self, values, attrs):
+            super().__init__(values)
+            self.attrs = attrs
+
+    metadata = {
+        "lon_min": 84.0,
+        "lat_min": 16.0,
+        "nlon": 4,
+        "nlat": 4,
+        "res": 0.05,
+    }
+    lat = (16.0 + 0.05 * (np.arange(4) + 0.5)).astype(np.float32)
+    lon = (84.0 + 0.05 * (np.arange(4) + 0.5)).astype(np.float32)
+    target = Group({"lat": lat, "lon": lon}, {"fine_grid": metadata})
+    wrong_lat = lat.copy()
+    wrong_lat[1] += np.float32(0.01)
+    samples = Group(
+        {"lat": wrong_lat, "lon": lon.copy()},
+        {"target_crop": [0, 4, 0, 4]},
+    )
+    with pytest.raises(ValueError, match="latitudes differ"):
+        evaluator.sample_grid_from_target(target, samples)
+
+
 def test_optional_metrics_render_without_invalid_json_values():
     evaluator = load_script(61, "evaluate_v4_subgrid_da_test")
     payload = evaluator.finite_or_none(

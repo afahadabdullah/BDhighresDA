@@ -120,6 +120,72 @@ def station_samples(
     return sampled.reshape(time, members, len(lat))
 
 
+def sample_grid_from_target(target, samples) -> Grid:
+    """Validate the archived crop against its frozen target and return its grid.
+
+    Target and sample coordinates are serialized as float32.  Taking adjacent
+    differences of those values is not a sound regular-grid test: at Bangladesh
+    longitudes the rounding error in a nominal 0.05-degree step can exceed
+    1e-6 degrees.  Instead, require exact identity with the frozen target crop
+    and validate that target once against its analytic grid metadata.
+    """
+    lat = np.asarray(samples["lat"][:], np.float32)
+    lon = np.asarray(samples["lon"][:], np.float32)
+    if len(lat) < 2 or len(lon) < 2:
+        raise ValueError("sample grid must contain at least two cells per dimension")
+
+    crop = samples.attrs.get("target_crop")
+    if not isinstance(crop, (list, tuple)) or len(crop) != 4:
+        raise ValueError("sample target_crop must be [row_start,row_stop,col_start,col_stop]")
+    try:
+        row0, row1, column0, column1 = (int(value) for value in crop)
+    except (TypeError, ValueError) as error:
+        raise ValueError("sample target_crop contains a non-integer value") from error
+
+    target_lat = np.asarray(target["lat"][:], np.float32)
+    target_lon = np.asarray(target["lon"][:], np.float32)
+    if not (0 <= row0 < row1 <= len(target_lat)) or not (
+        0 <= column0 < column1 <= len(target_lon)
+    ):
+        raise ValueError("sample target_crop lies outside the frozen target grid")
+    if lat.shape != (row1 - row0,) or lon.shape != (column1 - column0,):
+        raise ValueError("sample coordinate lengths differ from target_crop")
+    if not np.array_equal(lat, target_lat[row0:row1]):
+        raise ValueError("sample latitudes differ from the frozen target crop")
+    if not np.array_equal(lon, target_lon[column0:column1]):
+        raise ValueError("sample longitudes differ from the frozen target crop")
+
+    metadata = target.attrs.get("fine_grid")
+    required = {"lon_min", "lat_min", "nlon", "nlat", "res"}
+    if not isinstance(metadata, dict) or not required <= set(metadata):
+        raise ValueError("target lacks complete frozen fine_grid metadata")
+    full_grid = Grid(
+        "v4_frozen_target",
+        float(metadata["lon_min"]),
+        float(metadata["lat_min"]),
+        int(metadata["nlon"]),
+        int(metadata["nlat"]),
+        float(metadata["res"]),
+    )
+    if full_grid.res <= 0.0 or not np.isfinite(full_grid.res):
+        raise ValueError("target fine_grid resolution must be finite and positive")
+    if full_grid.shape != (len(target_lat), len(target_lon)):
+        raise ValueError("target coordinate lengths differ from fine_grid metadata")
+    if not np.array_equal(target_lat, full_grid.lat.astype(np.float32)) or not np.array_equal(
+        target_lon, full_grid.lon.astype(np.float32)
+    ):
+        raise ValueError("target coordinates differ from frozen fine_grid metadata")
+
+    return Grid(
+        "v4_da_evaluation",
+        full_grid.lon_min + column0 * full_grid.res,
+        full_grid.lat_min + row0 * full_grid.res,
+        len(lon),
+        len(lat),
+        full_grid.res,
+    )
+
+
 def block_anomaly(
     values: np.ndarray,
     area: np.ndarray,
@@ -520,23 +586,7 @@ def main() -> None:
     if times.size > 1 and not np.all(np.diff(times.astype(np.int64)) > 0):
         raise ValueError("sample time axis must be strictly increasing")
     days = times.astype("datetime64[D]")
-    lat = np.asarray(samples["lat"][:], np.float32)
-    lon = np.asarray(samples["lon"][:], np.float32)
-    if len(lat) < 2 or len(lon) < 2:
-        raise ValueError("sample grid must contain at least two cells per dimension")
-    resolution = float(np.median(np.diff(lon)))
-    if not np.allclose(np.diff(lon), resolution, atol=1.0e-6) or not np.allclose(
-        np.diff(lat), resolution, atol=1.0e-6
-    ):
-        raise ValueError("sample latitude/longitude coordinates are not one regular grid")
-    grid = Grid(
-        "v4_da_evaluation",
-        float(lon[0] - resolution / 2.0),
-        float(lat[0] - resolution / 2.0),
-        len(lon),
-        len(lat),
-        resolution,
-    )
+    grid = sample_grid_from_target(target, samples)
     valid = np.asarray(samples["valid"][:], bool)
     area = np.asarray(samples["cell_area"][:], np.float32)
     chirps = np.asarray(samples["context_chirps_mm"][:], np.float32)
