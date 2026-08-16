@@ -32,7 +32,7 @@ definitionally true.
 > hurdle/absolute-target wet--dry ablation. To avoid overwriting or confusing
 > that experiment, this design should use the explicit identifier
 > `cpc_v3_subgrid` and an output directory such as
-> `runs/prior_h100_cpc_v3_subgrid`. In a paper, it may be clearer to call this
+> `runs/prior_h100_cpc_v3_subgrid_v4`. In a paper, it may be clearer to call this
 > model **V3-SG**.
 
 ## One-sentence model description
@@ -329,13 +329,19 @@ Velocity MSE gives dry decoder-inactive positive channels a frozen relative
 weight of 0.05 rather than dropping them completely. This weakly defines the
 dry latent marginal so a cell that becomes wet during sampling cannot reveal an
 unconstrained extreme intensity, while wet targets retain full weight.
-Both velocity channels use the valid-cell denominator, preserving the original
-channel scale instead of increasing per-wet-cell weight during dry periods.
+The positive channel is a weighted mean over wet cells (weight 1) and dry cells
+(weight 0.05), while occurrence is a valid-cell mean. This keeps the aggregate
+channel balance fixed across seasonal wet fractions while retaining weak dry
+latent supervision.
 Occurrence velocity and BCE remain evaluated over every valid block/cell.
 Before exponentiation, standardised intensity is clipped to +/-6 and only then
 mapped through the frozen training mean/std; this makes the guard independent
-of the fitted raw log-weight scale. Report maximum within-block weight/mean and
-maximum single-cell mass fraction for every sampled analysis.
+of the fitted raw log-weight scale. Report maximum within-block weight/mean,
+maximum single-cell mass fraction, the fraction of valid intensity latents
+outside the +/-6 guard, and the minimum denominator divided by valid block area
+for every sampled analysis. A coarse occurrence target is wet iff at least one
+valid 0.05-degree cell exceeds the frozen 0.1 mm/day threshold; thresholding the
+0.5-degree mean would delete isolated convective cells.
 
 ### Hard mass-conserving reconstruction
 

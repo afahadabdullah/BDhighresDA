@@ -451,7 +451,7 @@ def write_hierarchical_sample_zarr(
 
     root = _group(temporary, "w")
     root.attrs.update(
-        schema="cpc_v3_hierarchical_samples_v2",
+        schema="cpc_v3_hierarchical_samples_v3",
         complete=False,
         units="mm/day",
         archive_uses_likelihood_hard_decoder=False,

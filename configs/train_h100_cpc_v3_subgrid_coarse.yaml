@@ -1,7 +1,7 @@
 # Phase 1: native-0.5-degree CPC -> CHIRPS-aggregated coarse hurdle flow.
 stage: coarse
 data:
-  zarr: data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
   crop: 120
   factor: 10
   downsamplings: 3
@@ -15,7 +15,7 @@ model:
   dropout: 0.10
   num_heads: 4
 train:
-  out_dir: runs/prior_h100_cpc_v3_subgrid/coarse
+  out_dir: runs/prior_h100_cpc_v3_subgrid_v4/coarse
   epochs: 100
   batch_size: 64
   lr: 0.0002

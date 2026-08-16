@@ -2,7 +2,7 @@
 # initialisers; the zero-started fine->coarse path learns the missing cross-score.
 stage: joint
 data:
-  zarr: data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
   crop: 120
   factor: 10
   downsamplings: 3
@@ -24,9 +24,9 @@ model:
     dropout: 0.15
     num_heads: 4
 train:
-  out_dir: runs/prior_h100_cpc_v3_subgrid/joint
-  init_coarse: runs/prior_h100_cpc_v3_subgrid/coarse/best.pt
-  init_allocation: runs/prior_h100_cpc_v3_subgrid/allocation/best.pt
+  out_dir: runs/prior_h100_cpc_v3_subgrid_v4/joint
+  init_coarse: runs/prior_h100_cpc_v3_subgrid_v4/coarse/best.pt
+  init_allocation: runs/prior_h100_cpc_v3_subgrid_v4/allocation/best.pt
   epochs: 100
   batch_size: 16
   lr: 0.00008

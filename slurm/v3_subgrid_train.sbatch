@@ -71,14 +71,18 @@ config_path, target_path, output_path = sys.argv[1:]
 cfg = yaml.safe_load(open(config_path))
 target = zarr.open_group(target_path, mode="r")
 assert target.attrs.get("complete", False), f"incomplete target archive: {target_path}"
-assert target.attrs.get("schema") == "cpc_v3_subgrid_v3"
+assert target.attrs.get("schema") == "cpc_v3_subgrid_v4"
+target_encoding = dict(target.attrs["subgrid_encoding"])
 
 output = Path(output_path)
 last = output / "last.pt"
 if last.exists():
     checkpoint = torch.load(last, map_location="cpu")
-    assert checkpoint.get("schema") == "cpc_v3_subgrid_v3"
+    assert checkpoint.get("schema") == "cpc_v3_subgrid_v4"
     assert checkpoint.get("stage") == cfg["stage"]
+    assert dict(checkpoint.get("subgrid_encoding", {})) == target_encoding, (
+        "resume checkpoint encoding differs from the target archive"
+    )
     assert checkpoint.get("config") == cfg, (
         "refusing to resume because the resolved config differs from the checkpoint"
     )
@@ -88,9 +92,22 @@ elif output.exists() and any(output.iterdir()):
     )
 
 if cfg["stage"] == "joint":
-    for key in ("init_coarse", "init_allocation"):
+    for key, expected_stage in (
+        ("init_coarse", "coarse"),
+        ("init_allocation", "allocation"),
+    ):
         path = Path(cfg["train"][key])
         assert path.is_file(), f"missing joint initializer: {path}"
+        checkpoint = torch.load(path, map_location="cpu")
+        assert checkpoint.get("schema") == "cpc_v3_subgrid_v4", (
+            f"incompatible joint initializer schema: {path}"
+        )
+        assert checkpoint.get("stage") == expected_stage, (
+            f"wrong joint initializer stage: {path}"
+        )
+        assert dict(checkpoint.get("subgrid_encoding", {})) == target_encoding, (
+            f"joint initializer encoding differs from target: {path}"
+        )
 
 print("Preflight passed")
 print("  stage:", cfg["stage"])

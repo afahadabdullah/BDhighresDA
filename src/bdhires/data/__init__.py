@@ -1,6 +1,7 @@
 from .stations import load_stations, pseudo_stations, station_summary  # noqa: F401
 from .zarr_dataset import DatasetConfig, PrecipDataset, year_split  # noqa: F401
 from .subgrid_dataset import (  # noqa: F401
+    SUBGRID_SCHEMA,
     ReconstructionDiagnostics,
     SubgridDataset,
     SubgridDatasetConfig,
@@ -10,6 +11,7 @@ from .subgrid_dataset import (  # noqa: F401
     aligned_production_canvas,
     area_weighted_block_mean,
     cell_area_weights,
+    coarse_wet_from_fine,
     decode_and_reconstruct,
     decode_coarse_amount,
     encode_subgrid_targets,

@@ -41,7 +41,7 @@ ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5/era5_daily_*.nc}"
 STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
 DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide.nc}"
 STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
-OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc.zarr}"
+OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
 CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 OVERWRITE="${V3_PREP_OVERWRITE:-0}"
 START="${V3_START:-1981-01-01}"
@@ -56,7 +56,7 @@ try:
     root = zarr.open_group(sys.argv[1], mode="r")
     valid = (
         root.attrs.get("complete", False)
-        and root.attrs.get("schema") == "cpc_v3_subgrid_v3"
+        and root.attrs.get("schema") == "cpc_v3_subgrid_v4"
         and root.attrs.get("source_start_date") == sys.argv[2]
         and root.attrs.get("source_end_date") == sys.argv[3]
         and float(dict(root.attrs.get("subgrid_encoding", {})).get("intensity_log_std", 0.0)) > 0.0
@@ -138,7 +138,7 @@ import zarr
 
 root = zarr.open_group(sys.argv[1], mode="r")
 assert root.attrs.get("complete", False), "archive is not marked complete"
-assert root.attrs.get("schema") == "cpc_v3_subgrid_v3"
+assert root.attrs.get("schema") == "cpc_v3_subgrid_v4"
 assert root.attrs.get("source_start_date") == sys.argv[2]
 assert root.attrs.get("source_end_date") == sys.argv[3]
 encoding = dict(root.attrs["subgrid_encoding"])

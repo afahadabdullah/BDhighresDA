@@ -24,7 +24,13 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bdhires.data import SubgridDataset, SubgridDatasetConfig  # noqa: E402
+from bdhires.data import (  # noqa: E402
+    SUBGRID_SCHEMA,
+    SubgridDataset,
+    SubgridDatasetConfig,
+    SubgridEncoding,
+    encoding_metadata,
+)
 from bdhires.models import (  # noqa: E402
     AllocationFlow,
     CoarseHurdleFlow,
@@ -67,6 +73,33 @@ def _condition_channels(dataset: SubgridDataset) -> tuple[int, int]:
     return coarse, fine
 
 
+def validate_checkpoint(
+    checkpoint: dict,
+    *,
+    expected_stage: str,
+    dataset: SubgridDataset,
+    label: str,
+    expected_config: dict | None = None,
+) -> None:
+    """Reject checkpoints trained under a different target/loss contract."""
+    if checkpoint.get("schema") != SUBGRID_SCHEMA:
+        raise ValueError(
+            f"{label} schema {checkpoint.get('schema')!r} is incompatible with "
+            f"{SUBGRID_SCHEMA}"
+        )
+    if checkpoint.get("stage") != expected_stage:
+        raise ValueError(
+            f"{label} stage {checkpoint.get('stage')!r} != {expected_stage!r}"
+        )
+    if "subgrid_encoding" not in checkpoint:
+        raise ValueError(f"{label} lacks frozen subgrid encoding metadata")
+    checkpoint_encoding = SubgridEncoding.from_mapping(checkpoint["subgrid_encoding"])
+    if encoding_metadata(checkpoint_encoding) != encoding_metadata(dataset.encoding):
+        raise ValueError(f"{label} subgrid encoding differs from the target archive")
+    if expected_config is not None and checkpoint.get("config") != expected_config:
+        raise ValueError(f"{label} resolved config differs from the requested config")
+
+
 def build_model(config: dict, dataset: SubgridDataset):
     stage = config["stage"]
     coarse_channels, fine_channels = _condition_channels(dataset)
@@ -101,6 +134,18 @@ def build_model(config: dict, dataset: SubgridDataset):
         raise ValueError("joint training requires init_coarse and init_allocation checkpoints")
     coarse_checkpoint = torch.load(coarse_path, map_location="cpu")
     allocation_checkpoint = torch.load(allocation_path, map_location="cpu")
+    validate_checkpoint(
+        coarse_checkpoint,
+        expected_stage="coarse",
+        dataset=dataset,
+        label=f"coarse initializer {coarse_path}",
+    )
+    validate_checkpoint(
+        allocation_checkpoint,
+        expected_stage="allocation",
+        dataset=dataset,
+        label=f"allocation initializer {allocation_path}",
+    )
     model.load_pretrained_branches(
         select_weights(coarse_checkpoint), select_weights(allocation_checkpoint)
     )
@@ -172,9 +217,16 @@ def validate(model, loader, config, device, max_batches: int | None = None) -> f
                 break
             batch = move_batch(batch, device)
             torch.manual_seed(int(config["train"]["seed"]) + 900_000 + index)
-            values.append(float(batch_loss(model, batch, config).detach().cpu()))
+            loss = batch_loss(model, batch, config)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"non-finite validation loss at batch {index}"
+                )
+            values.append(float(loss.detach().cpu()))
     model.train()
-    return float(sum(values) / max(len(values), 1))
+    if not values:
+        raise ValueError("validation loader produced no batches")
+    return float(sum(values) / len(values))
 
 
 def main() -> None:
@@ -229,6 +281,13 @@ def main() -> None:
     best = float("inf")
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu")
+        validate_checkpoint(
+            checkpoint,
+            expected_stage=config["stage"],
+            dataset=train_dataset,
+            label=f"resume checkpoint {args.resume}",
+            expected_config=config,
+        )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -265,10 +324,16 @@ def main() -> None:
                 enabled=amp_enabled,
             ):
                 loss = batch_loss(train_model, batch, config)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"non-finite training loss at epoch {epoch + 1}"
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
-                train_model.parameters(), float(config["train"].get("grad_clip", 1.0))
+                train_model.parameters(),
+                float(config["train"].get("grad_clip", 1.0)),
+                error_if_nonfinite=True,
             )
             scaler.step(optimizer)
             scaler.update()
@@ -295,7 +360,7 @@ def main() -> None:
                 None if maximum is None else int(maximum),
             )
             payload = {
-                "schema": "cpc_v3_subgrid_v3",
+                "schema": SUBGRID_SCHEMA,
                 "stage": config["stage"],
                 "epoch": epoch,
                 "model": online if online is not None else model.state_dict(),
@@ -305,7 +370,7 @@ def main() -> None:
                 "scheduler": scheduler.state_dict(),
                 "best_val": min(best, val),
                 "config": config,
-                "subgrid_encoding": train_dataset.encoding.__dict__,
+                "subgrid_encoding": encoding_metadata(train_dataset.encoding),
             }
             if online is not None:
                 model.load_state_dict(online)

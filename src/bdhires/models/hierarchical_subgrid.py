@@ -329,9 +329,14 @@ def _hurdle_velocity_mse(
         torch.ones_like(valid),
         torch.full_like(valid, float(inactive_positive_weight)),
     )
+    # Normalise by the applied weights, not by the valid-cell count.  Dividing
+    # by ``valid.sum()`` makes this term scale with
+    # ``wet_fraction + w * (1 - wet_fraction)``, so the intensity objective
+    # would carry ~6x more relative weight in the monsoon than in the dry
+    # season purely from the wet fraction.
     positive = (
         (prediction[:, :1] - target_velocity[:, :1]).square() * positive_weight
-    ).sum() / valid.sum().clamp_min(1.0)
+    ).sum() / positive_weight.sum().clamp_min(1.0)
     occurrence = _masked_mse(
         prediction[:, 1:2], target_velocity[:, 1:2], mask
     )

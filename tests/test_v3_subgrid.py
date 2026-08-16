@@ -17,6 +17,7 @@ from bdhires.da import (  # noqa: E402
     sample_hierarchical,
 )
 from bdhires.data import (  # noqa: E402
+    SUBGRID_SCHEMA,
     SubgridEncoding,
     SubgridDataset,
     SubgridDatasetConfig,
@@ -356,7 +357,7 @@ def test_validation_dataset_tiles_the_complete_240_canvas():
             "coarse_valid": np.ones((24, 24), bool),
         },
         attrs={
-            "schema": "cpc_v3_subgrid_v3",
+            "schema": SUBGRID_SCHEMA,
             "subgrid_encoding": {"factor": 10},
         },
     )
@@ -591,7 +592,131 @@ def test_hierarchical_archive_redecodes_serialized_states(tmp_path):
     archive = zarr.open_group(str(output), mode="r")
     assert archive.attrs["complete"] is True
     assert archive.attrs["archive_uses_likelihood_hard_decoder"] is True
-    assert archive.attrs["schema"] == "cpc_v3_hierarchical_samples_v2"
+    assert archive.attrs["schema"] == "cpc_v3_hierarchical_samples_v3"
     assert archive.attrs["serialization_max_abs_mm_day"] == 0.0
     assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
     assert np.array_equal(archive["background"][:], fields["background"])
+
+
+def test_encoding_rejects_renamed_or_unknown_frozen_fields():
+    # A v2 archive carries ``intensity_log_clip``.  Silently dropping it would
+    # rebuild the decoder with the current ``intensity_z_clip`` default and
+    # change the physical field with no error anywhere.
+    with pytest.raises(ValueError, match="unknown subgrid encoding fields"):
+        SubgridEncoding.from_mapping({"factor": 10, "intensity_log_clip": 12.0})
+    assert SubgridEncoding.from_mapping({}).factor == 10
+
+
+def test_dataset_rejects_missing_frozen_encoding_metadata():
+    store = _MemoryStore({}, attrs={"schema": SUBGRID_SCHEMA})
+    with pytest.raises(ValueError, match="lacks frozen subgrid_encoding"):
+        SubgridDataset(SubgridDatasetConfig(root="unused"), store=store)
+
+
+def test_hurdle_velocity_weighting_is_independent_of_the_wet_fraction():
+    # The inactive-cell down-weighting must be a weighted mean.  Normalising by
+    # the valid-cell count instead makes the intensity term scale with the
+    # seasonal wet fraction.
+    def loss_for(wet_cells: int):
+        clean = torch.zeros(1, 2, 1, 20)
+        clean[:, 1] = -4.0
+        clean[:, 1, 0, :wet_cells] = 4.0
+        target_velocity = torch.zeros(1, 2, 1, 20)
+        target_velocity[:, 0] = 1.0
+        prediction = torch.zeros_like(target_velocity)
+        mask = torch.ones(1, 1, 1, 20, dtype=torch.bool)
+        return _hurdle_velocity_mse(prediction, target_velocity, clean, mask)
+
+    assert torch.allclose(loss_for(1), loss_for(19))
+    assert torch.allclose(loss_for(10), torch.tensor(0.5))
+
+
+def test_isolated_convective_cell_survives_an_otherwise_dry_coarse_block():
+    # Block mean 0.01 mm/day is far below the 0.1 mm/day per-cell drizzle
+    # threshold, but the block genuinely contains 1 mm/day of rain.  Occurrence
+    # must follow the fine wet mask, not a threshold on the area mean.
+    from bdhires.data import coarse_wet_from_fine
+
+    encoding = _encoding(wet_threshold_mm=0.1)
+    fine = torch.zeros(1, 1, 10, 10)
+    fine[..., 6, 2] = 1.0
+    valid = torch.ones(10, 10, dtype=torch.bool)
+    area = torch.ones(10, 10)
+    targets = encode_subgrid_targets(fine, valid, area, encoding)
+    assert targets.coarse_mm.item() == pytest.approx(0.01)
+    assert coarse_wet_from_fine(targets.fine_valid & (fine >= 0.1), 10).all()
+    assert targets.coarse_state[0, 1, 0, 0] > 0.0  # wet occurrence logit
+
+    decoded = decode_and_reconstruct(
+        targets.coarse_state, targets.allocation_state,
+        targets.coarse_valid, targets.fine_valid, area, encoding,
+    )
+    assert decoded[0, 0, 6, 2].item() == pytest.approx(1.0, abs=1.0e-5)
+    assert torch.count_nonzero(decoded) == 1
+    recovered, _, _ = area_weighted_block_mean(
+        decoded, area, valid, factor=10, valid_area_threshold=0.0
+    )
+    assert torch.allclose(recovered, targets.coarse_mm, atol=1.0e-6)
+
+
+def test_saturated_allocation_latents_are_counted_not_silently_clipped():
+    encoding = _encoding(intensity_z_clip=6.0)
+    allocation = torch.zeros(1, 2, 10, 10)
+    allocation[:, 1] = 4.0
+    allocation[:, 0, 0, :5] = 40.0  # 5 of 100 valid cells saturate the guard
+    _, diagnostics = decode_and_reconstruct(
+        torch.tensor([[[[1.0]], [[4.0]]]]), allocation,
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10), encoding, return_diagnostics=True,
+    )
+    assert diagnostics.clipped_intensity_fraction == pytest.approx(0.05)
+    assert 0.0 < diagnostics.minimum_denominator_fraction <= 1.0
+
+
+def test_training_checkpoint_contract_rejects_old_schema_and_encoding():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts/57_train_subgrid_oracle.py"
+    spec = importlib.util.spec_from_file_location("train_v3_subgrid", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    dataset = type("Dataset", (), {"encoding": _encoding()})()
+    config = {"stage": "coarse"}
+    checkpoint = {
+        "schema": SUBGRID_SCHEMA,
+        "stage": "coarse",
+        "config": config,
+        "subgrid_encoding": dataset.encoding.__dict__,
+    }
+    module.validate_checkpoint(
+        checkpoint,
+        expected_stage="coarse",
+        dataset=dataset,
+        label="test checkpoint",
+        expected_config=config,
+    )
+
+    with pytest.raises(ValueError, match="schema"):
+        module.validate_checkpoint(
+            {**checkpoint, "schema": "cpc_v3_subgrid_v3"},
+            expected_stage="coarse",
+            dataset=dataset,
+            label="old checkpoint",
+        )
+    with pytest.raises(ValueError, match="encoding differs"):
+        module.validate_checkpoint(
+            {
+                **checkpoint,
+                "subgrid_encoding": {
+                    **checkpoint["subgrid_encoding"],
+                    "wet_threshold_mm": 0.2,
+                },
+            },
+            expected_stage="coarse",
+            dataset=dataset,
+            label="wrong encoding",
+        )

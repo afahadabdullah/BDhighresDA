@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.da import authority_decomposition  # noqa: E402
 from bdhires.data import (  # noqa: E402
+    SUBGRID_SCHEMA,
     SubgridEncoding,
     area_weighted_block_mean,
     encoding_metadata,
@@ -192,11 +193,11 @@ def main() -> None:
     samples = _open(args.sample_store)
     if not target.attrs.get("complete", False):
         raise ValueError("target store is not marked complete")
-    if target.attrs.get("schema") != "cpc_v3_subgrid_v3":
-        raise ValueError("target store must use the corrected cpc_v3_subgrid_v3 schema")
+    if target.attrs.get("schema") != SUBGRID_SCHEMA:
+        raise ValueError(f"target store must use the corrected {SUBGRID_SCHEMA} schema")
     if not samples.attrs.get("complete", False):
         raise ValueError("sample store is not marked complete")
-    if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v2":
+    if samples.attrs.get("schema") != "cpc_v3_hierarchical_samples_v3":
         raise ValueError("sample store was not produced by the audited V3 writer")
     if samples.attrs.get("archive_uses_likelihood_hard_decoder") is not True:
         raise ValueError("sample archive lacks a passing hard-decoder round-trip audit")
@@ -223,10 +224,12 @@ def main() -> None:
     target_lon = np.asarray(target["lon"][:], np.float32)[fine_slice[1]]
     valid = torch.from_numpy(valid_np)
     area = torch.from_numpy(area_np)
+    if "subgrid_encoding" not in target.attrs:
+        raise ValueError("target store lacks frozen subgrid_encoding metadata")
+    if "subgrid_encoding" not in samples.attrs:
+        raise ValueError("sample store lacks frozen subgrid_encoding metadata")
     encoding = SubgridEncoding.from_mapping(target.attrs["subgrid_encoding"])
-    sample_encoding = SubgridEncoding.from_mapping(
-        samples.attrs.get("subgrid_encoding", {})
-    )
+    sample_encoding = SubgridEncoding.from_mapping(samples.attrs["subgrid_encoding"])
     if encoding_metadata(sample_encoding) != encoding_metadata(encoding):
         raise ValueError("sample and target stores use different subgrid encodings")
     if not np.array_equal(np.asarray(samples["valid"][:], bool), valid_np):

@@ -38,7 +38,7 @@ python scripts/56_build_chirps_subgrid_targets.py \
   --era5-glob 'data/raw/era5/era5_daily_*.nc' \
   --static data/static/static_wide_cpc.nc \
   --start 1981-01-01 --end 2024-12-31 \
-  --out data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  --out data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
 ```
 
 The end date deliberately excludes the existing 2025 CHIRPS file so the
@@ -52,13 +52,16 @@ relative loss weight, enough to define their marginal without letting dry cells
 dominate training. Allocation intensity is clipped at +/-6 in standardized
 latent units before the frozen mean/std are undone. Target dequantisation is
 seeded per date, so changing `--chunk-days` cannot change the learned target.
-The positive and occurrence channels retain the same valid-cell denominator,
-so their configured balance does not vary with seasonal wet fraction.
+The positive channel uses a proper weighted-mean denominator and occurrence
+uses a valid-cell mean, so their aggregate configured balance does not vary
+with seasonal wet fraction. A coarse block is wet when at least one valid fine
+cell exceeds 0.1 mm/day; applying that per-cell threshold to the block mean
+would erase isolated convective cells.
 Occurrence remains trained across every valid block/cell.
 
-The corrected archive schema is `cpc_v3_subgrid_v3`. Earlier V3 target archives
+The corrected archive schema is `cpc_v3_subgrid_v4`. Earlier V3 target archives
 and checkpoints are intentionally rejected and must be moved aside before
-restarting; they encode a different allocation/decoder contract. Preparation
+restarting; they encode a different occurrence/loss/decoder contract. Preparation
 also records `hard_threshold_oracle_ceiling`, the target-projection loss against
 raw CHIRPS caused by the 0.1 mm/day hard wet threshold and decoder before any
 model is trained.
@@ -71,9 +74,12 @@ On Prism, submit the complete dependency chain from the repository root:
 bash slurm/submit_v3_subgrid_pipeline.sh
 ```
 
-This sends preparation to `grace-cpuonly`, starts the coarse and allocation
-GH200 jobs in parallel after preparation succeeds, and starts joint training
-only after both branches succeed. A completed target archive is reused.
+This first runs the V3 regression suite on `grace-cpuonly`, sends preparation
+to `grace-cpuonly` after the tests pass, starts the coarse and allocation GH200
+jobs in parallel after preparation succeeds, and starts joint training only
+after both branches succeed. Set `V3_RUN_TESTS=0` only for a deliberate rerun
+after the same commit has already passed. A completed schema-v4 target archive
+is reused.
 Interrupted training resumes from `last.pt` only when the saved and requested
 configs match exactly. If `data/static/static_wide_cpc.nc` is absent, the
 preparation job builds it from an existing yearly CHIRPS file and
@@ -141,11 +147,11 @@ and optional `<method>_coarse_mm` arrays. The writer reopens the temporary
 archive, hard-decodes every serialized coarse/allocation state with the stored
 masks, areas and encoding, and checks that result against every physical field
 before atomically marking it complete. Script 58 rejects an unverified,
-pre-v2-sample-schema or manually assembled store.
+pre-v3-sample-schema or manually assembled store.
 
 ```bash
 python scripts/58_evaluate_subgrid_prior.py \
-  --target-store data/processed/cpc_v3_subgrid/wide_cpc.zarr \
+  --target-store data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr \
   --sample-store data/processed/cpc_v3_subgrid/confirmation.zarr \
   --methods background,imerg_only,gauges_only,simultaneous_huber3 \
   --out-dir data/processed/cpc_v3_subgrid/evaluation

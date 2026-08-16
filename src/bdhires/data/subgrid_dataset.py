@@ -18,6 +18,9 @@ from torch.utils.data import Dataset, get_worker_info
 from ..grids import Grid, crop_offsets
 
 
+SUBGRID_SCHEMA = "cpc_v3_subgrid_v4"
+
+
 @dataclass(frozen=True)
 class SubgridEncoding:
     """Frozen target/decoder choices that define one V3-SG experiment."""
@@ -61,7 +64,18 @@ class SubgridEncoding:
     def from_mapping(cls, values) -> "SubgridEncoding":
         values = dict(values or {})
         known = {field.name for field in cls.__dataclass_fields__.values()}
-        return cls(**{key: value for key, value in values.items() if key in known})
+        unknown = sorted(set(values) - known)
+        if unknown:
+            # Silently dropping an unknown key would reinterpret an archive
+            # written under a different contract (e.g. the removed
+            # ``intensity_log_clip``) using current defaults, producing a
+            # different decoder with no error anywhere.
+            raise ValueError(
+                f"unknown subgrid encoding fields {unknown}; this metadata was "
+                "written by a different encoding contract and must be rebuilt "
+                "rather than reinterpreted with current defaults"
+            )
+        return cls(**values)
 
 
 @dataclass
@@ -81,8 +95,10 @@ class ReconstructionDiagnostics:
     positive_blocks: int
     fallback_fraction: float
     minimum_denominator: float
+    minimum_denominator_fraction: float
     maximum_weight_to_mean_ratio: float
     maximum_cell_mass_fraction: float
+    clipped_intensity_fraction: float
 
 
 def cell_area_weights(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
@@ -312,6 +328,20 @@ def allocation_log_weight_target(
     ), wet
 
 
+def coarse_wet_from_fine(wet: torch.Tensor, factor: int = 10) -> torch.Tensor:
+    """A coarse block is wet iff it contains at least one wet fine cell.
+
+    Thresholding the *area mean* against the per-cell drizzle threshold is not
+    equivalent and silently deletes rain: a 0.5-degree block holding one
+    1 mm/day convective cell has a mean of 0.01 mm/day, so a 0.1 mm/day test
+    marks the whole block dry and the hard occurrence gate erases it.  Isolated
+    convective cells are precisely the subgrid signal this experiment exists to
+    resolve, so occurrence must be defined consistently with the reconstruction,
+    which places mass only on wet fine cells.
+    """
+    return _blockify(wet.to(torch.float32), factor).sum(dim=(-1, -2)) > 0.0
+
+
 def encode_subgrid_targets(
     fine_mm: torch.Tensor,
     valid: torch.Tensor,
@@ -337,7 +367,7 @@ def encode_subgrid_targets(
     )
 
     wet = valid_b & (fine >= float(encoding.wet_threshold_mm))
-    coarse_wet = coarse_valid & (coarse >= float(encoding.wet_threshold_mm))
+    coarse_wet = coarse_valid & coarse_wet_from_fine(wet, encoding.factor)
     amount = (torch.sqrt(coarse) - float(encoding.amount_sqrt_mean)) / float(
         encoding.amount_sqrt_std
     )
@@ -502,6 +532,12 @@ def reconstruct_from_amount(
         wet_st = (wet_hard - wet_soft).detach() + wet_soft
 
     occurrence = wet_st if hard else wet_soft
+    # The clamp is a hard guard: any cell beyond it has an exactly zero
+    # likelihood gradient during DA and can no longer be corrected by an
+    # observation.  That has to be observable, not silent.
+    clipped_intensity = (
+        allocation_state[:, :1].detach().abs() > float(encoding.intensity_z_clip)
+    ) & valid_b
     standardized_intensity = allocation_state[:, :1].clamp(
         min=-float(encoding.intensity_z_clip),
         max=float(encoding.intensity_z_clip),
@@ -568,13 +604,30 @@ def reconstruct_from_amount(
         float(selected_denominator.amin().cpu())
         if selected_denominator.numel() else 0.0
     )
+    # Subtracting the block maximum before exp forces at least one candidate
+    # weight to 1, so the raw denominator is now bounded below by a cell area
+    # and ``denominator_floor`` can never bind.  Report the scale-free ratio,
+    # which still detects a block collapsing onto a single cell.
+    denominator_fraction = denominator / valid_area.clamp_min(
+        float(encoding.denominator_floor)
+    )
+    selected_fraction = denominator_fraction.detach()[positive_mask]
+    minimum_denominator_fraction = (
+        float(selected_fraction.amin().cpu())
+        if selected_fraction.numel() else 0.0
+    )
+    valid_cell_count = valid_b.sum().to(torch.float64).clamp_min(1.0)
     diagnostics = ReconstructionDiagnostics(
         empty_wet_fallbacks=fallback_count,
         positive_blocks=positive_count,
         fallback_fraction=fallback_count / max(positive_count, 1),
         minimum_denominator=minimum_denominator,
+        minimum_denominator_fraction=minimum_denominator_fraction,
         maximum_weight_to_mean_ratio=_masked_max(weight_ratio),
         maximum_cell_mass_fraction=_masked_max(mass_fraction),
+        clipped_intensity_fraction=float(
+            (clipped_intensity.sum().to(torch.float64) / valid_cell_count).cpu()
+        ),
     )
     return field, diagnostics
 
@@ -626,12 +679,17 @@ class SubgridDataset(Dataset):
         self.z = store
         attrs = getattr(store, "attrs", {})
         schema = attrs.get("schema")
-        if schema != "cpc_v3_subgrid_v3":
+        if schema != SUBGRID_SCHEMA:
             raise ValueError(
-                f"target store schema must be cpc_v3_subgrid_v3, got {schema!r}; "
+                f"target store schema must be {SUBGRID_SCHEMA}, got {schema!r}; "
                 "rebuild the V3 target archive because the decoder contract changed"
             )
-        self.encoding = SubgridEncoding.from_mapping(attrs.get("subgrid_encoding", {}))
+        if "subgrid_encoding" not in attrs:
+            raise ValueError(
+                "target store lacks frozen subgrid_encoding metadata; rebuild the "
+                "archive rather than applying current decoder defaults"
+            )
+        self.encoding = SubgridEncoding.from_mapping(attrs["subgrid_encoding"])
         self.encoding.validate()
         if self.encoding.factor != cfg.factor:
             raise ValueError(

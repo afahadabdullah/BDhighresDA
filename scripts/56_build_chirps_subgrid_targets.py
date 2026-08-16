@@ -12,7 +12,7 @@ python scripts/56_build_chirps_subgrid_targets.py \
   --cpc-glob 'data/raw/cpc/precip.*.nc' \
   --era5-glob 'data/raw/era5/era5_daily_*.nc' \
   --static data/static/static_wide_cpc.nc \
-  --out data/processed/cpc_v3_subgrid/wide_cpc.zarr
+  --out data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
 """
 
 from __future__ import annotations
@@ -30,10 +30,12 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.data import (  # noqa: E402
+    SUBGRID_SCHEMA,
     SubgridEncoding,
     allocation_log_weight_target,
     area_weighted_block_mean,
     cell_area_weights,
+    coarse_wet_from_fine,
     decode_and_reconstruct,
     encode_subgrid_targets,
     encoding_metadata,
@@ -469,17 +471,22 @@ def main() -> None:
         )
         local_training = training[start:stop]
         if local_training.any():
-            coarse_values = coarse_mm.numpy()[local_training, 0]
-            coarse_wet = coarse_valid[None] & (
-                coarse_values >= float(args.wet_threshold)
-            )
-            amount_stats.update(np.sqrt(coarse_values[coarse_wet]))
             centred_log, wet = allocation_log_weight_target(
                 torch.from_numpy(raw)[:, None],
                 torch.from_numpy(fine_valid),
                 torch.from_numpy(area),
                 statistics_encoding,
             )
+            coarse_values = coarse_mm.numpy()[local_training, 0]
+            # Use the same occurrence rule as the encoder.  Thresholding the
+            # block mean against the per-cell drizzle threshold would fit the
+            # amount statistics on a different set of blocks than the ones the
+            # target encoder marks wet.
+            coarse_wet = (
+                coarse_valid[None]
+                & coarse_wet_from_fine(wet, factor).numpy()[:, 0]
+            )[local_training]
+            amount_stats.update(np.sqrt(coarse_values[coarse_wet]))
             centred_values = centred_log.numpy()[local_training, 0]
             wet_values = wet.numpy()[local_training, 0]
             intensity_stats.update(centred_values[wet_values])
@@ -521,7 +528,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     root = _zarr_group(output, args.overwrite)
     root.attrs.update(
-        schema="cpc_v3_subgrid_v3",
+        schema=SUBGRID_SCHEMA,
         complete=False,
         subgrid_encoding=encoding_metadata(encoding),
         fine_grid={
