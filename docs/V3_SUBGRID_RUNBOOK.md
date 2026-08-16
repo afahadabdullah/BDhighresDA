@@ -162,6 +162,20 @@ a smoke/pilot evaluation, not a DA hyperparameter selection or publishable
 confirmation. Change `V4_TEST_OUT_ROOT` whenever changing its dates, members,
 steps or DA settings; completed sample archives are never overwritten.
 
+If all six arms and all requested days finish but the writer stops only on a
+sub-millimetre GPU/CPU float32 hard-decode roundoff audit, retain the generated
+`v4_da_samples.zarr.incomplete` store and run:
+
+```bash
+V4_TEST_RECOVER_INCOMPLETE=1 bash slurm/submit_v4_subgrid_da_test.sh
+```
+
+Recovery validates the dates, members, Heun steps, methods, coordinates, masks
+and areas, then canonicalises the physical arrays from their already serialized
+states and continues directly to evaluation. It never reruns sampling and it
+still rejects differences outside the documented absolute-plus-relative
+float32 bound.
+
 ### Diagnostic use of the superseded pre-v4 checkpoint
 
 If the earlier `runs/prior_h100_cpc_v3_subgrid/joint/best.pt` completed, it can

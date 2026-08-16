@@ -41,6 +41,7 @@ CHECKPOINT="${V4_TEST_CHECKPOINT:-runs/prior_h100_cpc_v3_subgrid_v4/joint/best.p
 TARGET="${V4_TEST_TARGET:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
 IMERG="${V4_TEST_IMERG:-data/processed/imerg_prepared_ing2022/imerg_0p4deg_20220501_20220510.nc}"
 OUT_ROOT="${V4_TEST_OUT_ROOT:-data/processed/v4_da_test/may2022_5day}"
+RECOVER_INCOMPLETE="${V4_TEST_RECOVER_INCOMPLETE:-0}"
 DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 STATION_CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 DAILY="$OUT_ROOT/bmd_daily.csv"
@@ -119,6 +120,7 @@ else
 fi
 
 reuse_sample=0
+recover_sample=0
 if [[ -d "$SAMPLE_STORE" && -s "$SAMPLE_REPORT" ]]; then
     if "$PYTHON_BIN" - "$SAMPLE_STORE" "$SAMPLE_REPORT" "$TARGET" \
         "$CHECKPOINT" "$IMERG" "$START" "$END" "$MEMBERS" "$STEPS" \
@@ -177,9 +179,25 @@ PY
         echo "Set V4_TEST_OUT_ROOT to a new directory; files are never overwritten." >&2
         exit 1
     fi
+elif [[
+    "$RECOVER_INCOMPLETE" == "1" &&
+    ! -e "$SAMPLE_STORE" &&
+    -d "$SAMPLE_STORE.incomplete" &&
+    ! -e "$SAMPLE_REPORT"
+]]; then
+    recover_sample=1
+    echo "Recovering fully sampled incomplete archive without GPU resampling:"
+    echo "  $SAMPLE_STORE.incomplete"
+elif [[ "$RECOVER_INCOMPLETE" == "1" ]]; then
+    echo "ERROR: recovery was requested, but the exact recoverable state is absent:" >&2
+    echo "  expected $SAMPLE_STORE.incomplete" >&2
+    echo "  expected no completed sample store or sampling report" >&2
+    exit 1
 elif [[ -e "$SAMPLE_STORE" || -e "$SAMPLE_STORE.incomplete" || -e "$SAMPLE_REPORT" ]]; then
     echo "ERROR: partial v4 diagnostic output exists under $OUT_ROOT" >&2
-    echo "Inspect it, then use a new V4_TEST_OUT_ROOT. Nothing is deleted automatically." >&2
+    echo "For the audited float32 roundoff failure, rerun with:" >&2
+    echo "  V4_TEST_RECOVER_INCOMPLETE=1 bash slurm/submit_v4_subgrid_da_test.sh" >&2
+    echo "Otherwise inspect it, then use a new V4_TEST_OUT_ROOT." >&2
     exit 1
 fi
 
@@ -193,6 +211,10 @@ echo "  output:     $OUT_ROOT"
 echo "  WARNING: short diagnostic only; not DA selection or confirmation"
 
 if [[ "$reuse_sample" == "0" ]]; then
+    recovery_args=()
+    if [[ "$recover_sample" == "1" ]]; then
+        recovery_args=(--recover-incomplete)
+    fi
     srun --ntasks=1 "$PYTHON_BIN" -u scripts/60_v4_subgrid_da_test.py \
         --target-store "$TARGET" \
         --checkpoint "$CHECKPOINT" \
@@ -214,7 +236,8 @@ if [[ "$reuse_sample" == "0" ]]; then
         --huber-delta "$HUBER_DELTA" \
         --seed "$SEED" \
         --out-store "$SAMPLE_STORE" \
-        --report "$SAMPLE_REPORT"
+        --report "$SAMPLE_REPORT" \
+        "${recovery_args[@]}"
 fi
 
 "$PYTHON_BIN" -u scripts/58_evaluate_subgrid_prior.py \

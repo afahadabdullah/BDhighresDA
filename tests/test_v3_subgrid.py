@@ -46,7 +46,10 @@ from bdhires.models.hierarchical_subgrid import (  # noqa: E402
     allocation_flow_matching_loss,
 )
 from bdhires.models.unet import UNet  # noqa: E402
-from bdhires.zarr_output import write_hierarchical_sample_zarr  # noqa: E402
+from bdhires.zarr_output import (  # noqa: E402
+    recover_incomplete_hierarchical_sample_zarr,
+    write_hierarchical_sample_zarr,
+)
 
 
 def _encoding(**kwargs):
@@ -634,6 +637,84 @@ def test_hierarchical_archive_redecodes_serialized_states(tmp_path):
     legacy_archive = zarr.open_group(str(legacy_output), mode="r")
     assert legacy_archive.attrs["legacy_v2_decoder"] is True
     assert legacy_archive.attrs["subgrid_encoding"]["intensity_log_clip"] == 12.0
+
+
+def test_archive_canonicalizes_bounded_device_decode_roundoff(tmp_path):
+    encoding = _encoding()
+    coarse = np.zeros((1, 2, 2, 1, 1), np.float32)
+    coarse[:, :, 0] = 10.0
+    coarse[:, :, 1] = 4.0
+    allocation = np.zeros((1, 2, 2, 10, 10), np.float32)
+    allocation[:, :, 1] = 4.0
+    expected = decode_and_reconstruct(
+        torch.from_numpy(coarse[0]),
+        torch.from_numpy(allocation[0]),
+        torch.ones(1, 1, dtype=torch.bool),
+        torch.ones(10, 10, dtype=torch.bool),
+        torch.ones(10, 10),
+        encoding,
+    )[:, 0].numpy()[None]
+    device_rendering = expected + np.float32(2.0e-4)
+    output = tmp_path / "canonical.zarr"
+    write_hierarchical_sample_zarr(
+        output,
+        fields={"background": device_rendering},
+        coarse_states={"background": coarse},
+        allocation_states={"background": allocation},
+        selected_times=np.asarray(["2022-05-01"]),
+        lat=np.arange(10, dtype=np.float32),
+        lon=np.arange(10, dtype=np.float32),
+        valid=np.ones((10, 10), bool),
+        coarse_valid=np.ones((1, 1), bool),
+        cell_area=np.ones((10, 10), np.float32),
+        encoding=encoding,
+        diagnostics={"background": {"daily": [{"n_steps": 25, "heun": True}]}},
+    )
+    import zarr
+
+    archive = zarr.open_group(str(output), mode="r")
+    assert np.array_equal(archive["background"][:], expected)
+    assert archive.attrs["saved_state_hard_decode_max_abs_mm_day"]["background"] == 0.0
+    assert archive.attrs[
+        "source_to_canonical_hard_decode_max_abs_mm_day"
+    ]["background"] == pytest.approx(2.0e-4, abs=1.0e-5)
+
+
+def test_explicit_recovery_reuses_fully_written_incomplete_states(tmp_path):
+    encoding = _encoding()
+    fields = {"background": np.full((1, 2, 10, 10), 2.0, np.float32)}
+    coarse = {"background": np.ones((1, 2, 2, 1, 1), np.float32)}
+    allocation = {"background": np.ones((1, 2, 2, 10, 10), np.float32)}
+    output = tmp_path / "recover.zarr"
+    with pytest.raises(RuntimeError, match="serialized hard-decoded states"):
+        write_hierarchical_sample_zarr(
+            output,
+            fields=fields,
+            coarse_states=coarse,
+            allocation_states=allocation,
+            selected_times=np.asarray(["2022-05-01"]),
+            lat=np.arange(10, dtype=np.float32),
+            lon=np.arange(10, dtype=np.float32),
+            valid=np.ones((10, 10), bool),
+            coarse_valid=np.ones((1, 1), bool),
+            cell_area=np.ones((10, 10), np.float32),
+            encoding=encoding,
+            diagnostics={"background": {"daily": [{"n_steps": 25, "heun": True}]}},
+        )
+    import zarr
+
+    partial = zarr.open_group(str(output) + ".incomplete", mode="a")
+    partial["background"][:] = np.float32(1.00005)
+    recovered = recover_incomplete_hierarchical_sample_zarr(
+        output,
+        encoding=encoding,
+        expected_methods=("background",),
+    )
+    archive = zarr.open_group(str(output), mode="r")
+    assert recovered["background"] == pytest.approx(5.0e-5, abs=1.0e-5)
+    assert archive.attrs["complete"] is True
+    assert archive.attrs["recovered_from_device_roundoff_audit"] is True
+    assert np.array_equal(archive["background"][:], np.ones((1, 2, 10, 10)))
 
 
 def test_encoding_rejects_renamed_or_unknown_frozen_fields():

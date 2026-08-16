@@ -69,7 +69,10 @@ from bdhires.models import (  # noqa: E402
     HierarchicalState,
     select_weights,
 )
-from bdhires.zarr_output import write_hierarchical_sample_zarr  # noqa: E402
+from bdhires.zarr_output import (  # noqa: E402
+    recover_incomplete_hierarchical_sample_zarr,
+    write_hierarchical_sample_zarr,
+)
 
 
 METHODS = (
@@ -129,6 +132,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--report",
         default="data/processed/v4_da_test/may2022_5day/v4_da_sampling.json",
+    )
+    parser.add_argument(
+        "--recover-incomplete",
+        action="store_true",
+        help=(
+            "recover a fully sampled .incomplete archive stopped only by the "
+            "GPU/CPU float32 hard-decode audit; never resamples"
+        ),
     )
     parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
@@ -381,8 +392,260 @@ def append_array(group, name: str, values, dimensions: tuple[str, ...], chunks=N
     return array
 
 
+def validate_recoverable_partial(
+    output: Path,
+    *,
+    days: np.ndarray,
+    members: int,
+    n_steps: int,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    valid: np.ndarray,
+    coarse_valid: np.ndarray,
+    area: np.ndarray,
+    target_crop: tuple[int, int, int, int],
+) -> None:
+    """Prove that an explicit recovery request matches the stopped pilot."""
+    partial = output.with_name(output.name + ".incomplete")
+    if output.exists():
+        raise FileExistsError(f"completed sample store already exists: {output}")
+    root = zarr.open_group(str(partial), mode="r")
+    stored_days = np.asarray(root["time"][:], np.int64).astype("datetime64[ns]")
+    expected_days = np.asarray(days).astype("datetime64[ns]")
+    if not np.array_equal(stored_days, expected_days):
+        raise ValueError("incomplete archive dates differ from this recovery request")
+    if int(root["member"].shape[0]) != int(members):
+        raise ValueError("incomplete archive member count differs from recovery request")
+    if set(dict(root.attrs.get("method_specs", {}))) != set(METHODS):
+        raise ValueError("incomplete archive does not contain the frozen six pilot arms")
+    if list(root.attrs.get("target_crop", [])) != list(target_crop):
+        raise ValueError("incomplete archive target crop differs from recovery request")
+    checks = (
+        ("lat", np.asarray(lat, np.float32)),
+        ("lon", np.asarray(lon, np.float32)),
+        ("valid", np.asarray(valid, bool)),
+        ("coarse_valid", np.asarray(coarse_valid, bool)),
+        ("cell_area", np.asarray(area, np.float32)),
+    )
+    for name, expected in checks:
+        if not np.array_equal(np.asarray(root[name][:]), expected):
+            raise ValueError(f"incomplete archive {name} differs from recovery request")
+    diagnostics = dict(root.attrs.get("sampler_diagnostics", {}))
+    for method in METHODS:
+        daily = list(diagnostics.get(method, {}).get("daily", []))
+        if len(daily) != len(days):
+            raise ValueError(f"incomplete archive has the wrong {method} day count")
+        if any(int(item.get("n_steps", -1)) != int(n_steps) for item in daily):
+            raise ValueError(f"incomplete archive {method} used different ODE steps")
+        if any(item.get("heun") is not True for item in daily):
+            raise ValueError(f"incomplete archive {method} was not sampled with Heun")
+
+
+def require_frozen_default_recovery_request(args: argparse.Namespace) -> None:
+    """Prevent attaching invented provenance to the pre-fix partial archive.
+
+    The writer version that produced the recoverable store had not yet attached
+    the experiment-specific report when its audit stopped. Geometry, dates,
+    members and ODE steps are recoverable from the arrays and diagnostics, but
+    the checkpoint path and likelihood hyperparameters are not. Recovery is
+    therefore restricted to the one frozen default pilot that produced the
+    reported failure.
+    """
+    expected = {
+        "target_store": "data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr",
+        "checkpoint": "runs/prior_h100_cpc_v3_subgrid_v4/joint/best.pt",
+        "imerg": (
+            "data/processed/imerg_prepared_ing2022/"
+            "imerg_0p4deg_20220501_20220510.nc"
+        ),
+        "start": "2022-05-01",
+        "end": "2022-05-05",
+        "background_day_offset": -1,
+        "members": 4,
+        "n_steps": 25,
+        "canvas": 160,
+        "withhold": 0.20,
+        "min_coverage": 0.80,
+        "holdout_neighbor_km": 75.0,
+        "holdout_max_gap_deg": 200.0,
+        "gauge_sigma_mm": 3.0,
+        "imerg_sigma_floor_mm": 1.0,
+        "imerg_representativeness_mm": 0.0,
+        "imerg_factor": 8,
+        "imerg_error_corr_cells": 0.75,
+        "imerg_r_multiplier": 1.0,
+        "guidance_gamma": 1.0,
+        "guidance_scale": 1.0,
+        "guidance_clip_norm": 100.0,
+        "huber_delta": 3.0,
+        "seed": 4202205,
+    }
+    mismatched = {
+        name: (getattr(args, name), value)
+        for name, value in expected.items()
+        if getattr(args, name) != value
+    }
+    if mismatched:
+        raise ValueError(
+            "the stopped archive predates embedded sampling provenance, so recovery "
+            f"is allowed only for the frozen default pilot; mismatches={mismatched}"
+        )
+
+
+def complete_diagnostic_archive(
+    output: Path,
+    *,
+    args: argparse.Namespace,
+    days: np.ndarray,
+    condition_days: np.ndarray,
+    grid: Grid,
+    canvas_slice: tuple[slice, slice],
+    core_slice: tuple[slice, slice],
+    imerg_crop: tuple[int, int, int, int],
+    imerg: dict,
+    chirps: np.ndarray,
+    cpc_mm: np.ndarray,
+    stations,
+    gauge_mm: np.ndarray,
+    withheld: np.ndarray,
+    assimilated: np.ndarray,
+    nearest: np.ndarray,
+    bearing_gap: np.ndarray,
+    correlation_inflation: float,
+    guidance: GuidanceConfig,
+) -> None:
+    """Attach deterministic context and publish the pilot provenance report."""
+    rows, columns = canvas_slice
+    fine_shape = tuple(np.asarray(chirps).shape[-2:])
+    coarse_shape = tuple(np.asarray(cpc_mm).shape[-2:])
+    archive = zarr.open_group(str(output), mode="a")
+    if not archive.attrs.get("complete", False) or not archive.attrs.get(
+        "archive_uses_likelihood_hard_decoder", False
+    ):
+        raise ValueError("sample archive was not completed by the hard-decoder audit")
+    if archive.attrs.get("diagnostic_complete", False):
+        raise FileExistsError(f"diagnostic archive is already complete: {output}")
+    expected_time = np.asarray(days).astype("datetime64[ns]").astype(np.int64)
+    if not np.array_equal(np.asarray(archive["time"][:], np.int64), expected_time):
+        raise ValueError("sample archive dates differ from diagnostic context")
+    if int(archive["member"].shape[0]) != int(args.members):
+        raise ValueError("sample archive member count differs from diagnostic request")
+    for name in (
+        "context_chirps_mm",
+        "context_cpc_mm",
+        "context_imerg_mm",
+        "context_imerg_random_error_mm",
+        "station_value_mm",
+    ):
+        if name in archive:
+            raise FileExistsError(f"partial diagnostic metadata already contains {name}")
+
+    archive.attrs.update(
+        diagnostic_complete=False,
+        diagnostic_kind="v4_short_da_pilot",
+        source_checkpoint=str(args.checkpoint),
+        source_target_store=str(args.target_store),
+        condition_day_offset=int(args.background_day_offset),
+        imerg_source=str(args.imerg),
+        imerg_canvas_crop=list(imerg_crop),
+        imerg_factor=int(args.imerg_factor),
+        imerg_error_corr_cells=float(args.imerg_error_corr_cells),
+        imerg_r_inflation=float(correlation_inflation),
+        holdout_design="neighbored_holdout; supported interpolation diagnostic",
+    )
+    append_array(
+        archive, "context_chirps_mm", chirps, ("time", "lat", "lon"),
+        chunks=(1, *fine_shape),
+    )
+    append_array(
+        archive, "context_cpc_mm", cpc_mm.astype(np.float32),
+        ("time", "coarse_lat", "coarse_lon"), chunks=(1, *coarse_shape),
+    )
+    append_array(
+        archive, "context_imerg_mm", imerg["precipitation"],
+        ("time", "imerg_lat", "imerg_lon"),
+        chunks=(1, *imerg["precipitation"].shape[1:]),
+    )
+    append_array(
+        archive, "context_imerg_random_error_mm", imerg["random_error"],
+        ("time", "imerg_lat", "imerg_lon"),
+        chunks=(1, *imerg["random_error"].shape[1:]),
+    )
+    append_array(archive, "imerg_lat", imerg["lat"], ("imerg_lat",))
+    append_array(archive, "imerg_lon", imerg["lon"], ("imerg_lon",))
+    append_array(archive, "station_lat", stations.lat.astype(np.float32), ("station",))
+    append_array(archive, "station_lon", stations.lon.astype(np.float32), ("station",))
+    append_array(
+        archive, "station_value_mm", gauge_mm.astype(np.float32),
+        ("time", "station"),
+    )
+    append_array(
+        archive, "station_withheld", np.isin(np.arange(len(stations)), withheld),
+        ("station",),
+    )
+    archive.attrs["station_ids"] = [str(value) for value in stations.ids]
+    archive.attrs["diagnostic_complete"] = True
+    zarr.consolidate_metadata(str(output))
+
+    report = {
+        "schema": "cpc_v3_subgrid_v4_da_pilot_v1",
+        "status": "diagnostic_only_not_configuration_selection",
+        "target_store": args.target_store,
+        "checkpoint": args.checkpoint,
+        "sample_store": args.out_store,
+        "dates": [str(days[0]), str(days[-1])],
+        "condition_dates": [str(condition_days[0]), str(condition_days[-1])],
+        "members": args.members,
+        "n_steps": args.n_steps,
+        "seed": args.seed,
+        "methods": list(METHODS),
+        "canvas": {
+            "grid": grid.name,
+            "shape": list(grid.shape),
+            "target_crop": [rows.start, rows.stop, columns.start, columns.stop],
+            "bd_cpc_core": [
+                core_slice[0].start,
+                core_slice[0].stop,
+                core_slice[1].start,
+                core_slice[1].stop,
+            ],
+            "imerg_crop": list(imerg_crop),
+        },
+        "stations": {
+            "total": len(stations),
+            "assimilated_fold": int(len(assimilated)),
+            "withheld": int(len(withheld)),
+            "withheld_ids": [str(stations.ids[index]) for index in withheld],
+            "withheld_nearest_neighbor_km": nearest[withheld].tolist(),
+            "withheld_max_bearing_gap_deg": bearing_gap[withheld].tolist(),
+            "withhold_fraction": args.withhold,
+            "minimum_coverage": args.min_coverage,
+            "holdout_neighbor_km": args.holdout_neighbor_km,
+            "holdout_max_gap_deg": args.holdout_max_gap_deg,
+        },
+        "observation_model": {
+            "gauge_sigma_mm": args.gauge_sigma_mm,
+            "imerg_factor": args.imerg_factor,
+            "imerg_sigma_floor_mm": args.imerg_sigma_floor_mm,
+            "imerg_representativeness_mm": args.imerg_representativeness_mm,
+            "imerg_error_corr_cells": args.imerg_error_corr_cells,
+            "imerg_r_multiplier": args.imerg_r_multiplier,
+            "imerg_r_inflation": correlation_inflation,
+            "guidance": asdict(guidance),
+            "warning": "raw IMERG V07B is not bias corrected in this pilot",
+        },
+    }
+    report_path = Path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(f"[done] wrote {output}")
+    print(f"[done] wrote {report_path}")
+
+
 def main() -> None:
     args = parse_args()
+    if args.preflight_only and args.recover_incomplete:
+        raise ValueError("--preflight-only and --recover-incomplete are mutually exclusive")
     if args.members < 2:
         raise ValueError("--members must be at least 2")
     if args.n_steps < 2:
@@ -505,6 +768,67 @@ def main() -> None:
     nearest = nearest_neighbour_km(stations.lat, stations.lon)
     bearing_gap = max_bearing_gap_deg(stations.lat, stations.lon)
 
+    guidance = GuidanceConfig(
+        gamma=args.guidance_gamma,
+        scale=args.guidance_scale,
+        t_start=0.10,
+        t_end=0.999,
+        clip_norm=args.guidance_clip_norm,
+        huber_delta=args.huber_delta,
+    )
+    correlation_inflation = max(
+        1.0, 2.0 * np.pi * args.imerg_error_corr_cells**2
+    ) * args.imerg_r_multiplier
+
+    if args.recover_incomplete:
+        require_frozen_default_recovery_request(args)
+        output = Path(args.out_store)
+        target_crop = (rows.start, rows.stop, columns.start, columns.stop)
+        validate_recoverable_partial(
+            output,
+            days=days,
+            members=args.members,
+            n_steps=args.n_steps,
+            lat=lat,
+            lon=lon,
+            valid=valid,
+            coarse_valid=coarse_valid,
+            area=area,
+            target_crop=target_crop,
+        )
+        recovered = recover_incomplete_hierarchical_sample_zarr(
+            output,
+            encoding=encoding,
+            expected_methods=METHODS,
+        )
+        print(
+            "[recover] canonicalized completed device samples without resampling; "
+            f"maximum source/CPU difference={max(recovered.values()):.6g} mm/day",
+            flush=True,
+        )
+        complete_diagnostic_archive(
+            output,
+            args=args,
+            days=days,
+            condition_days=condition_days,
+            grid=grid,
+            canvas_slice=canvas_slice,
+            core_slice=core_slice,
+            imerg_crop=imerg_crop,
+            imerg=imerg,
+            chirps=chirps,
+            cpc_mm=cpc_mm,
+            stations=stations,
+            gauge_mm=gauge_mm,
+            withheld=withheld,
+            assimilated=assimilated,
+            nearest=nearest,
+            bearing_gap=bearing_gap,
+            correlation_inflation=correlation_inflation,
+            guidance=guidance,
+        )
+        return
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("the v4 joint diagnostic requires an allocated GPU")
@@ -517,14 +841,6 @@ def main() -> None:
         occurrence_temperature=float(sampling.get("occurrence_temperature", 1.0)),
         soft_hard_median_sigma=float(sampling.get("soft_hard_median_sigma", 0.10)),
         soft_hard_p95_sigma=float(sampling.get("soft_hard_p95_sigma", 0.50)),
-    )
-    guidance = GuidanceConfig(
-        gamma=args.guidance_gamma,
-        scale=args.guidance_scale,
-        t_start=0.10,
-        t_end=0.999,
-        clip_norm=args.guidance_clip_norm,
-        huber_delta=args.huber_delta,
     )
     fine_valid_t = torch.from_numpy(valid).to(device)
     coarse_valid_t = torch.from_numpy(coarse_valid).to(device)
@@ -551,10 +867,6 @@ def main() -> None:
         key: CompositeObsOperator([operator, satellite_operator]).to(device)
         for key, operator in gauge_operators.items()
     }
-    correlation_inflation = max(
-        1.0, 2.0 * np.pi * args.imerg_error_corr_cells**2
-    ) * args.imerg_r_multiplier
-
     n_days = len(days)
     fine_shape = tuple(valid.shape)
     coarse_shape = tuple(coarse_valid.shape)
@@ -750,121 +1062,27 @@ def main() -> None:
         method_specs=method_specs,
         target_crop=(rows.start, rows.stop, columns.start, columns.stop),
     )
-    archive = zarr.open_group(str(output), mode="a")
-    archive.attrs.update(
-        diagnostic_complete=False,
-        diagnostic_kind="v4_short_da_pilot",
-        source_checkpoint=str(args.checkpoint),
-        source_target_store=str(args.target_store),
-        condition_day_offset=int(args.background_day_offset),
-        imerg_source=str(args.imerg),
-        imerg_canvas_crop=list(imerg_crop),
-        imerg_factor=int(args.imerg_factor),
-        imerg_error_corr_cells=float(args.imerg_error_corr_cells),
-        imerg_r_inflation=float(correlation_inflation),
-        holdout_design="neighbored_holdout; supported interpolation diagnostic",
+    complete_diagnostic_archive(
+        output,
+        args=args,
+        days=days,
+        condition_days=condition_days,
+        grid=grid,
+        canvas_slice=canvas_slice,
+        core_slice=core_slice,
+        imerg_crop=imerg_crop,
+        imerg=imerg,
+        chirps=chirps,
+        cpc_mm=cpc_mm,
+        stations=stations,
+        gauge_mm=gauge_mm,
+        withheld=withheld,
+        assimilated=assimilated,
+        nearest=nearest,
+        bearing_gap=bearing_gap,
+        correlation_inflation=correlation_inflation,
+        guidance=guidance,
     )
-    append_array(
-        archive,
-        "context_chirps_mm",
-        chirps,
-        ("time", "lat", "lon"),
-        chunks=(1, *fine_shape),
-    )
-    append_array(
-        archive,
-        "context_cpc_mm",
-        cpc_mm.astype(np.float32),
-        ("time", "coarse_lat", "coarse_lon"),
-        chunks=(1, *coarse_shape),
-    )
-    append_array(
-        archive,
-        "context_imerg_mm",
-        imerg["precipitation"],
-        ("time", "imerg_lat", "imerg_lon"),
-        chunks=(1, *imerg["precipitation"].shape[1:]),
-    )
-    append_array(
-        archive,
-        "context_imerg_random_error_mm",
-        imerg["random_error"],
-        ("time", "imerg_lat", "imerg_lon"),
-        chunks=(1, *imerg["random_error"].shape[1:]),
-    )
-    append_array(archive, "imerg_lat", imerg["lat"], ("imerg_lat",))
-    append_array(archive, "imerg_lon", imerg["lon"], ("imerg_lon",))
-    append_array(archive, "station_lat", stations.lat.astype(np.float32), ("station",))
-    append_array(archive, "station_lon", stations.lon.astype(np.float32), ("station",))
-    append_array(
-        archive,
-        "station_value_mm",
-        gauge_mm.astype(np.float32),
-        ("time", "station"),
-    )
-    append_array(
-        archive,
-        "station_withheld",
-        np.isin(np.arange(len(stations)), withheld),
-        ("station",),
-    )
-    archive.attrs["station_ids"] = [str(value) for value in stations.ids]
-    archive.attrs["diagnostic_complete"] = True
-    zarr.consolidate_metadata(str(output))
-
-    report = {
-        "schema": "cpc_v3_subgrid_v4_da_pilot_v1",
-        "status": "diagnostic_only_not_configuration_selection",
-        "target_store": args.target_store,
-        "checkpoint": args.checkpoint,
-        "sample_store": args.out_store,
-        "dates": [str(days[0]), str(days[-1])],
-        "condition_dates": [str(condition_days[0]), str(condition_days[-1])],
-        "members": args.members,
-        "n_steps": args.n_steps,
-        "seed": args.seed,
-        "methods": list(METHODS),
-        "canvas": {
-            "grid": grid.name,
-            "shape": list(grid.shape),
-            "target_crop": [rows.start, rows.stop, columns.start, columns.stop],
-            "bd_cpc_core": [
-                core_slice[0].start,
-                core_slice[0].stop,
-                core_slice[1].start,
-                core_slice[1].stop,
-            ],
-            "imerg_crop": list(imerg_crop),
-        },
-        "stations": {
-            "total": len(stations),
-            "assimilated_fold": int(len(assimilated)),
-            "withheld": int(len(withheld)),
-            "withheld_ids": [str(stations.ids[index]) for index in withheld],
-            "withheld_nearest_neighbor_km": nearest[withheld].tolist(),
-            "withheld_max_bearing_gap_deg": bearing_gap[withheld].tolist(),
-            "withhold_fraction": args.withhold,
-            "minimum_coverage": args.min_coverage,
-            "holdout_neighbor_km": args.holdout_neighbor_km,
-            "holdout_max_gap_deg": args.holdout_max_gap_deg,
-        },
-        "observation_model": {
-            "gauge_sigma_mm": args.gauge_sigma_mm,
-            "imerg_factor": args.imerg_factor,
-            "imerg_sigma_floor_mm": args.imerg_sigma_floor_mm,
-            "imerg_representativeness_mm": args.imerg_representativeness_mm,
-            "imerg_error_corr_cells": args.imerg_error_corr_cells,
-            "imerg_r_multiplier": args.imerg_r_multiplier,
-            "imerg_r_inflation": correlation_inflation,
-            "guidance": asdict(guidance),
-            "warning": "raw IMERG V07B is not bias corrected in this pilot",
-        },
-    }
-    report_path = Path(args.report)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(f"[done] wrote {output}")
-    print(f"[done] wrote {report_path}")
 
 
 if __name__ == "__main__":

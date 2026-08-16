@@ -14,8 +14,14 @@ export V4_TEST_CHECKPOINT="${V4_TEST_CHECKPOINT:-runs/prior_h100_cpc_v3_subgrid_
 export V4_TEST_TARGET="${V4_TEST_TARGET:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
 export V4_TEST_IMERG="${V4_TEST_IMERG:-data/processed/imerg_prepared_ing2022/imerg_0p4deg_20220501_20220510.nc}"
 export V4_TEST_OUT_ROOT="${V4_TEST_OUT_ROOT:-data/processed/v4_da_test/may2022_5day}"
+export V4_TEST_RECOVER_INCOMPLETE="${V4_TEST_RECOVER_INCOMPLETE:-0}"
 export BMD_DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 export BMD_STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
+
+[[ "$V4_TEST_RECOVER_INCOMPLETE" == "0" || "$V4_TEST_RECOVER_INCOMPLETE" == "1" ]] || {
+    echo "ERROR: V4_TEST_RECOVER_INCOMPLETE must be 0 or 1" >&2
+    exit 1
+}
 
 for required in \
     "$V4_TEST_TARGET" \
@@ -51,6 +57,9 @@ echo "  sampling:   $V4_TEST_MEMBERS members; $V4_TEST_STEPS Heun steps"
 echo "  arms:       background, folded gauges, IMERG S04, folded simultaneous,"
 echo "              all-gauge maps, all-gauge simultaneous maps"
 echo "  output:     $V4_TEST_OUT_ROOT"
+if [[ "$V4_TEST_RECOVER_INCOMPLETE" == "1" ]]; then
+    echo "  recovery:   reuse fully sampled .incomplete states; no resampling"
+fi
 if [[ -n "${V4_JOINT_JOB_ID:-}" ]]; then
     echo "  dependency: afterok:$V4_JOINT_JOB_ID"
 fi
