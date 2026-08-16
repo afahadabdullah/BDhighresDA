@@ -53,7 +53,8 @@ from bdhires.da import (  # noqa: E402
     perturb_observations,
     sample_hierarchical,
 )
-from bdhires.data import (  # noqa: E402
+from bdhires.data import (
+    LEGACY_V4_SUBGRID_SCHEMA,  # noqa: E402
     SUBGRID_SCHEMA,
     SubgridEncoding,
     aligned_production_canvas,
@@ -155,17 +156,29 @@ def require_v4_contract(root, checkpoint: dict) -> SubgridEncoding:
         raise ValueError("v4 target store is not marked complete")
     target_schema = root.attrs.get("schema")
     checkpoint_schema = checkpoint.get("schema")
-    if target_schema != SUBGRID_SCHEMA or checkpoint_schema != SUBGRID_SCHEMA:
+    accepted = (SUBGRID_SCHEMA, LEGACY_V4_SUBGRID_SCHEMA)
+    if target_schema != checkpoint_schema or target_schema not in accepted:
         raise ValueError(
-            f"v4 test requires matched {SUBGRID_SCHEMA}; got target="
+            f"v4 test requires a matched schema from {accepted}; got target="
             f"{target_schema!r}, checkpoint={checkpoint_schema!r}"
         )
+    # A v4 archive predates the conservative smooth base and its checkpoint was
+    # trained against the block-constant decoder.  Decoding it with the current
+    # default would silently change the field the model was fitted to, so pin
+    # the legacy base rather than letting from_mapping supply a new default.
+    legacy_base = {} if target_schema == SUBGRID_SCHEMA else {
+        "smooth_base_iterations": 0
+    }
     if checkpoint.get("stage") != "joint":
         raise ValueError("v4 test requires a joint-stage best checkpoint")
     if "subgrid_encoding" not in root.attrs or "subgrid_encoding" not in checkpoint:
         raise ValueError("target/checkpoint lacks frozen subgrid encoding metadata")
-    target_encoding = SubgridEncoding.from_mapping(root.attrs["subgrid_encoding"])
-    checkpoint_encoding = SubgridEncoding.from_mapping(checkpoint["subgrid_encoding"])
+    target_encoding = SubgridEncoding.from_mapping(
+        {**dict(root.attrs["subgrid_encoding"]), **legacy_base}
+    )
+    checkpoint_encoding = SubgridEncoding.from_mapping(
+        {**dict(checkpoint["subgrid_encoding"]), **legacy_base}
+    )
     target_encoding.validate()
     checkpoint_encoding.validate()
     if encoding_metadata(target_encoding) != encoding_metadata(checkpoint_encoding):

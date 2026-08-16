@@ -7,6 +7,7 @@ from .subgrid_dataset import (  # noqa: F401
     ReconstructionDiagnostics,
     SubgridDataset,
     SubgridDatasetConfig,
+    LEGACY_V4_SUBGRID_SCHEMA,
     SubgridEncoding,
     SubgridTargets,
     allocation_log_weight_target,
