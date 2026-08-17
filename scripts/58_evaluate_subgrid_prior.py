@@ -210,12 +210,29 @@ def main() -> None:
     sample_time = np.asarray(samples["time"][:], np.int64)
     if len(np.unique(sample_time)) != len(sample_time):
         raise ValueError("sample time axis contains duplicate dates")
+    # The sample store's ``time`` is the OBSERVATION LABEL.  BMD accumulates to
+    # the following morning and IMERG is aligned to that window, so a file
+    # labelled D+1 constrains state date D.  Every sampled field -- and the
+    # CHIRPS it must be scored against -- lives on the state date, so the target
+    # lookup uses that, not the label.  Pairing on the label fetched the wrong
+    # day's CHIRPS and drove every pattern score toward zero.
+    if "state_date" in samples:
+        state_time = np.asarray(samples["state_date"][:], np.int64)
+    else:
+        day_ns = np.timedelta64(1, "D").astype("timedelta64[ns]").astype(np.int64)
+        state_time = sample_time + int(
+            samples.attrs.get("condition_day_offset", 0)
+        ) * day_ns
+    if state_time.shape != sample_time.shape:
+        raise ValueError("state_date and time axes have different lengths")
     target_lookup = {int(value): index for index, value in enumerate(target_time)}
-    missing_times = [int(value) for value in sample_time if int(value) not in target_lookup]
+    missing_times = [int(value) for value in state_time if int(value) not in target_lookup]
     if missing_times:
         missing_dates = np.asarray(missing_times, dtype="datetime64[ns]")
-        raise ValueError(f"sample dates are absent from target store: {missing_dates[:5]}")
-    target_index = np.asarray([target_lookup[int(value)] for value in sample_time], np.int64)
+        raise ValueError(
+            f"sample STATE dates are absent from target store: {missing_dates[:5]}"
+        )
+    target_index = np.asarray([target_lookup[int(value)] for value in state_time], np.int64)
     fine_slice = _parse_crop(args.target_crop, samples.attrs)
     valid_np = np.asarray(target["fine_valid"][:], bool)[fine_slice]
     area_np = np.asarray(target["cell_area"][:], np.float32)[fine_slice]
@@ -378,8 +395,8 @@ def main() -> None:
         "target_store": args.target_store,
         "sample_store": args.sample_store,
         "dates": [
-            str(sample_time[0].view("datetime64[ns]").astype("datetime64[D]")),
-            str(sample_time[-1].view("datetime64[ns]").astype("datetime64[D]")),
+            str(state_time[0].view("datetime64[ns]").astype("datetime64[D]")),
+            str(state_time[-1].view("datetime64[ns]").astype("datetime64[D]")),
         ],
         "memberwise_subgrid_anomalies": True,
         "results": results,

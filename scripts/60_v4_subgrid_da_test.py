@@ -549,12 +549,22 @@ def complete_diagnostic_archive(
         source_checkpoint=str(args.checkpoint),
         source_target_store=str(args.target_store),
         condition_day_offset=int(args.background_day_offset),
+        context_date_convention=(
+            "time = observation label date; context_chirps_mm, context_cpc_mm, "
+            "state_date and every model field are on the STATE date, which is "
+            "time + condition_day_offset"
+        ),
         imerg_source=str(args.imerg),
         imerg_canvas_crop=list(imerg_crop),
         imerg_factor=int(args.imerg_factor),
         imerg_error_corr_cells=float(args.imerg_error_corr_cells),
         imerg_r_inflation=float(correlation_inflation),
         holdout_design="neighbored_holdout; supported interpolation diagnostic",
+    )
+    append_array(
+        archive, "state_date",
+        np.asarray(condition_days).astype("datetime64[ns]").astype(np.int64),
+        ("time",),
     )
     append_array(
         archive, "context_chirps_mm", chirps, ("time", "lat", "lon"),
@@ -682,27 +692,35 @@ def main() -> None:
     checkpoint_factor = int(checkpoint["config"]["data"].get("factor", 10))
     if checkpoint_factor != encoding.factor:
         raise ValueError("joint checkpoint model factor differs from its frozen encoding")
+    # Two different offsets live in this pipeline and must not be conflated.
+    #
+    #   target build   : CPC, ERA5 and CHIRPS share one date.  The store records
+    #                    condition_day_offset=0 and the model is trained on it.
+    #   observation set: BMD accumulates to the following morning and the IMERG
+    #                    product is aligned to that window, so a file labelled
+    #                    D+1 measures the rain of state date D.
+    #
+    # ``--background-day-offset -1`` therefore means "observations carry the
+    # label one day after the state they constrain", which is the correct
+    # physical alignment, not a lag to be warned about.
     training_offset = int(root.attrs.get("condition_day_offset", 0))
-    if int(args.background_day_offset) != training_offset:
-        if not args.allow_conditioning_lag:
-            raise ValueError(
-                f"conditioning offset {args.background_day_offset} day(s) does "
-                f"not match the offset the targets were built with "
-                f"({training_offset}).  The model was trained on same-day CPC "
-                "and ERA5, so sampling on a lagged day scores it against a "
-                "rainfall field its forcing never saw: CHIRPS pattern "
-                "correlation collapses toward zero for reasons that have "
-                "nothing to do with the model.  Pass "
-                "--allow-conditioning-lag only for a deliberate "
-                "operational-latency experiment, and never report its skill "
-                "numbers as the reanalysis result."
-            )
-        print(
-            f"WARNING: sampling with a {args.background_day_offset}-day "
-            f"conditioning lag against same-day targets; skill numbers are "
-            "an operational-latency diagnostic, not reanalysis skill.",
-            flush=True,
+    if training_offset != 0:
+        raise ValueError(
+            f"target store was built with condition_day_offset={training_offset}; "
+            "V3-SG trains on same-day CPC/ERA5/CHIRPS and the pilot assumes it"
         )
+    observation_offset = int(args.background_day_offset)
+    if observation_offset > 0:
+        raise ValueError(
+            "observation labels cannot precede the state date they constrain; "
+            f"got --background-day-offset {observation_offset}"
+        )
+    print(
+        f"[dates] state (CPC/ERA5/CHIRPS/background/analysis) = observation "
+        f"label {observation_offset:+d} day(s); observations labelled D "
+        f"constrain state D{observation_offset:+d}",
+        flush=True,
+    )
     days, condition_days, target_index, condition_index = date_indices(
         root, args.start, args.end, args.background_day_offset
     )
@@ -742,10 +760,15 @@ def main() -> None:
     lon = np.asarray(root["lon"][columns], np.float32)
     # This bounded pilot is small. Explicit per-day reads avoid relying on
     # Zarr-version-specific mixed fancy/slice indexing semantics.
+    # CHIRPS is the target the background predicts, so it is read on the STATE
+    # date -- the same index as the CPC/ERA5 conditioning, because training is
+    # same-day.  Reading it at the observation index instead compared the
+    # analysis against the wrong day's rainfall and drove every CHIRPS pattern
+    # correlation to zero.
     chirps = np.stack(
         [
             np.asarray(root["fine_mm"][int(index), rows, columns], np.float32)
-            for index in target_index
+            for index in condition_index
         ]
     )
     coarse_condition = np.stack(

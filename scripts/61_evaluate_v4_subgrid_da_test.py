@@ -642,7 +642,17 @@ def main() -> None:
     if encoding_metadata(encoding) != encoding_metadata(sample_encoding):
         raise ValueError("target and samples use different v4 encodings")
 
-    times = np.asarray(samples["time"][:], np.int64).astype("datetime64[ns]")
+    # ``time`` is the observation label.  Everything plotted and scored --
+    # CHIRPS, CPC and every model field -- lives on the state date, so rows must
+    # be labelled with that or every map is captioned one day late.
+    if "state_date" in samples:
+        times = np.asarray(samples["state_date"][:], np.int64).astype("datetime64[ns]")
+    else:
+        offset = int(samples.attrs.get("condition_day_offset", 0))
+        times = (
+            np.asarray(samples["time"][:], np.int64).astype("datetime64[ns]")
+            + np.timedelta64(offset, "D")
+        )
     if times.size == 0 or len(np.unique(times)) != len(times):
         raise ValueError("sample time axis must be non-empty and unique")
     if times.size > 1 and not np.all(np.diff(times.astype(np.int64)) > 0):

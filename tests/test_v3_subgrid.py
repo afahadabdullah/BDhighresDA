@@ -1054,3 +1054,87 @@ def test_pipeline_scripts_share_one_schema_gate():
         assert not re.search(
             r'SubgridEncoding\.from_mapping\(\s*target\.attrs', source
         ), f"{name} rebuilds the encoding outside the resolver"
+
+
+def test_pilot_reads_chirps_on_the_state_date_not_the_observation_label():
+    """Two date axes, one physical day.
+
+    Training is same-day: CPC, ERA5 and CHIRPS share one date, and the
+    background predicts CHIRPS on that date.  BMD accumulates to the following
+    morning and IMERG is aligned to that window, so an observation file labelled
+    D+1 measures the rain of state date D.  ``--background-day-offset -1`` is
+    therefore the correct physical alignment, not a lag.
+
+    Everything that is *scored* -- CHIRPS, CPC, every model field -- lives on the
+    state date.  Only the observation reads use the label.  Mixing the two
+    compared the analysis against the wrong day and collapsed every CHIRPS
+    pattern correlation toward zero, which reads exactly like a model with no
+    skill.
+    """
+    import re
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+
+    def block(pattern: str) -> str:
+        match = re.search(pattern, source, re.DOTALL)
+        assert match, f"could not locate {pattern!r}"
+        return match.group(0)
+
+    # CHIRPS is a target, so it is read on the state date alongside the forcing.
+    chirps_read = block(r"chirps = np\.stack\(.*?\n    \)")
+    assert "condition_index" in chirps_read
+    assert "target_index" not in chirps_read
+
+    # ...and the conditioning must agree with it.
+    for name in ("coarse_condition", "fine_condition"):
+        read = block(rf"{name} = np\.stack\(.*?\n    \)")
+        assert "condition_index" in read, name
+
+    # Observations keep the label date.
+    assert "load_imerg_subset(args.imerg, days," in source
+    assert "args.stations, days," in source
+
+    # The archive records the state date so no consumer has to re-derive it.
+    assert '"state_date"' in source
+    assert "context_date_convention" in source
+
+
+def test_evaluators_pair_samples_to_targets_on_the_state_date():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+
+    gridded = (root / "scripts/58_evaluate_subgrid_prior.py").read_text()
+    assert "state_time" in gridded
+    assert not re.search(
+        r"target_lookup\[int\(value\)\] for value in sample_time", gridded
+    ), "script 58 still pairs CHIRPS on the observation label"
+
+    pilot = (root / "scripts/61_evaluate_v4_subgrid_da_test.py").read_text()
+    assert 'if "state_date" in samples' in pilot, (
+        "script 61 must label maps with the state date; the observation label "
+        "captions every panel one day late"
+    )
+
+
+def test_pilot_rejects_observation_labels_before_the_state_date():
+    import re
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+    # The target store's own offset describes the TRAINING build and must be 0;
+    # it is a different quantity from the observation labelling offset and the
+    # two must never be compared to each other again.
+    assert "if training_offset != 0:" in source
+    assert "if observation_offset > 0:" in source
+    assert not re.search(
+        r"args\.background_day_offset\)\s*!=\s*training_offset", source
+    ), "the pilot again compares the observation offset against the build offset"
