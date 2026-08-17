@@ -42,6 +42,15 @@ from bdhires.da import AreaWeightedBlockObsOperator  # noqa: E402
 from bdhires.data import area_weighted_block_mean, resolve_archive_encoding  # noqa: E402
 
 
+def interior_mask(keep: np.ndarray, margin: int) -> np.ndarray:
+    """Drop a border so a wrapped translation is not scored on its wrap seam."""
+    if margin <= 0:
+        return keep
+    inner = np.zeros_like(keep, bool)
+    inner[margin:-margin, margin:-margin] = True
+    return keep & inner
+
+
 def mean_daily_correlation(left: np.ndarray, right: np.ndarray, keep: np.ndarray) -> float:
     """Mean over days of the spatial correlation on the common valid support."""
     daily = []
@@ -57,8 +66,17 @@ def mean_daily_correlation(left: np.ndarray, right: np.ndarray, keep: np.ndarray
     return float(np.mean(daily)) if daily else float("nan")
 
 
-def spatial_variants(field: np.ndarray) -> dict[str, np.ndarray]:
-    """Cheap misregistration hypotheses that a coordinate check would miss."""
+def spatial_variants(
+    field: np.ndarray, *, max_shift_cells: int = 4, step_cells: int = 1
+) -> dict[str, np.ndarray]:
+    """Cheap misregistration hypotheses that a coordinate check would miss.
+
+    Flips and transposes catch an inverted axis.  Translations catch the more
+    common and more insidious case: a field written from a crop taken at the
+    wrong origin, which keeps every coordinate array self-consistent and passes
+    a nearest-neighbour selection check while displacing the data.  A pure
+    translation is invisible to any test that only compares coordinate labels.
+    """
     variants = {
         "identity": field,
         "lat_flip": field[:, ::-1, :],
@@ -67,6 +85,10 @@ def spatial_variants(field: np.ndarray) -> dict[str, np.ndarray]:
     }
     if field.shape[-2] == field.shape[-1]:
         variants["transpose"] = np.swapaxes(field, -1, -2)
+    for cells in range(step_cells, max_shift_cells + 1, step_cells):
+        for sign in (+1, -1):
+            variants[f"lat_shift{sign * cells:+d}"] = np.roll(field, sign * cells, axis=-2)
+            variants[f"lon_shift{sign * cells:+d}"] = np.roll(field, sign * cells, axis=-1)
     return {name: np.ascontiguousarray(value) for name, value in variants.items()}
 
 
@@ -83,6 +105,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample-store", required=True)
     parser.add_argument("--max-day-shift", type=int, default=2)
+    parser.add_argument("--max-shift-cells", type=int, default=4,
+                        help="translation search, in COARSE cells")
     parser.add_argument("--out-json", default=None)
     args = parser.parse_args()
 
@@ -129,8 +153,12 @@ def main() -> None:
         left, right = day_shifted(coarse_chirps, cpc, shift)
         if left.shape[0] < 2:
             continue
-        for name, variant in spatial_variants(left).items():
-            score = mean_daily_correlation(variant, right, coarse_keep)
+        margin = int(args.max_shift_cells)
+        scored_keep = interior_mask(coarse_keep, margin)
+        for name, variant in spatial_variants(
+            left, max_shift_cells=margin
+        ).items():
+            score = mean_daily_correlation(variant, right, scored_keep)
             rows.append((score, name, shift))
             results["scores"][f"{name}@{shift:+d}"] = score
 
@@ -155,7 +183,11 @@ def main() -> None:
             left, right = day_shifted(chirps, imerg, shift)
             if left.shape[0] < 2:
                 continue
-            for name, variant in spatial_variants(left).items():
+            for name, variant in spatial_variants(
+                left,
+                max_shift_cells=int(args.max_shift_cells) * factor,
+                step_cells=factor,
+            ).items():
                 with torch.no_grad():
                     reduced = operator(
                         torch.from_numpy(np.ascontiguousarray(variant))[:, None]
@@ -188,8 +220,9 @@ def main() -> None:
             "         gap to close is that ceiling, not perfect agreement."
         )
     else:
+        units = "coarse cells (0.5 deg)" if "shift" in best[1] else ""
         print(
-            f"VERDICT: '{best[1]}' at day shift {best[2]:+d} scores {best[0]:.3f} versus\n"
+            f"VERDICT: '{best[1]}' {units} at day shift {best[2]:+d} scores {best[0]:.3f} versus\n"
             f"         {baseline:.3f} as currently evaluated.  That is a registration\n"
             "         bug, not a model result.  Fix it before reading any panel."
         )
