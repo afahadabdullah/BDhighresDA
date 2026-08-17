@@ -298,7 +298,19 @@ def main() -> None:
         print(f"\nloading {args.alt_name} from {args.alt_fine_glob} ...", flush=True)
         import glob as _glob
 
-        paths = sorted(_glob.glob(args.alt_fine_glob)) or [args.alt_fine_glob]
+        paths = sorted(_glob.glob(args.alt_fine_glob))
+        if not paths:
+            direct = Path(args.alt_fine_glob)
+            if direct.exists():
+                paths = [str(direct)]
+            else:
+                raise FileNotFoundError(
+                    f"--alt-fine-glob {args.alt_fine_glob!r} matched no files.\n"
+                    "  Quote the pattern so the shell does not expand it, check the\n"
+                    "  directory exists, and confirm the extension (.nc / .nc4).\n"
+                    "  The alt-product comparison is optional: omit --alt-fine-glob\n"
+                    "  to run the CHIRPS/CPC curve on its own."
+                )
         if len(paths) == 1:
             alt = xr.open_dataset(paths[0])
         else:
