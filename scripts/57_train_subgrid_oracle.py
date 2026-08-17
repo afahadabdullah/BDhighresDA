@@ -265,10 +265,36 @@ def main() -> None:
     )
     epochs = int(config["train"]["epochs"])
     total_steps = max(1, epochs * len(loader))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lambda step: 0.5 * (1.0 + math.cos(math.pi * min(step, total_steps) / total_steps)),
-    )
+    # Linear warmup then cosine decay to a small floor.
+    #
+    # Warmup matters most for the joint stage: its branches arrive pretrained,
+    # and a full-rate step on the very first batch can move them off a good
+    # initialisation before the zero-started cross-scale path has learned
+    # anything.  The floor keeps the tail of a long run doing useful work
+    # instead of taking zero-length steps for the last few epochs.
+    warmup_fraction = float(config["train"].get("warmup_fraction", 0.02))
+    if not 0.0 <= warmup_fraction < 0.5:
+        raise ValueError("train.warmup_fraction must lie in [0, 0.5)")
+    lr_min_fraction = float(config["train"].get("lr_min_fraction", 0.01))
+    if not 0.0 <= lr_min_fraction < 1.0:
+        raise ValueError("train.lr_min_fraction must lie in [0, 1)")
+    warmup_steps = int(round(warmup_fraction * total_steps))
+
+    def lr_scale(step: int) -> float:
+        if warmup_steps and step < warmup_steps:
+            return (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return lr_min_fraction + (1.0 - lr_min_fraction) * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
+    if is_main():
+        print(
+            f"lr schedule: warmup {warmup_steps} steps "
+            f"({warmup_fraction:.1%}), cosine to {lr_min_fraction:.1%} of base "
+            f"over {total_steps} total steps",
+            flush=True,
+        )
     use_ema = bool(config["train"].get("use_ema", True))
     precision = str(config["train"].get("precision", "fp32")).lower()
     if precision not in {"fp32", "bf16", "fp16"}:
@@ -290,6 +316,14 @@ def main() -> None:
         )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        stored_total = int(checkpoint.get("total_steps", total_steps))
+        if stored_total != total_steps:
+            raise ValueError(
+                f"resume checkpoint was built for {stored_total} total steps but "
+                f"this config implies {total_steps}.  The cosine schedule would "
+                "jump: either restore the original train.epochs or start a fresh "
+                "run directory."
+            )
         scheduler.load_state_dict(checkpoint["scheduler"])
         if ema is not None and checkpoint.get("ema") is not None:
             # Checkpoints are loaded on CPU, but EMA updates run beside the
@@ -368,6 +402,7 @@ def main() -> None:
                 "weights": "ema" if ema is not None else "model",
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
+                "total_steps": total_steps,
                 "best_val": min(best, val),
                 "config": config,
                 "subgrid_encoding": encoding_metadata(train_dataset.encoding),

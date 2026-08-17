@@ -2,7 +2,7 @@
 # initialisers; the zero-started fine->coarse path learns the missing cross-score.
 stage: joint
 data:
-  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v5.zarr
   crop: 120
   factor: 10
   downsamplings: 3
@@ -24,12 +24,17 @@ model:
     dropout: 0.15
     num_heads: 4
 train:
-  out_dir: runs/prior_h100_cpc_v3_subgrid_v4/joint
-  init_coarse: runs/prior_h100_cpc_v3_subgrid_v4/coarse/best.pt
-  init_allocation: runs/prior_h100_cpc_v3_subgrid_v4/allocation/best.pt
-  epochs: 100
+  out_dir: runs/prior_h100_cpc_v3_subgrid_v5/joint
+  init_coarse: runs/prior_h100_cpc_v3_subgrid_v5/coarse/best.pt
+  init_allocation: runs/prior_h100_cpc_v3_subgrid_v5/allocation/best.pt
+  epochs: 250
   batch_size: 16
   lr: 0.00008
+  # Fine-tuning from two trained branches, so the warmup is longer: the
+  # zero-initialised fine->coarse cross path is the only randomly started part of
+  # the model and a full-rate first step would disturb both initialisers.
+  warmup_fraction: 0.05
+  lr_min_fraction: 0.01
   precision: bf16
   weight_decay: 0.01
   grad_clip: 1.0

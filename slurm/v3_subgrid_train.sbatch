@@ -67,18 +67,26 @@ import torch
 import yaml
 import zarr
 
+from bdhires.data import SUBGRID_SCHEMA
+
 config_path, target_path, output_path = sys.argv[1:]
 cfg = yaml.safe_load(open(config_path))
 target = zarr.open_group(target_path, mode="r")
 assert target.attrs.get("complete", False), f"incomplete target archive: {target_path}"
-assert target.attrs.get("schema") == "cpc_v3_subgrid_v4"
+# Take the expected schema from the library instead of pinning it here.  A bump
+# this preflight does not follow would train a new model against a stale archive,
+# which is the exact failure the bump exists to prevent.
+assert target.attrs.get("schema") == SUBGRID_SCHEMA, (
+    f"target archive schema {target.attrs.get('schema')!r} is not {SUBGRID_SCHEMA!r}; "
+    "rebuild it with scripts/56_build_chirps_subgrid_targets.py"
+)
 target_encoding = dict(target.attrs["subgrid_encoding"])
 
 output = Path(output_path)
 last = output / "last.pt"
 if last.exists():
     checkpoint = torch.load(last, map_location="cpu")
-    assert checkpoint.get("schema") == "cpc_v3_subgrid_v4"
+    assert checkpoint.get("schema") == SUBGRID_SCHEMA
     assert checkpoint.get("stage") == cfg["stage"]
     assert dict(checkpoint.get("subgrid_encoding", {})) == target_encoding, (
         "resume checkpoint encoding differs from the target archive"
@@ -99,7 +107,7 @@ if cfg["stage"] == "joint":
         path = Path(cfg["train"][key])
         assert path.is_file(), f"missing joint initializer: {path}"
         checkpoint = torch.load(path, map_location="cpu")
-        assert checkpoint.get("schema") == "cpc_v3_subgrid_v4", (
+        assert checkpoint.get("schema") == SUBGRID_SCHEMA, (
             f"incompatible joint initializer schema: {path}"
         )
         assert checkpoint.get("stage") == expected_stage, (

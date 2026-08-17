@@ -1,7 +1,7 @@
 # Phase 2: CHIRPS-derived 0.05-degree allocation flow with coarse augmentation.
 stage: allocation
 data:
-  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr
+  zarr: data/processed/cpc_v3_subgrid/wide_cpc_v5.zarr
   crop: 120
   factor: 10
   downsamplings: 3
@@ -16,10 +16,15 @@ model:
   dropout: 0.15
   num_heads: 4
 train:
-  out_dir: runs/prior_h100_cpc_v3_subgrid_v4/allocation
-  epochs: 125
+  out_dir: runs/prior_h100_cpc_v3_subgrid_v5/allocation
+  epochs: 400
   batch_size: 24
   lr: 0.00015
+  # Linear warmup then cosine decay to a small floor.  Stated explicitly rather
+  # than left to the trainer defaults so the values land in the checkpoint's
+  # frozen config and a later default change cannot block a resume.
+  warmup_fraction: 0.02
+  lr_min_fraction: 0.01
   precision: bf16
   weight_decay: 0.01
   grad_clip: 1.0

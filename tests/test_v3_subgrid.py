@@ -1214,3 +1214,107 @@ def test_date_convention_fixes_do_not_depend_on_the_schema():
         for line in source.splitlines():
             if "SUBGRID_SCHEMA" in line and ("state_" in line or "condition_" in line):
                 raise AssertionError(f"{name}: date handling branches on the schema")
+
+
+def test_slurm_pipeline_never_pins_a_schema_literal():
+    """The submission chain must follow the library, not restate its schema.
+
+    This is the bug that broke the last run: the schema moved to v5 while the
+    preflight in ``v3_subgrid_train.sbatch`` still asserted v4, so a correctly
+    prepared archive was rejected after the dependency chain had already been
+    queued.  A literal anywhere in the SLURM layer reintroduces it, and the
+    failure surfaces hours later inside a job rather than at submission.
+    """
+    import re
+    from pathlib import Path
+
+    slurm = Path(__file__).resolve().parents[1] / "slurm"
+    for name in (
+        "submit_v3_subgrid_pipeline.sh",
+        "v3_subgrid_prepare.sbatch",
+        "v3_subgrid_train.sbatch",
+    ):
+        source = (slurm / name).read_text()
+        found = re.findall(r'"cpc_v3_subgrid_v\d+"', source)
+        assert not found, f"{name} pins the schema literal {found}"
+
+    for name in ("v3_subgrid_prepare.sbatch", "v3_subgrid_train.sbatch"):
+        source = (slurm / name).read_text()
+        assert "from bdhires.data import SUBGRID_SCHEMA" in source, (
+            f"{name} checks the schema without importing the definition"
+        )
+
+
+def test_submit_script_reads_the_target_from_the_configs():
+    """The archive path is stated once, in the configs the trainers actually read.
+
+    Preparing one store while three trainings read another is silent: every job
+    succeeds and the models are fitted to a stale archive.  The submit script
+    therefore derives the expected target instead of carrying its own copy.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "slurm/submit_v3_subgrid_pipeline.sh").read_text()
+    assert 'awk \'$1 == "zarr:" {print $2; exit}\'' in source, (
+        "submit script no longer derives the target from the configs"
+    )
+    assert "EXPECTED_TARGET=" not in source, "hardcoded target reintroduced"
+
+    targets = set()
+    for stage in ("coarse", "allocation", "joint"):
+        text = (root / f"configs/train_h100_cpc_v3_subgrid_{stage}.yaml").read_text()
+        for line in text.splitlines():
+            if line.strip().startswith("zarr:"):
+                targets.add(line.split(":", 1)[1].strip())
+                break
+    assert len(targets) == 1, f"configs disagree about the target archive: {targets}"
+
+
+def test_every_training_config_states_its_learning_rate_schedule():
+    """Warmup and floor are frozen in the config, not inherited from a default.
+
+    ``v3_subgrid_train.sbatch`` refuses to resume when the resolved config
+    differs from the checkpoint's.  A schedule left to the trainer's defaults
+    would therefore make any future change to those defaults un-resumable
+    mid-run, which is precisely when a 48-hour job needs to resume.
+    """
+    import yaml
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for stage in ("coarse", "allocation", "joint"):
+        config = yaml.safe_load(
+            (root / f"configs/train_h100_cpc_v3_subgrid_{stage}.yaml").read_text()
+        )
+        train = config["train"]
+        assert "warmup_fraction" in train, f"{stage} config omits warmup_fraction"
+        assert "lr_min_fraction" in train, f"{stage} config omits lr_min_fraction"
+        assert 0.0 <= train["warmup_fraction"] < 0.5
+        assert 0.0 < train["lr_min_fraction"] < 1.0
+
+    joint = yaml.safe_load(
+        (root / "configs/train_h100_cpc_v3_subgrid_joint.yaml").read_text()
+    )
+    coarse = yaml.safe_load(
+        (root / "configs/train_h100_cpc_v3_subgrid_coarse.yaml").read_text()
+    )
+    assert joint["train"]["warmup_fraction"] > coarse["train"]["warmup_fraction"], (
+        "the joint stage fine-tunes two pretrained branches and needs the longer warmup"
+    )
+
+
+def test_trainer_refuses_to_resume_a_rescheduled_run():
+    """Changing epochs mid-run would jump the learning rate without warning.
+
+    The cosine curve is parameterised by the total step count, so a resume under
+    a different ``epochs`` silently restarts the decay from the wrong place.  The
+    trainer stores the step count and compares it rather than trusting the config.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/57_train_subgrid_oracle.py"
+    ).read_text()
+    assert '"total_steps": total_steps' in source, "checkpoint omits the step count"
+    assert "stored_total != total_steps" in source, "resume does not compare it"

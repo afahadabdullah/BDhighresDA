@@ -109,6 +109,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--background-day-offset", type=int, default=-1)
     parser.add_argument("--members", type=int, default=4)
     parser.add_argument(
+        "--occurrence-temperature", type=float, default=None,
+        help="override the frozen wetness relaxation temperature; the design "
+             "predeclares a sweep chosen on the soft/hard O-A bounds",
+    )
+    parser.add_argument(
         "--allow-conditioning-lag",
         action="store_true",
         help="permit a conditioning offset that differs from the target store's",
@@ -887,7 +892,11 @@ def main() -> None:
         n_steps=args.n_steps,
         heun=bool(sampling.get("heun", True)),
         n_corrections=0,
-        occurrence_temperature=float(sampling.get("occurrence_temperature", 1.0)),
+        occurrence_temperature=float(
+            args.occurrence_temperature
+            if args.occurrence_temperature is not None
+            else sampling.get("occurrence_temperature", 1.0)
+        ),
         soft_hard_median_sigma=float(sampling.get("soft_hard_median_sigma", 0.10)),
         soft_hard_p95_sigma=float(sampling.get("soft_hard_p95_sigma", 0.50)),
     )

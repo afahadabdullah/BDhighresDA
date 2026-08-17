@@ -26,7 +26,7 @@ export V3_ERA5_GLOB="${V3_ERA5_GLOB:-data/raw/era5/era5_daily_*.nc}"
 export V3_STATIC="${V3_STATIC:-data/static/static_wide_cpc.nc}"
 export V3_DEM="${V3_DEM:-data/raw/dem/copernicus_glo90_wide.nc}"
 export V3_STATIC_CHIRPS="${V3_STATIC_CHIRPS:-}"
-export V3_PREP_OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
+export V3_PREP_OUT="${V3_PREP_OUT:-data/processed/cpc_v3_subgrid/wide_cpc_v5.zarr}"
 export V3_PREP_CHUNK_DAYS="${V3_PREP_CHUNK_DAYS:-32}"
 export V3_PREP_OVERWRITE="${V3_PREP_OVERWRITE:-0}"
 export V3_START="${V3_START:-1981-01-01}"
@@ -37,14 +37,24 @@ export V3_RUN_TESTS="${V3_RUN_TESTS:-1}"
     exit 1
 }
 
-# The three frozen configs all point here. An output override without matching
-# config overrides would prepare one archive and train against another.
-EXPECTED_TARGET="data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr"
-if [[ "$V3_PREP_OUT" != "$EXPECTED_TARGET" ]]; then
-    echo "ERROR: V3_PREP_OUT=$V3_PREP_OUT differs from the frozen config target" >&2
-    echo "Update all three data.zarr entries together before using a custom path." >&2
-    exit 1
-fi
+# Read the expected target out of the configs rather than restating it here.  A
+# literal in this file drifts the moment the archive is renamed, and the failure
+# is silent: preparation writes one store while three trainings read another.
+for cfg in \
+    configs/train_h100_cpc_v3_subgrid_coarse.yaml \
+    configs/train_h100_cpc_v3_subgrid_allocation.yaml \
+    configs/train_h100_cpc_v3_subgrid_joint.yaml; do
+    cfg_target="$(awk '$1 == "zarr:" {print $2; exit}' "$cfg")"
+    [[ -n "$cfg_target" ]] || {
+        echo "ERROR: could not read data.zarr from $cfg" >&2
+        exit 1
+    }
+    if [[ "$cfg_target" != "$V3_PREP_OUT" ]]; then
+        echo "ERROR: $cfg trains against $cfg_target, not $V3_PREP_OUT" >&2
+        echo "Align all three data.zarr entries with the prepared archive." >&2
+        exit 1
+    fi
+done
 
 # Catch missing raw prerequisites on the login node so a four-job dependency
 # chain is not submitted only to fail immediately in the preparation job.
@@ -88,7 +98,9 @@ if [[ "$V3_RUN_TESTS" == "1" ]]; then
     test_result="$(sbatch --parsable --export=ALL "$@" \
         slurm/v3_subgrid_tests.sbatch)"
     test_job="${test_result%%;*}"
-    prepare_dependency=(--dependency="afterok:${test_job}")
+    # Without kill-on-invalid-dep an upstream failure leaves the rest of the
+    # chain parked in the queue indefinitely instead of failing visibly.
+    prepare_dependency=(--dependency="afterok:${test_job}" --kill-on-invalid-dep=yes)
 fi
 
 prepare_result="$(sbatch --parsable "${prepare_dependency[@]}" --export=ALL "$@" \
@@ -98,21 +110,22 @@ prepare_job="${prepare_result%%;*}"
 export V3_CONFIG="configs/train_h100_cpc_v3_subgrid_coarse.yaml"
 export V3_EXPECTED_STAGE="coarse"
 coarse_result="$(sbatch --parsable --job-name=bdhires-v3-coarse \
-    --dependency="afterok:${prepare_job}" --export=ALL "$@" \
+    --dependency="afterok:${prepare_job}" --kill-on-invalid-dep=yes --export=ALL "$@" \
     slurm/v3_subgrid_train.sbatch)"
 coarse_job="${coarse_result%%;*}"
 
 export V3_CONFIG="configs/train_h100_cpc_v3_subgrid_allocation.yaml"
 export V3_EXPECTED_STAGE="allocation"
 allocation_result="$(sbatch --parsable --job-name=bdhires-v3-allocation \
-    --dependency="afterok:${prepare_job}" --export=ALL "$@" \
+    --dependency="afterok:${prepare_job}" --kill-on-invalid-dep=yes --export=ALL "$@" \
     slurm/v3_subgrid_train.sbatch)"
 allocation_job="${allocation_result%%;*}"
 
 export V3_CONFIG="configs/train_h100_cpc_v3_subgrid_joint.yaml"
 export V3_EXPECTED_STAGE="joint"
 joint_result="$(sbatch --parsable --job-name=bdhires-v3-joint \
-    --dependency="afterok:${coarse_job}:${allocation_job}" --export=ALL "$@" \
+    --dependency="afterok:${coarse_job}:${allocation_job}" \
+    --kill-on-invalid-dep=yes --export=ALL "$@" \
     slurm/v3_subgrid_train.sbatch)"
 joint_job="${joint_result%%;*}"
 
@@ -125,4 +138,10 @@ echo "submitted allocation:  $allocation_job (afterok:$prepare_job)"
 echo "submitted joint:       $joint_job (afterok:$coarse_job:$allocation_job)"
 echo "monitor: squeue -u $USER"
 echo "logs:    logs/bdhires-v3-{tests,prepare,coarse,allocation,joint}-*.out"
-echo "final:   runs/prior_h100_cpc_v3_subgrid_v4/joint/best.pt"
+echo "final:   $(awk '$1 == "out_dir:" {print $2; exit}' \
+    configs/train_h100_cpc_v3_subgrid_joint.yaml)/best.pt"
+echo
+echo "A stage that hits the 48h wall leaves last.pt behind; resubmit that stage"
+echo "alone with the same V3_CONFIG and it resumes.  Do not edit train.epochs"
+echo "before resuming: the cosine schedule is defined over the total step count"
+echo "and the trainer refuses a mismatch rather than jumping the learning rate."
