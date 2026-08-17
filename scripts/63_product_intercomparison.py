@@ -124,6 +124,12 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--max-shift-cells", type=int, default=4)
+    parser.add_argument(
+        "--alt-fine-glob", default=None,
+        help="candidate replacement fine product (netCDF, lat/lon/time)",
+    )
+    parser.add_argument("--alt-name", default="ALT")
+    parser.add_argument("--alt-var", default=None)
     args = parser.parse_args()
 
     target_store = args.target_store
@@ -278,11 +284,108 @@ def main() -> None:
         )
     results["verdict"] = verdict
 
+    # A candidate replacement teacher is judged by the same curve.  The point is
+    # not that a product is finer or newer, it is whether its DAILY component
+    # carries information that CHIRPS's does not.  A product whose curve is flat
+    # -- already high at one day -- observes daily rainfall.  One that rises as
+    # steeply as CHIRPS shares the same limitation and buys nothing.
+    if args.alt_fine_glob:
+        coarse_lat = np.asarray(root["lat"][:], np.float64).reshape(-1, factor).mean(axis=1)
+        coarse_lon = np.asarray(root["lon"][:], np.float64).reshape(-1, factor).mean(axis=1)
+        half = 0.5 * factor * float(np.mean(np.diff(np.asarray(root["lat"][:], np.float64))))
+        import xarray as xr  # only needed for the optional alt-product path
+
+        print(f"\nloading {args.alt_name} from {args.alt_fine_glob} ...", flush=True)
+        import glob as _glob
+
+        paths = sorted(_glob.glob(args.alt_fine_glob)) or [args.alt_fine_glob]
+        if len(paths) == 1:
+            alt = xr.open_dataset(paths[0])
+        else:
+            # open_mfdataset needs dask; a plain concat keeps this runnable on
+            # a login node with a minimal environment.
+            alt = xr.concat(
+                [xr.open_dataset(path) for path in paths], dim="time"
+            ).sortby("time")
+        alt = alt.rename({k: v for k, v in
+                          (("latitude", "lat"), ("longitude", "lon"), ("valid_time", "time"))
+                          if k in alt.dims or k in alt.coords})
+        name = args.alt_var or max(
+            (v for v in alt.data_vars if {"lat", "lon"} <= set(alt[v].dims)),
+            key=lambda v: alt[v].size,
+        )
+        data = alt[name]
+        if bool((data.lat[0] > data.lat[-1]).item()):
+            data = data.sortby("lat")
+        data = data.sel(
+            lat=slice(coarse_lat.min() - half, coarse_lat.max() + half),
+            lon=slice(coarse_lon.min() - half, coarse_lon.max() + half),
+        )
+        if "time" in data.dims and data.time.size > len(days):
+            data = data.resample(time="1D").sum()
+        alt_days = np.asarray(data.time.values).astype("datetime64[D]")
+        common = np.intersect1d(alt_days, days[index])
+        if common.size < max(WINDOWS):
+            raise ValueError(f"{args.alt_name} overlaps only {common.size} selected days")
+        data = data.sel(time=np.isin(alt_days, common))
+        # Bin by cell centre onto the 0.5-degree support: 0.04 does not nest in
+        # 0.5, so an exact block mean does not exist.  Centre binning with
+        # latitude weights is first-order conservative and is more than adequate
+        # for a correlation curve.
+        edges_lat = np.r_[coarse_lat - half, coarse_lat[-1] + half]
+        edges_lon = np.r_[coarse_lon - half, coarse_lon[-1] + half]
+        ilat = np.clip(np.digitize(data.lat.values, edges_lat) - 1, 0, len(coarse_lat) - 1)
+        ilon = np.clip(np.digitize(data.lon.values, edges_lon) - 1, 0, len(coarse_lon) - 1)
+        weight = np.cos(np.deg2rad(data.lat.values))[:, None] * np.ones((1, data.lon.size))
+        values = np.nan_to_num(np.asarray(data.values, np.float64), nan=0.0)
+        num = np.zeros((values.shape[0], len(coarse_lat), len(coarse_lon)))
+        den = np.zeros((len(coarse_lat), len(coarse_lon)))
+        np.add.at(den, (ilat[:, None], ilon[None, :]), weight)
+        for t in range(values.shape[0]):
+            np.add.at(num[t], (ilat[:, None], ilon[None, :]), values[t] * weight)
+        alt_coarse = np.where(den > 0, num / np.maximum(den, 1e-12), np.nan)
+        keep_alt = keep & (den > 0)
+        mask = np.isin(days[index], common)
+        cpc_common = cpc_coarse[mask]
+        chirps_common = chirps_coarse[mask]
+        print(f"\n{args.alt_name} vs CPC on the common 0.5-degree support "
+              f"({common.size} shared days)")
+        print(f"  {'accumulation':<14} {'samples':>8}   r")
+        alt_curve = []
+        for window in WINDOWS:
+            score, count = mean_window_correlation(alt_coarse, cpc_common, keep_alt, window)
+            alt_curve.append(score)
+            results.setdefault("alt_vs_cpc_by_window", {})[str(window)] = score
+            label = "daily" if window == 1 else f"{window}-day"
+            print(f"  {label:<14} {count:>8d}   {score:6.3f}")
+        alt_vs_chirps = mean_window_correlation(alt_coarse, chirps_common, keep_alt, 1)[0]
+        results["alt_vs_chirps_daily"] = alt_vs_chirps
+        results["alt_name"] = args.alt_name
+        rise_chirps = curve[-1] - curve[0]
+        rise_alt = alt_curve[-1] - alt_curve[0]
+        print(f"\n  {args.alt_name} vs CHIRPS, daily: {alt_vs_chirps:.3f}")
+        print(f"  daily->30-day rise:  CHIRPS {rise_chirps:+.3f}   "
+              f"{args.alt_name} {rise_alt:+.3f}")
+        if alt_curve[0] > curve[0] + 0.10 and rise_alt < rise_chirps - 0.10:
+            print(f"  => {args.alt_name} carries daily information CHIRPS does not. "
+                  "Worth adopting as the teacher.")
+        elif alt_curve[0] <= curve[0] + 0.05:
+            print(f"  => {args.alt_name} is no better daily. Switching buys nothing.")
+        else:
+            print(f"  => partial improvement; weigh against the shared-input risk.")
+        axes_alt = alt_curve
+    else:
+        axes_alt = None
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     figure, axes = plt.subplots(1, 2, figsize=(10.0, 4.0))
-    axes[0].plot(WINDOWS, curve, marker="o", color="#2171b5")
+    axes[0].plot(WINDOWS, curve, marker="o", color="#2171b5", label="CHIRPS vs CPC")
+    if axes_alt is not None:
+        axes[0].plot(WINDOWS, axes_alt, marker="s", color="#d94801",
+                     label=f"{args.alt_name} vs CPC")
+        axes[0].legend(fontsize=8)
     axes[0].axhline(0.0, color="0.7", lw=0.8)
     axes[0].set_xscale("log")
     axes[0].set_xticks(WINDOWS, [str(w) for w in WINDOWS])

@@ -424,17 +424,25 @@ def plot_matrix(payload: dict, output: Path) -> None:
     axes[0, 2].legend()
     axes[0, 2].set_title("C. Dry/wet trade-off")
 
+    third = width * 2.0 / 3.0
     axes[1, 0].barh(
-        map_positions - width / 2,
-        [plot_value(structure[name]["chirps_mean_pattern_r"]) for name in MAP_METHODS],
-        height=width,
-        color="#4C78A8",
-        label="full field",
+        map_positions - third,
+        [plot_value(structure[name].get("chirps_coarse_pattern_r")) for name in MAP_METHODS],
+        height=third,
+        color="#2E7D32",
+        label="at 0.5° (vs references)",
     )
     axes[1, 0].barh(
-        map_positions + width / 2,
+        map_positions,
+        [plot_value(structure[name]["chirps_mean_pattern_r"]) for name in MAP_METHODS],
+        height=third,
+        color="#4C78A8",
+        label="full field 0.05°",
+    )
+    axes[1, 0].barh(
+        map_positions + third,
         [plot_value(structure[name]["chirps_subgrid_pattern_r"]) for name in MAP_METHODS],
-        height=width,
+        height=third,
         color="#9C6ADE",
         label="within 0.5°",
     )
@@ -453,7 +461,10 @@ def plot_matrix(payload: dict, output: Path) -> None:
                 value, color=colour, linestyle="--", linewidth=1.2, label=label
             )
     axes[1, 0].legend(fontsize=7)
-    axes[1, 0].set_title("D. CHIRPS pattern agreement (not truth)")
+    axes[1, 0].set_title(
+        "D. CHIRPS pattern agreement (not truth)\n"
+        "dashed references are 0.5°: compare them with the green bars"
+    )
 
     axes[1, 1].barh(
         map_positions - width / 2,
@@ -735,6 +746,20 @@ def main() -> None:
     reference_cpc = coarse_product_correlation(
         {"chirps": chirps}, cpc, area, valid, encoding.factor
     )["chirps"]
+    # The CPC/IMERG references live on the 0.5-degree support.  Comparing them
+    # against a 0.05-degree full-field bar is apples to oranges: the fine field
+    # is dominated by subgrid variance that no conditioning can predict, so its
+    # correlation is diluted for reasons that have nothing to do with skill.
+    # Score the model's own block means against CHIRPS's, and the panel finally
+    # answers the question it appears to ask -- how much of the achievable
+    # 0.5-degree agreement is the model actually capturing?
+    coarse_chirps, chirps_retained, _ = area_weighted_block_mean(
+        torch.from_numpy(chirps)[:, None], torch.from_numpy(area),
+        torch.from_numpy(valid), factor=encoding.factor, valid_area_threshold=0.0,
+    )
+    chirps_coarse_r = coarse_product_correlation(
+        means, coarse_chirps[:, 0].numpy(), area, valid, encoding.factor
+    )
     imerg_crop = tuple(int(value) for value in samples.attrs["imerg_canvas_crop"])
     imerg_corr = imerg_product_correlation(
         means,
@@ -751,6 +776,7 @@ def main() -> None:
     structure = {
         name: {
             "chirps_mean_pattern_r": chirps_full[name],
+            "chirps_coarse_pattern_r": chirps_coarse_r[name],
             "chirps_subgrid_pattern_r": chirps_subgrid[name],
             # Amplitude-free: separates a real seam from the multiplicative
             # decoder making anomaly amplitude proportional to block amount.
