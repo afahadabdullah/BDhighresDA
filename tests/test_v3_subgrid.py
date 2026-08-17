@@ -1138,3 +1138,79 @@ def test_pilot_rejects_observation_labels_before_the_state_date():
     assert not re.search(
         r"args\.background_day_offset\)\s*!=\s*training_offset", source
     ), "the pilot again compares the observation offset against the build offset"
+
+
+def test_v5_hr_uses_the_original_grids_at_a_0p1_degree_support():
+    """The 0.1-degree support retires the whole CPC-alignment apparatus.
+
+    ``bd_cpc``/``wide_cpc``, the 160-cell halo canvas, the mod-10 crop lattice
+    and the factor-40 crop-size rule all existed only because 0.5 degrees does
+    not nest in the project's 0.05-degree grids.  IMERG's 0.1 degrees does, so
+    V5-HR runs on the original BD/WIDE grids and the legacy 128 crop is valid
+    again -- which also restores direct V1/V2 comparability.
+    """
+    for grid in (BD, WIDE):
+        validate_cpc_alignment(grid, factor=2, coarse_res=0.1)
+        assert grid.nlat % 2 == 0 and grid.nlon % 2 == 0
+
+    validate_aligned_crop((0, 0), 128, factor=2, downsamplings=3)
+    validate_aligned_crop((64, 130), 128, factor=2, downsamplings=3)
+    with pytest.raises(ValueError, match="modulo"):
+        validate_aligned_crop((1, 0), 128, factor=2, downsamplings=3)
+
+    # BD is an exact subarray of WIDE, so no crop translation is needed.
+    row, column = crop_offsets(WIDE, BD)
+    assert row % 2 == 0 and column % 2 == 0
+
+
+def test_v5_rebuild_differs_from_v4_by_the_smooth_base_alone():
+    """A v5 target archive must be a one-variable change from v4.
+
+    v5 exists to remove the 0.5-degree conservation lattice: a block-constant
+    base has an infinite seam index, the conservative smooth base brings it to
+    ~1.16, and conservation is unchanged.  Measuring that requires everything
+    else to stay fixed.  IMERG conditioning, ERA5 total precipitation and
+    terrain-forced ascent remain available behind flags, but as defaults they
+    would move the conditioning set at the same time and make the v4/v5
+    comparison uninterpretable.
+    """
+    import re
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/56_build_chirps_subgrid_targets.py"
+    ).read_text()
+
+    assert 'ERA5_DEFAULT = ("tcwv", "cape", "u10", "v10", "msl")' in source
+    assert re.search(r'"--grid",\s*default="wide_cpc"', source)
+    assert re.search(r'"--factor",\s*type=int,\s*default=10', source)
+    assert re.search(r'"--coarse-res",\s*type=float,\s*default=0\.5', source)
+    assert re.search(r'"--smooth-base-iterations",\s*type=int,\s*default=2', source)
+
+    for flag in ("--imerg-glob", "--orographic-ascent"):
+        assert flag in source, flag
+    assert "args.orographic_ascent" in source, "ascent must be opt-in"
+    assert '"sqrt_imerg_precip"' in source and "orographic_ascent" in source
+
+
+def test_date_convention_fixes_do_not_depend_on_the_schema():
+    """The shifted-day bug lived in the pilot and evaluators, not the encoding.
+
+    That is why it applies to an existing v4 archive with no retraining: the
+    state/label distinction is enforced in scripts 58, 60 and 61, and none of
+    them consults the target schema to decide it.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for name, marker in (
+        ("58_evaluate_subgrid_prior.py", "state_time"),
+        ("60_v4_subgrid_da_test.py", "condition_index"),
+        ("61_evaluate_v4_subgrid_da_test.py", "state_date"),
+    ):
+        source = (root / "scripts" / name).read_text()
+        assert marker in source, f"{name} lost its state-date handling"
+        for line in source.splitlines():
+            if "SUBGRID_SCHEMA" in line and ("state_" in line or "condition_" in line):
+                raise AssertionError(f"{name}: date handling branches on the schema")

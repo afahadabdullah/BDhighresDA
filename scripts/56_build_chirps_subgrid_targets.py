@@ -41,9 +41,12 @@ from bdhires.data import (  # noqa: E402
     encoding_metadata,
     validate_cpc_alignment,
 )
-from bdhires.grids import Grid, WIDE_CPC  # noqa: E402
+from bdhires.grids import Grid, get_grid  # noqa: E402
 
 
+# The v4 conditioning set.  ERA5 "tp" and the IMERG/orographic channels are
+# available behind flags, but they are NOT defaults: a v5 rebuild must differ
+# from v4 only by the conservative smooth base, or the two are not comparable.
 ERA5_DEFAULT = ("tcwv", "cape", "u10", "v10", "msl")
 
 
@@ -293,6 +296,8 @@ def _condition_chunk(
     coarse_grid: Grid,
     area: np.ndarray,
     factor: int,
+    imerg: xr.DataArray | None = None,
+    elevation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
     cpc_values = np.asarray(
         cpc.reindex(time=times).transpose("time", "lat", "lon").values,
@@ -304,6 +309,19 @@ def _condition_chunk(
     coarse_names = ["sqrt_cpc_precip", "cpc_valid"]
     fine_parts = []
     fine_names = []
+
+    # IMERG is the amount backbone.  At factor 2 it already sits ON the coarse
+    # grid, so it enters with no regridding: "how much, and roughly where"
+    # now comes from an observation rather than from a sparse interpolation.
+    if imerg is not None:
+        imerg_values = np.asarray(
+            imerg.reindex(time=times).transpose("time", "lat", "lon").values,
+            dtype=np.float32,
+        )
+        imerg_valid = np.isfinite(imerg_values).astype(np.float32)
+        imerg_values = np.sqrt(np.clip(np.nan_to_num(imerg_values, nan=0.0), 0.0, None))
+        coarse_parts.extend([imerg_values[:, None], imerg_valid[:, None]])
+        coarse_names.extend(["sqrt_imerg_precip", "imerg_valid"])
 
     if era5 is not None:
         for name in era5_names:
@@ -319,6 +337,24 @@ def _condition_chunk(
             fine_names.append(f"era5_{name}")
             coarse_parts.append(_block_mean_numpy(values[:, None], area, factor))
             coarse_names.append(f"era5_{name}")
+
+    # Terrain-forced ascent.  Slope and aspect as *static* channels carry no
+    # daily signal; their interaction with today's wind does, and over the
+    # Meghalaya and Chittagong barriers it is the most physically defensible
+    # source of day-varying subgrid placement available.
+    if (
+        elevation is not None
+        and {"era5_u10", "era5_v10"} <= set(fine_names)
+    ):
+        u10 = fine_parts[fine_names.index("era5_u10")]
+        v10 = fine_parts[fine_names.index("era5_v10")]
+        dz_dlat, dz_dlon = np.gradient(elevation.astype(np.float32))
+        ascent = u10 * dz_dlon[None, None] + v10 * dz_dlat[None, None]
+        derived = np.concatenate([ascent, np.abs(ascent)], axis=1).astype(np.float32)
+        fine_parts.append(derived)
+        fine_names.extend(["orographic_ascent", "orographic_ascent_abs"])
+        coarse_parts.append(_block_mean_numpy(derived, area, factor))
+        coarse_names.extend(["orographic_ascent", "orographic_ascent_abs"])
 
     if len(static):
         repeated = np.broadcast_to(static[None], (len(times), *static.shape)).copy()
@@ -367,6 +403,18 @@ def _create(group, name, shape, chunks, dtype="f4", fill_value=0):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--chirps-glob", required=True)
+    parser.add_argument(
+        "--imerg-glob",
+        help="IMERG daily on the coarse support; the V5-HR amount backbone",
+    )
+    parser.add_argument("--grid", default="wide_cpc", help="fine grid from bdhires.grids")
+    parser.add_argument("--factor", type=int, default=10)
+    parser.add_argument("--coarse-res", type=float, default=0.5)
+    parser.add_argument(
+        "--orographic-ascent", action="store_true",
+        help="add U10.grad(h) channels; changes the conditioning set, so keep it "
+             "off for a like-for-like v4/v5 comparison",
+    )
     parser.add_argument("--cpc-glob", required=True)
     parser.add_argument("--era5-glob")
     parser.add_argument("--era5-vars", default=",".join(ERA5_DEFAULT))
@@ -386,16 +434,26 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    fine_grid = WIDE_CPC
-    factor = 10
-    validate_cpc_alignment(fine_grid, factor)
+    fine_grid = get_grid(args.grid)
+    factor = int(args.factor)
+    coarse_res = float(args.coarse_res)
+    validate_cpc_alignment(fine_grid, factor, coarse_res)
     coarse_grid = Grid(
-        name="wide_cpc_native",
+        name=f"{fine_grid.name}_coarse",
         lon_min=fine_grid.lon_min,
         lat_min=fine_grid.lat_min,
         nlon=fine_grid.nlon // factor,
         nlat=fine_grid.nlat // factor,
-        res=0.5,
+        res=coarse_res,
+    )
+    print(
+        f"grid {fine_grid.name} {fine_grid.shape} @{fine_grid.res} deg -> coarse "
+        f"{coarse_grid.shape} @{coarse_res} deg (factor {factor})",
+        flush=True,
+    )
+    imerg_ds = (
+        _standardize_names(_open_many(_paths(args.imerg_glob, "IMERG")))
+        if args.imerg_glob else None
     )
     chirps_ds = _standardize_names(_open_many(_paths(args.chirps_glob, "CHIRPS")))
     cpc_ds = _standardize_names(_open_many(_paths(args.cpc_glob, "CPC")))
@@ -415,6 +473,13 @@ def main() -> None:
         coarse_grid,
         "native CPC",
     ).transpose("time", "lat", "lon")
+    imerg = None
+    if imerg_ds is not None:
+        imerg = _exact_grid(
+            _variable(imerg_ds, ("precipitation", "precip", "imerg"), "IMERG"),
+            coarse_grid,
+            "IMERG",
+        ).transpose("time", "lat", "lon")
     times = np.asarray(chirps.time.values, dtype="datetime64[ns]")
     if len(np.unique(times)) != len(times) or np.any(np.diff(times) <= np.timedelta64(0, "D")):
         raise ValueError("CHIRPS time axis must be unique and increasing")
@@ -429,6 +494,12 @@ def main() -> None:
     if np.any(np.diff(days) != np.timedelta64(1, "D")):
         raise ValueError("CHIRPS must contain every calendar day in the requested period")
     static, static_names = _load_static(args.static, fine_grid)
+    elevation = None
+    for position, name in enumerate(static_names if args.orographic_ascent else []):
+        if any(key in name.lower() for key in ("elev", "dem", "topo", "height")):
+            elevation = np.asarray(static[position], np.float32)
+            print(f"orographic ascent uses static channel {name!r}", flush=True)
+            break
     area = cell_area_weights(fine_grid.lat, fine_grid.lon)
     # A pixel belongs to the physical target support only if every archived
     # day is valid there. Converting an occasional missing value to zero would
@@ -494,7 +565,7 @@ def main() -> None:
             intensity_stats.update(centred_values[wet_values])
         coarse_cond, fine_cond, coarse_names, fine_names = _condition_chunk(
             times[start:stop], cpc, era5_ds, era5_names, static, static_names,
-            fine_grid, coarse_grid, area, factor,
+            fine_grid, coarse_grid, area, factor, imerg, elevation,
         )
         if coarse_stats is None:
             coarse_stats = RunningChannels(coarse_cond.shape[1])
@@ -628,7 +699,7 @@ def main() -> None:
         oracle_ceiling.update(decoded, raw, coarse_upscaled, fine_valid)
         coarse_cond, fine_cond, _, _ = _condition_chunk(
             times[start:stop], cpc, era5_ds, era5_names, static, static_names,
-            fine_grid, coarse_grid, area, factor,
+            fine_grid, coarse_grid, area, factor, imerg, elevation,
         )
         coarse_cond = (coarse_cond - coarse_mean[None, :, None, None]) / coarse_std[
             None, :, None, None
