@@ -51,7 +51,7 @@ import zarr  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bdhires.data import area_weighted_block_mean, resolve_archive_encoding  # noqa: E402
+from bdhires.data import area_weighted_block_mean  # noqa: E402
 
 WINDOWS = (1, 3, 5, 10, 30)
 
@@ -115,16 +115,40 @@ def spatial_search(left, right, keep, max_cells=4):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target-store", required=True)
+    parser.add_argument("--target-store", default=None)
+    parser.add_argument(
+        "--sample-store", default=None,
+        help="resolve --target-store from this archive's source_target_store",
+    )
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--max-shift-cells", type=int, default=4)
     args = parser.parse_args()
 
-    root = zarr.open_group(args.target_store, mode="r")
-    encoding, schema = resolve_archive_encoding(root.attrs)
-    factor = int(encoding.factor)
+    target_store = args.target_store
+    if args.sample_store and not target_store:
+        samples = zarr.open_group(args.sample_store, mode="r")
+        target_store = samples.attrs.get("source_target_store")
+        if not target_store:
+            raise ValueError(f"{args.sample_store} does not record source_target_store")
+        print(f"resolved target store from samples: {target_store}")
+    if not target_store:
+        raise ValueError("pass --target-store or --sample-store")
+
+    root = zarr.open_group(target_store, mode="r")
+    # This diagnostic only READS raw arrays: no decoding, no reconstruction, no
+    # smooth base.  The decoder-contract resolver deliberately refuses
+    # superseded schemas, but that rule protects sampling, not a product
+    # intercomparison -- and the archives worth interrogating here are exactly
+    # the older ones.  Accept any subgrid schema and say which one it is.
+    schema = root.attrs.get("schema", "<unset>")
+    if not str(schema).startswith("cpc_v3_subgrid_v"):
+        raise ValueError(
+            f"{target_store} has schema {schema!r}, which is not a V3-SG target archive"
+        )
+    factor = int(dict(root.attrs.get("subgrid_encoding") or {}).get("factor", 10))
+    args.target_store = target_store
 
     times = np.asarray(root["time"][:], np.int64).astype("datetime64[ns]")
     days = times.astype("datetime64[D]")
@@ -137,10 +161,19 @@ def main() -> None:
     if index.size < max(WINDOWS):
         raise ValueError(f"only {index.size} dates selected; need at least {max(WINDOWS)}")
 
-    channels = list(root.attrs["coarse_cond_channels"])
-    if "sqrt_cpc_precip" not in channels:
-        raise ValueError("target store lacks the frozen sqrt_cpc_precip channel")
-    ch = channels.index("sqrt_cpc_precip")
+    channels = list(root.attrs.get("coarse_cond_channels") or [])
+    candidates = [n for n in channels if "cpc" in n.lower() and "valid" not in n.lower()]
+    if "sqrt_cpc_precip" in channels:
+        ch = channels.index("sqrt_cpc_precip")
+    elif len(candidates) == 1:
+        ch = channels.index(candidates[0])
+        print(f"note: using coarse conditioning channel {candidates[0]!r}")
+    else:
+        raise ValueError(
+            f"cannot identify the CPC channel in {target_store}.\n"
+            f"  available coarse_cond_channels: {channels}\n"
+            "  older archives may name it differently; pass a store built by script 56"
+        )
     mean = float(root.attrs["coarse_cond_mean"][ch])
     std = float(root.attrs["coarse_cond_std"][ch])
 
