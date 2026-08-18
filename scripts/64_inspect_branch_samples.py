@@ -260,6 +260,11 @@ def main() -> None:
     print(f"validation  : {years[0]}-{years[1]}  ({len(available)} days)")
     print(f"crop        : {crop} at {origin or 'centre'}   factor {factor}")
     print(f"device      : {device}   members {args.members}   steps {args.n_steps}")
+    if device.type == "cpu":
+        cost = args.members * args.n_steps * 2
+        print(f"              WARNING: no GPU.  Each day costs ~{cost} forward passes")
+        print("              per branch; the allocation U-Net is slow on CPU.  Submit")
+        print("              this to a GPU node, or lower --members / --n-steps.")
     print(f"days        : {', '.join(str(available[p]) for p in positions)}")
     print()
 
@@ -307,6 +312,8 @@ def main() -> None:
 
         # ---- coarse branch ------------------------------------------------
         if coarse_model is not None:
+            print(f"  {date}  sampling coarse ({members} members, "
+                  f"{args.n_steps} steps)...", flush=True)
             condition = coarse_cond.expand(members, -1, -1, -1)
 
             def coarse_velocity(state, t):
@@ -342,6 +349,8 @@ def main() -> None:
 
         # ---- allocation branch, given the true coarse amounts -------------
         if allocation_model is not None:
+            print(f"  {date}  sampling allocation ({members} members, "
+                  f"{args.n_steps} steps)...", flush=True)
             coarse_context = item["coarse_state"][None].to(device).expand(members, -1, -1, -1)
             condition = fine_cond.expand(members, -1, -1, -1)
 
@@ -448,7 +457,7 @@ def main() -> None:
 
 
 def report(entry: dict) -> None:
-    print(f"--- {entry['date']} " + "-" * 46)
+    print(f"--- {entry['date']} " + "-" * 46, flush=True)
     if "coarse" in entry:
         block = entry["coarse"]
         print("  coarse 0.5deg amount")
