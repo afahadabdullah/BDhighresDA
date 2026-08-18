@@ -497,6 +497,7 @@ def main() -> None:
             panel["fine_truth"] = truth[0, 0].numpy()
             panel["fine_block_null"] = block_null[0, 0].numpy()
             panel["fine_smooth_null"] = smooth_null[0, 0].numpy()
+            panel["fine_ensemble_mean"] = numpy_model.mean(axis=0)
             panel["fine_members"] = numpy_model
 
         results["days"].append(entry)
@@ -682,7 +683,7 @@ def make_figures(panels: list[dict], out_dir: Path) -> None:
     if "coarse_truth" in panels[0]:
         columns = 2 + panels[0]["coarse_members"].shape[0]
         figure, axes = plt.subplots(
-            len(panels), columns, figsize=(2.1 * columns, 2.3 * len(panels)), squeeze=False
+            len(panels), columns, figsize=(2.1 * columns, 2.6 * len(panels)), squeeze=False
         )
         for row, panel in enumerate(panels):
             mask = panel["coarse_keep"]
@@ -694,14 +695,14 @@ def make_figures(panels: list[dict], out_dir: Path) -> None:
             for column, member in enumerate(panel["coarse_members"]):
                 draw(axes[row][2 + column], member, f"member {column + 1}", vmax, mask)
         figure.suptitle("Coarse branch: p(m | conditioning), decoded to mm/day", fontsize=10)
-        figure.tight_layout()
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
         figure.savefig(out_dir / "branch_coarse.png", dpi=150)
         print(f"wrote {out_dir / 'branch_coarse.png'}")
 
     if "fine_truth" in panels[0]:
-        columns = 3 + panels[0]["fine_members"].shape[0]
+        columns = 4 + panels[0]["fine_members"].shape[0]
         figure, axes = plt.subplots(
-            len(panels), columns, figsize=(2.1 * columns, 2.3 * len(panels)), squeeze=False
+            len(panels), columns, figsize=(2.1 * columns, 2.6 * len(panels)), squeeze=False
         )
         for row, panel in enumerate(panels):
             mask = panel["fine_keep"]
@@ -710,13 +711,18 @@ def make_figures(panels: list[dict], out_dir: Path) -> None:
             axes[row][0].set_ylabel(panel["date"], fontsize=8)
             draw(axes[row][1], panel["fine_block_null"], "block null", vmax, mask)
             draw(axes[row][2], panel["fine_smooth_null"], "smooth base null", vmax, mask)
+            # The ensemble mean sits between the nulls and the members on
+            # purpose: it is the smoothest thing the model can produce, so
+            # reading left to right walks from no subgrid detail, through the
+            # conservative interpolation, to the mean, to individual draws.
+            draw(axes[row][3], panel["fine_ensemble_mean"], "ensemble mean", vmax, mask)
             for column, member in enumerate(panel["fine_members"]):
-                draw(axes[row][3 + column], member, f"member {column + 1}", vmax, mask)
+                draw(axes[row][4 + column], member, f"member {column + 1}", vmax, mask)
         figure.suptitle(
             "Allocation branch: p(z | true m, conditioning), reconstructed to mm/day",
             fontsize=10,
         )
-        figure.tight_layout()
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
         figure.savefig(out_dir / "branch_allocation.png", dpi=150)
         print(f"wrote {out_dir / 'branch_allocation.png'}")
 
