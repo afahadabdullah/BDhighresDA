@@ -191,6 +191,28 @@ def field_summary(field: np.ndarray, keep: np.ndarray, wet_threshold: float) -> 
     }
 
 
+def ensemble_summary(members: np.ndarray, keep: np.ndarray, wet_threshold: float) -> dict:
+    """Summarise members individually, then the ensemble mean, kept separate.
+
+    Averaging members first and then measuring wet fraction is not a
+    calibration diagnostic: the mean of sixteen members spreads rain over the
+    union of their wet areas at reduced intensity, so it is wetter in area and
+    weaker in amount than any member or than the truth.  Comparing THAT against
+    the observed wet fraction manufactures an alarming number out of nothing.
+    Per-member statistics are the ones that answer "is the gate calibrated".
+    """
+    per_member = [field_summary(member, keep, wet_threshold) for member in members]
+    summary = {
+        f"member_{key}": float(np.mean([entry[key] for entry in per_member]))
+        for key in ("mean_mm", "wet_fraction", "p99_mm", "max_mm")
+    }
+    summary["dry_member_count"] = int(
+        sum(1 for member in members if member.reshape(-1)[keep.reshape(-1)].std() <= 0.0)
+    )
+    summary["ensemble_mean"] = field_summary(members.mean(axis=0), keep, wet_threshold)
+    return summary
+
+
 # --------------------------------------------------------------------------
 
 
@@ -252,9 +274,23 @@ def main() -> None:
                 raise SystemExit(f"{value} is not in the validation split {years}")
             positions.append(int(match[0]))
     else:
-        # Spread across the split rather than taking the first N consecutive
-        # days, which would all belong to one synoptic event.
-        positions = np.linspace(0, len(available) - 1, args.days).round().astype(int).tolist()
+        # Spread across the RAINFALL distribution, not the calendar.  Evenly
+        # spaced positions in a date-ordered split land on 1 January and 31
+        # December -- dry-season days whose domain mean is a few tenths of a
+        # millimetre, where a pattern correlation is almost pure noise and says
+        # nothing about monsoon performance.  Ranking by domain-mean rainfall
+        # and sampling quantiles gives a dry day, a typical day and a wet day.
+        domain_mean = np.asarray([
+            float(np.asarray(dataset.z["fine_mm"][int(j)], np.float32)[
+                dataset.valid.astype(bool)
+            ].mean())
+            for j in dataset.index
+        ])
+        order = np.argsort(domain_mean)
+        quantiles = np.linspace(0.5, 0.95, args.days) if args.days > 1 else np.array([0.9])
+        positions = [int(order[int(round(q * (len(order) - 1)))]) for q in quantiles]
+        print("day selection: rainfall quantiles "
+              f"{', '.join(f'{q:.2f}' for q in quantiles)} of the validation split")
 
     print(f"archive     : {args.target_store}")
     print(f"validation  : {years[0]}-{years[1]}  ({len(available)} days)")
@@ -331,7 +367,7 @@ def main() -> None:
             truth = coarse_truth[0, 0].cpu().numpy()
             entry["coarse"] = {
                 "truth": field_summary(truth, coarse_keep, wet_threshold),
-                "model": field_summary(sampled.mean(axis=0), coarse_keep, wet_threshold),
+                "model": ensemble_summary(sampled, coarse_keep, wet_threshold),
                 "member_pattern_r": [
                     pattern_correlation(member, truth, coarse_keep) for member in sampled
                 ],
@@ -342,6 +378,10 @@ def main() -> None:
                 "bias_mm": float(
                     sampled.mean(axis=0)[coarse_keep].mean() - truth[coarse_keep].mean()
                 ),
+                "ensemble_mean_mae_mm": float(
+                    np.abs(sampled.mean(axis=0) - truth)[coarse_keep].mean()
+                ),
+                "truth_domain_mean_mm": float(truth[coarse_keep].mean()),
             }
             panel["coarse_keep"] = coarse_keep
             panel["coarse_truth"] = truth
@@ -410,7 +450,7 @@ def main() -> None:
             numpy_model = model_field[:, 0].numpy()
             entry["allocation"] = {
                 "truth": field_summary(truth[0, 0].numpy(), keep, wet_threshold),
-                "model": field_summary(numpy_model.mean(axis=0), keep, wet_threshold),
+                "model": ensemble_summary(numpy_model, keep, wet_threshold),
                 "conservation_max_abs_mm": conservation_abs,
                 "conservation_max_relative_wet": conservation_rel,
                 "full_field_r": [
@@ -430,6 +470,23 @@ def main() -> None:
                 ),
                 "crps_mm_block_null": crps(
                     block_null[:, 0].numpy(), truth[0, 0].numpy(), keep
+                ),
+                # A 16-member CRPS against a 1-member null is not a fair fight:
+                # for a deterministic field CRPS degenerates to MAE, so the
+                # ensemble wins on spread alone.  Compare deterministic
+                # summaries too -- ensemble mean against each null.
+                "mae_mm_ensemble_mean": float(
+                    np.abs(numpy_model.mean(axis=0) - truth[0, 0].numpy())[keep].mean()
+                ),
+                "mae_mm_smooth_null": float(
+                    np.abs(smooth_null[0, 0].numpy() - truth[0, 0].numpy())[keep].mean()
+                ),
+                "within_block_r_ensemble_mean": pattern_correlation(
+                    within_block_anomaly(
+                        torch.from_numpy(numpy_model.mean(axis=0))[None, None],
+                        area.cpu(), fine_valid.cpu(), factor,
+                    )[0],
+                    anomaly_truth, keep,
                 ),
                 "seam_index_model": seam_index(numpy_model[0], keep, factor),
                 "seam_index_smooth_null": seam_index(smooth_null[0, 0].numpy(), keep, factor),
@@ -452,7 +509,16 @@ def main() -> None:
         json.dumps(results, indent=2, sort_keys=True)
     )
     print(f"\nwrote {out_dir / 'branch_inspection.json'}")
-    make_figures(panels, out_dir)
+    # Figures are a convenience; the numbers are the result.  A broken
+    # matplotlib -- most often user-site packages built for the login node's
+    # architecture shadowing the environment's own -- must not discard an
+    # evaluation that has already run.
+    try:
+        make_figures(panels, out_dir)
+    except Exception as error:  # noqa: BLE001 - plotting must never be fatal
+        print(f"\nfigures skipped: {type(error).__name__}: {error}")
+        print("if this is an ImportError on a compute node, rerun with "
+              "PYTHONNOUSERSITE=1 to ignore ~/.local packages")
     verdict(results)
 
 
@@ -460,32 +526,46 @@ def report(entry: dict) -> None:
     print(f"--- {entry['date']} " + "-" * 46, flush=True)
     if "coarse" in entry:
         block = entry["coarse"]
-        print("  coarse 0.5deg amount")
+        model = block["model"]
+        dry = model["dry_member_count"]
+        print(f"  coarse 0.5deg amount   (truth domain mean "
+              f"{block['truth_domain_mean_mm']:.2f} mm/day)")
         print(f"    pattern r      ensemble mean {block['ensemble_mean_pattern_r']:6.3f}   "
-              f"members {' '.join(f'{r:.3f}' for r in block['member_pattern_r'])}")
+              f"member mean {np.nanmean(block['member_pattern_r']):6.3f}")
         print(f"    CRPS           {block['crps_mm']:6.3f} mm/day        "
               f"bias {block['bias_mm']:+.3f}")
-        print(f"    wet fraction   model {block['model']['wet_fraction']:.3f}   "
-              f"truth {block['truth']['wet_fraction']:.3f}")
-        print(f"    mean mm/day    model {block['model']['mean_mm']:6.3f}   "
+        print(f"    wet fraction   member mean {model['member_wet_fraction']:.3f}   "
+              f"truth {block['truth']['wet_fraction']:.3f}   "
+              f"(ensemble mean {model['ensemble_mean']['wet_fraction']:.3f})")
+        print(f"    mean mm/day    member mean {model['member_mean_mm']:6.3f}   "
               f"truth {block['truth']['mean_mm']:6.3f}")
+        if dry:
+            print(f"    DRY MEMBERS    {dry}/{len(block['member_pattern_r'])} produced no "
+                  "rain anywhere; their correlation is undefined")
     if "allocation" in entry:
         block = entry["allocation"]
         print("  allocation 0.05deg, given the true coarse amounts")
         print(f"    conservation   {block['conservation_max_abs_mm']:.2e} mm/day max, "
               f"{block['conservation_max_relative_wet']:.2e} relative where wet")
-        print(f"    within-block r model  "
-              f"{np.mean(block['within_block_r_model']):6.3f}   "
+        print(f"    within-block r member mean "
+              f"{np.nanmean(block['within_block_r_model']):6.3f}   "
+              f"ens mean {block['within_block_r_ensemble_mean']:6.3f}   "
               f"smooth null {block['within_block_r_smooth_null']:6.3f}")
         print(f"    CRPS mm/day    model {block['crps_mm_model']:6.3f}   "
               f"smooth {block['crps_mm_smooth_null']:6.3f}   "
-              f"block {block['crps_mm_block_null']:6.3f}")
+              f"block {block['crps_mm_block_null']:6.3f}   (ensemble advantage)")
+        print(f"    MAE mm/day     ens mean {block['mae_mm_ensemble_mean']:6.3f}   "
+              f"smooth null {block['mae_mm_smooth_null']:6.3f}   (like for like)")
         print(f"    seam index     model {block['seam_index_model']:6.3f}   "
               f"smooth {block['seam_index_smooth_null']:6.3f}   "
               f"truth {block['seam_index_truth']:6.3f}   "
               f"block {block['seam_index_block_null']:.3g}")
-        print(f"    wet fraction   model {block['model']['wet_fraction']:.3f}   "
+        print(f"    wet fraction   member mean "
+              f"{block['model']['member_wet_fraction']:.3f}   "
               f"truth {block['truth']['wet_fraction']:.3f}")
+        print(f"    p99 mm/day     member mean "
+              f"{block['model']['member_p99_mm']:6.3f}   "
+              f"truth {block['truth']['p99_mm']:6.3f}")
     print()
 
 
@@ -495,11 +575,24 @@ def verdict(results: dict) -> None:
     days = results["days"]
 
     if "coarse" in days[0]:
-        scores = [np.mean(day["coarse"]["member_pattern_r"]) for day in days]
+        scores = [np.nanmean(day["coarse"]["member_pattern_r"]) for day in days]
         bias = [day["coarse"]["bias_mm"] for day in days]
-        print(f"COARSE      mean member pattern r {np.mean(scores):.3f}, "
-              f"mean bias {np.mean(bias):+.3f} mm/day")
-        if np.mean(scores) < 0.2:
+        dry_members = sum(day["coarse"]["model"]["dry_member_count"] for day in days)
+        total_members = sum(len(day["coarse"]["member_pattern_r"]) for day in days)
+        rainfall = [day["coarse"]["truth_domain_mean_mm"] for day in days]
+        print(f"COARSE      mean member pattern r {np.nanmean(scores):.3f}, "
+              f"mean bias {np.nanmean(bias):+.3f} mm/day")
+        if dry_members:
+            print(f"            {dry_members}/{total_members} members were entirely dry.")
+            print("            The occurrence gate, not the intensity head, decides")
+            print("            this; it is the same mechanism as the pilot's dry bias.")
+        if max(rainfall) < 2.0:
+            print(f"            CAUTION: the wettest day sampled averages "
+                  f"{max(rainfall):.2f} mm/day.")
+            print("            Pattern correlation on a nearly-dry field is mostly")
+            print("            noise.  Re-run with --dates over the monsoon before")
+            print("            concluding anything about skill.")
+        if np.nanmean(scores) < 0.2:
             print("            LOW.  The branch is not reproducing the 0.5-degree")
             print("            field its own conditioning should determine.  Check the")
             print("            conditioning channels before blaming the flow.")
@@ -508,23 +601,27 @@ def verdict(results: dict) -> None:
             print("            originates in the coarse occurrence gate, not in DA.")
 
     if "allocation" in days[0]:
-        model = [np.mean(day["allocation"]["within_block_r_model"]) for day in days]
+        model = [np.nanmean(day["allocation"]["within_block_r_model"]) for day in days]
         null = [day["allocation"]["within_block_r_smooth_null"] for day in days]
         seam = [day["allocation"]["seam_index_model"] for day in days]
         truth_seam = [day["allocation"]["seam_index_truth"] for day in days]
         conservation = max(
             day["allocation"]["conservation_max_relative_wet"] for day in days
         )
-        print(f"ALLOCATION  within-block r {np.mean(model):.3f} against a smooth-base "
-              f"null of {np.mean(null):.3f}")
-        print(f"            seam index {np.mean(seam):.2f}, CHIRPS itself "
-              f"{np.mean(truth_seam):.2f}")
+        mae_model = [day["allocation"]["mae_mm_ensemble_mean"] for day in days]
+        mae_null = [day["allocation"]["mae_mm_smooth_null"] for day in days]
+        print(f"ALLOCATION  within-block r {np.nanmean(model):.3f} against a smooth-base "
+              f"null of {np.nanmean(null):.3f}")
+        print(f"            ensemble-mean MAE {np.mean(mae_model):.3f} against the "
+              f"null's {np.mean(mae_null):.3f} mm/day")
+        print(f"            seam index {np.nanmean(seam):.2f}, CHIRPS itself "
+              f"{np.nanmean(truth_seam):.2f}")
         print(f"            conservation holds to {conservation:.1e} relative")
-        if np.mean(model) <= np.mean(null) + 0.01:
+        if np.nanmean(model) <= np.nanmean(null) + 0.01:
             print("            NO GAIN over the smooth base.  The flow is not adding")
             print("            subgrid information; whatever skill the reconstruction")
             print("            shows comes from the coarse amounts it was handed.")
-        if np.mean(seam) > 2.0 * np.mean(truth_seam):
+        if np.nanmean(seam) > 2.0 * np.nanmean(truth_seam):
             print("            SEAM SURVIVES.  Block edges are still preferred over")
             print("            interior gradients; the blockiness fix is not landing.")
         if conservation > 1.0e-4:
