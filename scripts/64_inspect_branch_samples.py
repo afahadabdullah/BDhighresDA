@@ -596,9 +596,22 @@ def verdict(results: dict) -> None:
             print("            LOW.  The branch is not reproducing the 0.5-degree")
             print("            field its own conditioning should determine.  Check the")
             print("            conditioning channels before blaming the flow.")
-        if np.mean(bias) < -0.5:
-            print("            DRY BIAS, the v4 pilot's largest residual error.  It")
-            print("            originates in the coarse occurrence gate, not in DA.")
+        # One averaged bias hides the failure that matters.  Over-predicting light
+        # days while under-predicting heavy ones is amplitude compression --
+        # regression toward climatology -- and it calls for different work than a
+        # uniform offset would.
+        if len(days) >= 2:
+            ordered = sorted(zip(rainfall, bias))
+            light, heavy = ordered[0], ordered[-1]
+            print(f"            bias {light[1]:+.2f} mm/day where {light[0]:.1f} was observed, "
+                  f"{heavy[1]:+.2f} where {heavy[0]:.1f} was")
+            if light[1] > 0.0 > heavy[1]:
+                print("            AMPLITUDE COMPRESSION: the sign flips with rainfall, so")
+                print("            this is regression toward climatology, not a dry bias.")
+                print("            That implicates the intensity head, not the occurrence gate.")
+            elif np.nanmean(bias) < -0.5:
+                print("            DRY BIAS across the sampled range.  With no sign flip this")
+                print("            points at the occurrence gate, as in the v4 pilot.")
 
     if "allocation" in days[0]:
         model = [np.nanmean(day["allocation"]["within_block_r_model"]) for day in days]
@@ -610,17 +623,37 @@ def verdict(results: dict) -> None:
         )
         mae_model = [day["allocation"]["mae_mm_ensemble_mean"] for day in days]
         mae_null = [day["allocation"]["mae_mm_smooth_null"] for day in days]
-        print(f"ALLOCATION  within-block r {np.nanmean(model):.3f} against a smooth-base "
-              f"null of {np.nanmean(null):.3f}")
-        print(f"            ensemble-mean MAE {np.mean(mae_model):.3f} against the "
-              f"null's {np.mean(mae_null):.3f} mm/day")
+        # The null is one deterministic smooth field, so the ensemble MEAN is its
+        # like-for-like counterpart.  Judging a single stochastic member against
+        # it charges the model for sampling noise the null cannot have.
+        ens = [day["allocation"]["within_block_r_ensemble_mean"] for day in days]
+        print(f"ALLOCATION  within-block r, ensemble mean {np.nanmean(ens):.3f} against a "
+              f"smooth-base null of {np.nanmean(null):.3f}")
+        print(f"            individual members average {np.nanmean(model):.3f}; the gap is "
+              "sampling noise, not lost skill")
+        print(f"            ensemble-mean MAE {np.mean(mae_model):.3f} vs the null's "
+              f"{np.mean(mae_null):.3f} mm/day -- but MAE rewards smooth fields")
+        print("            through the double penalty, so read the correlation first")
         print(f"            seam index {np.nanmean(seam):.2f}, CHIRPS itself "
               f"{np.nanmean(truth_seam):.2f}")
         print(f"            conservation holds to {conservation:.1e} relative")
-        if np.nanmean(model) <= np.nanmean(null) + 0.01:
+        if np.nanmean(ens) <= np.nanmean(null) + 0.01:
             print("            NO GAIN over the smooth base.  The flow is not adding")
             print("            subgrid information; whatever skill the reconstruction")
             print("            shows comes from the coarse amounts it was handed.")
+
+        # Conservation is exact, so mass concentrated into a few cells must come
+        # out as extremes there and dryness everywhere else.  A member maximum
+        # far above the observed one is that trade made visible.
+        ratios = [
+            day["allocation"]["model"]["member_max_mm"]
+            / max(day["allocation"]["truth"]["max_mm"], 1.0e-6)
+            for day in days
+        ]
+        if max(ratios) > 1.5:
+            print(f"            EXTREMES: mean member maximum reaches {max(ratios):.1f}x the")
+            print("            observed maximum.  With conservation exact, that means mass")
+            print("            concentrated into too few cells, leaving the rest too dry.")
         if np.nanmean(seam) > 2.0 * np.nanmean(truth_seam):
             print("            SEAM SURVIVES.  Block edges are still preferred over")
             print("            interior gradients; the blockiness fix is not landing.")
