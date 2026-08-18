@@ -332,6 +332,14 @@ def area_weighted_block_mean(
     return mean, retained, fraction
 
 
+# A block mean below this (mm/day) is numerically zero, so a correction ratio
+# against it carries no information -- only overflow.
+_SMOOTH_BASE_FLOOR = 1.0e-12
+# Intermediate corrections are bounded because they only shape the base; the
+# final renormalisation is what makes it conservative.
+_SMOOTH_BASE_MAX_CORRECTION = 1.0e3
+
+
 def conservative_smooth_upsample(
     coarse_mm: torch.Tensor,
     area: torch.Tensor,
@@ -358,31 +366,60 @@ def conservative_smooth_upsample(
     Non-negativity is preserved throughout: bilinear interpolation of a
     non-negative field is non-negative and every correction factor is a ratio of
     non-negative block means.
+
+    Blocks with no valid area are the sharp edge here.  CHIRPS is undefined over
+    the Bay of Bengal, so whole 0.5-degree blocks contain no valid fine cell and
+    their block mean is identically zero.  Dividing into that produces a
+    correction of order 1e38, and because the correction is applied through a
+    bilinear lift it does not stay inside the offending block -- it smears into
+    the valid coastal blocks beside it and overflows float32.  Such blocks
+    cannot be corrected by a ratio at all, so they are left alone during the
+    iteration and fall back to the block constant at the end, which is exactly
+    conservative by definition.
     """
     if iterations < 0:
         raise ValueError("iterations must be non-negative")
     if coarse_mm.ndim != 4 or coarse_mm.shape[1] != 1:
         raise ValueError("coarse_mm must have shape (B,1,Hc,Wc)")
-    if iterations == 0:
-        return coarse_mm.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
 
-    floor = torch.finfo(coarse_mm.dtype).tiny
+    def expand(block_field: torch.Tensor) -> torch.Tensor:
+        return block_field.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+
+    block_constant = expand(coarse_mm)
+    if iterations == 0:
+        return block_constant
 
     def lift(block_field: torch.Tensor) -> torch.Tensor:
         return F.interpolate(
             block_field, scale_factor=factor, mode="bilinear", align_corners=False
         )
 
-    def block_mean(field: torch.Tensor) -> torch.Tensor:
-        mean, _, _ = area_weighted_block_mean(field, area, valid, factor, 0.0)
-        return mean
+    def correction(field: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-block multiplicative correction, and which blocks it applies to."""
+        mean, _, fraction = area_weighted_block_mean(field, area, valid, factor, 0.0)
+        usable = (fraction > 0.0) & (mean > _SMOOTH_BASE_FLOOR)
+        ratio = torch.where(
+            usable,
+            coarse_mm / mean.clamp_min(_SMOOTH_BASE_FLOOR),
+            torch.ones_like(mean),
+        )
+        return ratio, usable
 
     base = lift(coarse_mm).clamp_min(0.0)
     for _ in range(iterations):
-        correction = coarse_mm / block_mean(base).clamp_min(floor)
-        base = (base * lift(correction)).clamp_min(0.0)
-    exact = coarse_mm / block_mean(base).clamp_min(floor)
-    base = base * exact.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+        ratio, _ = correction(base)
+        # Bound the intermediate corrections.  They only control smoothness --
+        # conservation is imposed exactly below -- so capping them costs nothing
+        # and keeps the iteration inside float32 no matter how badly the lift
+        # undershoots an isolated wet block.
+        ratio = ratio.clamp(0.0, _SMOOTH_BASE_MAX_CORRECTION)
+        base = (base * lift(ratio)).clamp_min(0.0)
+
+    # Exact per-block renormalisation, unclamped: on a valid cell the result is
+    # bounded by factor**2 times the block amount whatever the ratio, because the
+    # block's own mean is what is being divided out.
+    ratio, usable = correction(base)
+    base = torch.where(expand(usable), base * expand(ratio), block_constant)
     return base.clamp_min(0.0)
 
 

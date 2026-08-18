@@ -1318,3 +1318,167 @@ def test_trainer_refuses_to_resume_a_rescheduled_run():
     ).read_text()
     assert '"total_steps": total_steps' in source, "checkpoint omits the step count"
     assert "stored_total != total_steps" in source, "resume does not compare it"
+
+
+def test_smooth_base_survives_blocks_with_no_valid_area():
+    """A coarse block that is entirely ocean must not poison its neighbours.
+
+    CHIRPS is undefined over the Bay of Bengal, so on the wide canvas whole
+    0.5-degree blocks contain no valid fine cell and their area-weighted mean is
+    identically zero.  The multiplicative correction divides by that mean, and
+    because it is applied through a bilinear lift the resulting ~1e38 factor does
+    not stay inside the offending block: it spreads into the valid coastal blocks
+    beside it and overflows float32.  This is the failure that killed the first
+    v5 preparation run, and it is invisible at ``iterations=0`` because that path
+    returns the block constant before any division happens.
+    """
+    import torch
+
+    from bdhires.data.subgrid_dataset import (
+        area_weighted_block_mean,
+        conservative_smooth_upsample,
+    )
+
+    factor, height, width = 10, 4, 4
+    valid = torch.ones(1, 1, height * factor, width * factor, dtype=torch.bool)
+    valid[..., 2 * factor:] = False           # two columns of blocks are all ocean
+    area = torch.ones(1, 1, height * factor, width * factor)
+    torch.manual_seed(0)
+    coarse = torch.rand(1, 1, height, width) * 20.0
+
+    _, _, fraction = area_weighted_block_mean(
+        torch.ones_like(area), area, valid, factor, 0.0
+    )
+    assert (fraction == 0.0).any(), "the fixture must contain a fully invalid block"
+
+    for iterations in (0, 1, 2, 3):
+        base = conservative_smooth_upsample(coarse, area, valid, factor, iterations)
+        assert torch.isfinite(base).all(), f"iterations={iterations} produced non-finite values"
+        assert (base >= 0.0).all()
+        assert base.max() < 100.0 * float(coarse.max()), (
+            f"iterations={iterations} produced an implausible magnitude"
+        )
+
+
+def test_smooth_base_conserves_mass_on_a_coastline():
+    """Exact conservation must hold in every block that has any valid area.
+
+    The fallback for an uncorrectable block is the block constant, which is
+    conservative by construction, so a partly-masked coastal block is the case
+    that actually needs checking: it is corrected by a ratio computed only from
+    its valid cells.
+    """
+    import torch
+
+    from bdhires.data.subgrid_dataset import (
+        area_weighted_block_mean,
+        conservative_smooth_upsample,
+    )
+
+    factor, height, width = 10, 6, 6
+    valid = torch.ones(1, 1, height * factor, width * factor, dtype=torch.bool)
+    valid[..., 3 * factor + 4:] = False       # coastline cutting through a block
+    torch.manual_seed(1)
+    area = 1.0 + 0.01 * torch.rand(1, 1, height * factor, width * factor)
+    coarse = torch.rand(1, 1, height, width) * 30.0
+    coarse[0, 0, 1, 1] = 0.0                  # a dry block
+    coarse[0, 0, 4, 4] = 250.0                # an isolated extreme beside dry neighbours
+
+    base = conservative_smooth_upsample(coarse, area, valid, factor, 2)
+    mean, _, fraction = area_weighted_block_mean(base, area, valid, factor, 0.0)
+    live = fraction > 0.0
+    relative = (mean[live] - coarse[live]).abs() / coarse[live].clamp_min(1.0e-6)
+    assert float(relative.max()) < 1.0e-5, f"conservation broke: {float(relative.max()):.2e}"
+    assert float(mean[0, 0, 1, 1]) == 0.0, "a dry block must stay exactly dry"
+
+
+def test_smooth_base_removes_the_block_edge_it_was_written_for():
+    """The 0.5-degree seam must shrink, and keep shrinking with iterations.
+
+    Measured on the base alone as the mean absolute gradient across block edges
+    over the mean absolute gradient inside blocks.  The block constant is
+    perfectly flat inside a block, so its seam index is unbounded -- every
+    gradient it has is a seam.  The absolute value the smooth base reaches
+    depends on how correlated the coarse field is, so this asserts the two things
+    that are actually properties of the algorithm: the seam becomes finite and
+    comparable to the interior, and more iterations make it smaller.  The seam of
+    the *reconstruction* is lower again, because the allocation weights add
+    within-block variance that this base-only measurement excludes.
+    """
+    import torch
+
+    from bdhires.data.subgrid_dataset import conservative_smooth_upsample
+
+    factor, height, width = 10, 6, 6
+    valid = torch.ones(1, 1, height * factor, width * factor, dtype=torch.bool)
+    area = torch.ones(1, 1, height * factor, width * factor)
+    torch.manual_seed(2)
+    coarse = torch.rand(1, 1, height, width) * 30.0
+
+    def seam_index(field: torch.Tensor) -> float:
+        step = (field[..., :, 1:] - field[..., :, :-1]).abs()[0, 0]
+        edge = torch.zeros_like(step, dtype=torch.bool)
+        edge[:, factor - 1::factor] = True
+        interior = step[~edge].mean()
+        if float(interior) <= 0.0:
+            return float("inf")
+        return float(step[edge].mean() / interior)
+
+    blocky = seam_index(conservative_smooth_upsample(coarse, area, valid, factor, 0))
+    assert blocky == float("inf"), "the block constant should have no interior gradient"
+
+    scores = [
+        seam_index(conservative_smooth_upsample(coarse, area, valid, factor, n))
+        for n in (1, 2, 3, 4)
+    ]
+    assert all(score < 5.0 for score in scores), f"seam never became finite: {scores}"
+    assert scores == sorted(scores, reverse=True), (
+        f"more iterations should reduce the seam, got {scores}"
+    )
+
+
+def test_target_build_round_trip_survives_an_ocean_masked_canvas():
+    """Exactly the call that killed the first v5 preparation run.
+
+    Script 56 encodes a CHIRPS chunk and immediately decodes it back to measure
+    the oracle ceiling.  On the wide canvas CHIRPS is missing over the Bay of
+    Bengal, so that round trip runs with whole coarse blocks carrying no valid
+    fine cell.  Under the smooth base this raised FloatingPointError after the
+    statistics pass had already completed -- the most expensive possible moment
+    to discover it.  The unit-level guard above covers the base; this covers the
+    path the build actually takes.
+    """
+    torch.manual_seed(7)
+    factor = 10
+    height = width = 4
+    fine = torch.rand(3, 1, height * factor, width * factor) * 40.0
+    fine[fine < 20.0] = 0.0                      # a realistic wet fraction
+    valid = torch.ones(1, 1, height * factor, width * factor, dtype=torch.bool)
+    valid[..., 2 * factor:] = False              # open ocean: two block columns
+    valid[..., factor:2 * factor, factor + 3:2 * factor] = False   # a ragged coast
+    area = torch.ones(1, 1, height * factor, width * factor)
+
+    encoding = _encoding(smooth_base_iterations=2)
+    targets = encode_subgrid_targets(fine, valid, area, encoding, sample_offset=0)
+    decoded = decode_and_reconstruct(
+        targets.coarse_state,
+        targets.allocation_state,
+        targets.coarse_valid,
+        targets.fine_valid,
+        area,
+        encoding,
+        hard=True,
+    )
+
+    assert torch.isfinite(decoded).all(), "the build round trip produced non-finite values"
+    assert (decoded >= 0.0).all()
+    assert float(decoded[:, :, :, 2 * factor:].abs().max()) == 0.0, (
+        "rainfall was reconstructed over cells with no valid data"
+    )
+
+    # And it still conserves: the decoded field must reproduce the coarse amounts.
+    mean, _, fraction = area_weighted_block_mean(decoded, area, valid, factor, 0.0)
+    live = fraction > 0.0
+    reference = targets.coarse_mm
+    relative = (mean[live] - reference[live]).abs() / reference[live].clamp_min(1.0e-6)
+    assert float(relative.max()) < 1.0e-4, f"conservation broke: {float(relative.max()):.2e}"
