@@ -39,6 +39,7 @@ POINT_METHODS = (
     "imerg_only",
     "simultaneous_withheld",
     "routed_withheld",
+    "amount_only_withheld",
 )
 MAP_METHODS = (
     "background",
@@ -46,6 +47,7 @@ MAP_METHODS = (
     "imerg_only",
     "simultaneous_all",
     "routed_all",
+    "amount_only_all",
 )
 DISPLAY = {
     "background": "background",
@@ -56,6 +58,8 @@ DISPLAY = {
     "simultaneous_all": "simultaneous (all)",
     "routed_withheld": "routed (withheld)",
     "routed_all": "routed (all)",
+    "amount_only_withheld": "amount-only (withheld)",
+    "amount_only_all": "amount-only (all)",
 }
 
 

@@ -88,6 +88,13 @@ METHODS = (
     # that the routing is needed rather than an assertion that it is.
     "routed_withheld",
     "routed_all",
+    # Everything routed to the amount.  The gauge fold fit collapses from r=0.94
+    # to 0.43 when gauges are barred from the amount, so their information is
+    # about how much fell in a block, not about where inside it -- which is what
+    # one point in a 55 km box can actually resolve.  These arms test the other
+    # side of that: give both streams the amount and let the prior own structure.
+    "amount_only_withheld",
+    "amount_only_all",
 )
 MM_PER_DAY = {"mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"}
 
@@ -1060,6 +1067,32 @@ def main() -> None:
                     torch.ones(satellite_r.shape[0], dtype=torch.bool),
                 ]).to(device),
             ),
+            "amount_only_withheld": HierarchicalObservations(
+                combined_operators["withheld"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["withheld"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["withheld"]).to(device), satellite_r]
+                ),
+                guidance,
+                routing="amount",
+            ),
+            "amount_only_all": HierarchicalObservations(
+                combined_operators["all"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["all"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["all"]).to(device), satellite_r]
+                ),
+                guidance,
+                routing="amount",
+            ),
             "routed_all": HierarchicalObservations(
                 combined_operators["all"],
                 torch.from_numpy(
@@ -1151,6 +1184,14 @@ def main() -> None:
         },
         "routed_all": {
             "observations": "all BMD + IMERG S04, scale-routed",
+            "verification_role": "spatial maps only; gauge fit is in-sample",
+        },
+        "amount_only_withheld": {
+            "observations": "BMD except supported holdout + IMERG S04, amount only",
+            "verification_role": "independent withheld gauges",
+        },
+        "amount_only_all": {
+            "observations": "all BMD + IMERG S04, amount only",
             "verification_role": "spatial maps only; gauge fit is in-sample",
         },
     }

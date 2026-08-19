@@ -56,7 +56,7 @@ SAMPLE_STORE="$OUT_ROOT/v4_da_samples.zarr"
 SAMPLE_REPORT="$OUT_ROOT/v4_da_sampling.json"
 GRIDDED_DIR="$OUT_ROOT/evaluation/gridded"
 EVALUATION_DIR="$OUT_ROOT/evaluation"
-METHODS="background,gauges_withheld,imerg_only,simultaneous_withheld,gauges_all,simultaneous_all,routed_withheld,routed_all"
+METHODS="background,gauges_withheld,imerg_only,simultaneous_withheld,gauges_all,simultaneous_all,routed_withheld,routed_all,amount_only_withheld,amount_only_all"
 
 GAUGE_SIGMA="${V4_TEST_GAUGE_SIGMA_MM:-3.0}"
 IMERG_SIGMA_FLOOR="${V4_TEST_IMERG_SIGMA_FLOOR_MM:-1.0}"
