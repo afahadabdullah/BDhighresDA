@@ -164,6 +164,20 @@ def parse_args() -> argparse.Namespace:
             "GPU/CPU float32 hard-decode audit; never resamples"
         ),
     )
+    parser.add_argument(
+        "--osse", action="store_true",
+        help=(
+            "replace gauge observations with the CHIRPS truth sampled at the same "
+            "station locations, with near-zero error.  Isolates whether the "
+            "machinery can carry information from an assimilated point to a "
+            "withheld one, independently of observation error, representativeness, "
+            "and of whether the truth is reachable by the prior at all."
+        ),
+    )
+    parser.add_argument(
+        "--osse-sigma-mm", type=float, default=0.5,
+        help="observation error for OSSE pseudo-gauges; small but not zero",
+    )
     parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
 
@@ -629,6 +643,11 @@ def complete_diagnostic_archive(
         "members": args.members,
         "n_steps": args.n_steps,
         "seed": args.seed,
+        # Recorded so an OSSE store can never be silently reused for a real-data
+        # run: the reuse check compares this report against the request, and an
+        # identity-swap of the observations must invalidate it.
+        "osse": bool(args.osse),
+        "osse_sigma_mm": float(args.osse_sigma_mm) if args.osse else None,
         "methods": list(METHODS),
         "canvas": {
             "grid": grid.name,
@@ -832,6 +851,28 @@ def main() -> None:
     )
     assimilated = np.setdiff1d(np.arange(len(stations)), withheld)
     all_stations = np.arange(len(stations))
+
+    if args.osse:
+        # Sample the truth with the SAME operator the analysis uses, so a
+        # pseudo-gauge reads exactly what the analysis reads at that point and
+        # the experiment cannot be confounded by interpolation mismatch.  Both
+        # assimilation and verification then use these values, which is what
+        # makes the withheld score a clean test of propagation.
+        with torch.no_grad():
+            probe = BilinearObsOperator(grid, stations.lat, stations.lon)
+            gauge_mm = probe(
+                torch.from_numpy(chirps)[:, None]
+            )[:, 0].numpy().astype(np.float32)
+        print(
+            f"[osse] gauge values replaced by CHIRPS truth at {len(stations)} "
+            f"stations, sigma {args.osse_sigma_mm} mm/day",
+            flush=True,
+        )
+        print(
+            "[osse] withheld improvement here means the machinery propagates; "
+            "none means it cannot, whatever the observations are",
+            flush=True,
+        )
     nearest = nearest_neighbour_km(stations.lat, stations.lon)
     bearing_gap = max_bearing_gap_deg(stations.lat, stations.lon)
 
@@ -959,9 +1000,13 @@ def main() -> None:
     }
     diagnostics = {name: {"daily": []} for name in METHODS}
 
+    # In OSSE mode the pseudo-gauge is exact, so its error is the small number
+    # needed to keep the likelihood well conditioned -- not the real instrument
+    # and representativeness budget, which is the thing being held aside.
+    gauge_sigma = args.osse_sigma_mm if args.osse else args.gauge_sigma_mm
     gauge_variance = {
-        "withheld": np.full(len(assimilated), args.gauge_sigma_mm**2, np.float32),
-        "all": np.full(len(all_stations), args.gauge_sigma_mm**2, np.float32),
+        "withheld": np.full(len(assimilated), gauge_sigma**2, np.float32),
+        "all": np.full(len(all_stations), gauge_sigma**2, np.float32),
     }
     gauge_indices = {"withheld": assimilated, "all": all_stations}
 

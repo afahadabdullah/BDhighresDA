@@ -1699,3 +1699,31 @@ def test_every_sampled_arm_is_described_in_method_specs():
         f"METHODS and method_specs disagree: only in METHODS {sorted(methods - specs)}, "
         f"only in method_specs {sorted(specs - methods)}"
     )
+
+
+def test_osse_mode_swaps_the_observations_and_records_that_it_did():
+    """Perfect-observation mode must be self-identifying and self-consistent.
+
+    An OSSE replaces the gauge values with the truth.  Two things then matter:
+    the pseudo-gauge must be read with the SAME operator the analysis uses, so
+    the test is not confounded by interpolation mismatch, and the sample store
+    must record that it is an OSSE -- otherwise the reuse check would happily
+    hand an OSSE archive to a real-data request, and every number downstream
+    would be a perfect-observation result wearing a real-data label.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+
+    assert '"--osse"' in source and '"--osse-sigma-mm"' in source
+    assert "if args.osse:" in source, "the flag is declared but never acted on"
+    # Truth is sampled with the analysis operator, not a hand-rolled lookup.
+    osse_block = source.split("if args.osse:")[1].split("gauge_variance")[0]
+    assert "BilinearObsOperator(grid, stations.lat, stations.lon)" in osse_block
+    assert "chirps" in osse_block, "OSSE must sample the CHIRPS truth"
+    # The near-zero error replaces the real budget rather than adding to it.
+    assert "gauge_sigma = args.osse_sigma_mm if args.osse else args.gauge_sigma_mm" in source
+    # And the run identifies itself.
+    assert '"osse": bool(args.osse)' in source, "OSSE runs are not marked in the report"

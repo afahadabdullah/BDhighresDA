@@ -47,6 +47,16 @@ TARGET="${V4_TEST_TARGET:-data/processed/cpc_v3_subgrid/wide_cpc_v4.zarr}"
 IMERG="${V4_TEST_IMERG:-data/processed/imerg_prepared_ing2022/imerg_0p4deg_20220501_20220510.nc}"
 OUT_ROOT="${V4_TEST_OUT_ROOT:-data/processed/v4_da_test/may2022_5day}"
 RECOVER_INCOMPLETE="${V4_TEST_RECOVER_INCOMPLETE:-0}"
+# OSSE: gauges are replaced by the CHIRPS truth at the same station locations
+# with near-zero error.  Not a product run -- it answers whether the machinery
+# can propagate at all, with observation error and reachability held aside.
+OSSE="${V4_TEST_OSSE:-0}"
+OSSE_SIGMA="${V4_TEST_OSSE_SIGMA_MM:-0.5}"
+[[ "$OSSE" == "0" || "$OSSE" == "1" ]] || { echo "ERROR: V4_TEST_OSSE must be 0 or 1" >&2; exit 1; }
+OSSE_ARGS=()
+if [[ "$OSSE" == "1" ]]; then
+    OSSE_ARGS=(--osse --osse-sigma-mm "$OSSE_SIGMA")
+fi
 DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 STATION_CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 DAILY="$OUT_ROOT/bmd_daily.csv"
@@ -110,6 +120,7 @@ PY
     --withhold "$WITHHOLD" --min-coverage "$MIN_COVERAGE" \
     --holdout-neighbor-km "$HOLDOUT_NEIGHBOR_KM" \
     --holdout-max-gap-deg "$HOLDOUT_MAX_GAP_DEG" \
+    "${OSSE_ARGS[@]}" \
     --preflight-only
 
 if [[ ! -s "$DAILY" ]]; then
@@ -242,6 +253,7 @@ if [[ "$reuse_sample" == "0" ]]; then
         --seed "$SEED" \
         --out-store "$SAMPLE_STORE" \
         --report "$SAMPLE_REPORT" \
+        "${OSSE_ARGS[@]}" \
         "${recovery_args[@]}"
 fi
 
