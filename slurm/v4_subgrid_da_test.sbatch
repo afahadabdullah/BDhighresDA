@@ -53,9 +53,17 @@ RECOVER_INCOMPLETE="${V4_TEST_RECOVER_INCOMPLETE:-0}"
 OSSE="${V4_TEST_OSSE:-0}"
 OSSE_SIGMA="${V4_TEST_OSSE_SIGMA_MM:-0.5}"
 [[ "$OSSE" == "0" || "$OSSE" == "1" ]] || { echo "ERROR: V4_TEST_OSSE must be 0 or 1" >&2; exit 1; }
+# point: the truth in the station's own 0.05-degree cell.
+# block: the area mean of the truth over the station's conservation block.
+# Verification is at points against point truth either way.
+OSSE_SUPPORT="${V4_TEST_OSSE_SUPPORT:-point}"
+[[ "$OSSE_SUPPORT" == "point" || "$OSSE_SUPPORT" == "block" ]] || {
+    echo "ERROR: V4_TEST_OSSE_SUPPORT must be point or block" >&2
+    exit 1
+}
 OSSE_ARGS=()
 if [[ "$OSSE" == "1" ]]; then
-    OSSE_ARGS=(--osse --osse-sigma-mm "$OSSE_SIGMA")
+    OSSE_ARGS=(--osse --osse-sigma-mm "$OSSE_SIGMA" --osse-gauge-support "$OSSE_SUPPORT")
 fi
 DATA_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 STATION_CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"

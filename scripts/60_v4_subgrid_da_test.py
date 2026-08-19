@@ -99,6 +99,24 @@ METHODS = (
 MM_PER_DAY = {"mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"}
 
 
+class _BlockSubsetOperator(torch.nn.Module):
+    """Area means of the blocks that contain observations, in station order.
+
+    ``AreaWeightedBlockObsOperator`` returns every block on the domain.  A sparse
+    network constrains only a few, so the observation vector must select those
+    blocks -- and must repeat a block when two stations share it, because that is
+    genuinely two measurements of the same quantity.
+    """
+
+    def __init__(self, block_operator: torch.nn.Module, index: np.ndarray):
+        super().__init__()
+        self.block = block_operator
+        self.register_buffer("index", torch.as_tensor(index, dtype=torch.long))
+
+    def forward(self, field: torch.Tensor) -> torch.Tensor:
+        return self.block(field)[..., self.index]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -177,6 +195,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--osse-sigma-mm", type=float, default=0.5,
         help="observation error for OSSE pseudo-gauges; small but not zero",
+    )
+    parser.add_argument(
+        "--osse-gauge-support", choices=("point", "block"), default="point",
+        help=(
+            "what an OSSE pseudo-gauge measures.  'point' is the truth in the "
+            "station's own 0.05-degree cell; 'block' is the area mean of the "
+            "truth over the station's whole conservation block.  Verification "
+            "stays at points against point truth either way, so the two differ "
+            "only in what is assimilated -- which is exactly the point-versus-"
+            "block question."
+        ),
     )
     parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
@@ -648,6 +677,7 @@ def complete_diagnostic_archive(
         # identity-swap of the observations must invalidate it.
         "osse": bool(args.osse),
         "osse_sigma_mm": float(args.osse_sigma_mm) if args.osse else None,
+        "osse_gauge_support": args.osse_gauge_support if args.osse else None,
         "methods": list(METHODS),
         "canvas": {
             "grid": grid.name,
@@ -873,6 +903,45 @@ def main() -> None:
             "none means it cannot, whatever the observations are",
             flush=True,
         )
+
+    # What is assimilated may differ from what is verified.  Verification is
+    # always the point truth at the station, because that is the quantity the
+    # product claims to predict; only the observation changes support.
+    assimilation_mm = gauge_mm
+    osse_block_index = None
+    if args.osse and args.osse_gauge_support == "block":
+        factor = int(encoding.factor)
+        station_row = np.abs(
+            lat[:, None] - np.asarray(stations.lat)[None, :]
+        ).argmin(axis=0)
+        station_column = np.abs(
+            lon[:, None] - np.asarray(stations.lon)[None, :]
+        ).argmin(axis=0)
+        blocks_per_row = chirps.shape[-1] // factor
+        osse_block_index = (
+            (station_row // factor) * blocks_per_row + (station_column // factor)
+        ).astype(np.int64)
+        # Reduce the truth with the SAME operator the analysis will be scored
+        # through, so the observation is exactly the functional being constrained.
+        block_probe = AreaWeightedBlockObsOperator(
+            factor, area, valid=valid, min_valid_frac=encoding.valid_area_threshold
+        )
+        with torch.no_grad():
+            truth_blocks = block_probe(
+                torch.from_numpy(chirps)[:, None]
+            )[:, 0].numpy().astype(np.float32)
+        assimilation_mm = truth_blocks[:, osse_block_index]
+        distinct = len(np.unique(osse_block_index))
+        print(
+            f"[osse] gauges assimilated as 0.5-degree block means: "
+            f"{len(stations)} stations fall in {distinct} distinct blocks",
+            flush=True,
+        )
+        print(
+            "[osse] verification is unchanged -- point truth at the station -- so "
+            "any change against the point-support run is the support and nothing else",
+            flush=True,
+        )
     nearest = nearest_neighbour_km(stations.lat, stations.lon)
     bearing_gap = max_bearing_gap_deg(stations.lat, stations.lon)
 
@@ -958,12 +1027,25 @@ def main() -> None:
     coarse_valid_t = torch.from_numpy(coarse_valid).to(device)
     area_t = torch.from_numpy(area).to(device)
 
-    gauge_operators = {
-        "withheld": BilinearObsOperator(
-            grid, stations.lat[assimilated], stations.lon[assimilated]
-        ).to(device),
-        "all": BilinearObsOperator(grid, stations.lat, stations.lon).to(device),
-    }
+    if osse_block_index is None:
+        gauge_operators = {
+            "withheld": BilinearObsOperator(
+                grid, stations.lat[assimilated], stations.lon[assimilated]
+            ).to(device),
+            "all": BilinearObsOperator(grid, stations.lat, stations.lon).to(device),
+        }
+    else:
+        # Block-support pseudo-gauges: the operator must reduce the field the
+        # same way the observation was formed, or the analysis would be asked to
+        # make a point equal an area mean -- a different, and wrong, constraint.
+        block_operator = AreaWeightedBlockObsOperator(
+            int(encoding.factor), area, valid=valid,
+            min_valid_frac=encoding.valid_area_threshold,
+        ).to(device)
+        gauge_operators = {
+            key: _BlockSubsetOperator(block_operator, osse_block_index[index]).to(device)
+            for key, index in (("withheld", assimilated), ("all", all_stations))
+        }
     satellite_operator = AreaWeightedBlockObsOperator(
         args.imerg_factor,
         area,
@@ -1053,7 +1135,7 @@ def main() -> None:
 
         gauge_perturbed = {}
         for key, index in gauge_indices.items():
-            observation = gauge_mm[day_position, index].astype(np.float32)
+            observation = assimilation_mm[day_position, index].astype(np.float32)
             perturbed = perturb_observations(
                 observation,
                 gauge_variance[key],

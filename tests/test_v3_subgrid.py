@@ -1727,3 +1727,31 @@ def test_osse_mode_swaps_the_observations_and_records_that_it_did():
     assert "gauge_sigma = args.osse_sigma_mm if args.osse else args.gauge_sigma_mm" in source
     # And the run identifies itself.
     assert '"osse": bool(args.osse)' in source, "OSSE runs are not marked in the report"
+
+
+def test_osse_block_support_changes_only_what_is_assimilated():
+    """Verification must stay at points, or the comparison means nothing.
+
+    The point-versus-block OSSE is only interpretable if the two runs differ in
+    exactly one thing: the support of the assimilated observation.  If the
+    verification target moved to block means as well, a 'better' score would
+    just mean the analysis got easier to hit.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+
+    assert '"--osse-gauge-support"' in source
+    # The assimilated values come from a separate array...
+    assert "assimilation_mm = gauge_mm" in source, "assimilated values are not separated"
+    assert "observation = assimilation_mm[day_position, index]" in source
+    # ...while gauge_mm, which the archive verifies against, is never reassigned
+    # to block means.
+    assert "gauge_mm = truth_blocks" not in source, "verification target was moved to blocks"
+    assert "assimilation_mm = truth_blocks[:, osse_block_index]" in source
+    # The operator must match the support of the observation.
+    assert "class _BlockSubsetOperator" in source
+    assert "_BlockSubsetOperator(block_operator" in source
+    assert '"osse_gauge_support"' in source, "support is not recorded in the report"
