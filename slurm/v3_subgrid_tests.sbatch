@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=bdhires-v3-tests
-# CPU-only work: no --gres, so this never reserves a GPU even when it lands on
-# a GPU node.  Slurm associations here forbid multi-partition requests, so the
-# partition is a single name -- override the whole pipeline with
-# V7_CPU_PARTITION=grace when grace-cpuonly is short of capacity.
-#SBATCH --partition=grace-cpuonly
+# grace, not grace-cpuonly: the CPU-only partition is capacity-starved on this
+# cluster and these jobs gate everything behind them.  No --gres is requested,
+# so landing on a GPU node uses its Grace cores and never reserves a GPU.
+# Associations here reject multi-partition requests, so this is one name; set
+# V7_CPU_PARTITION=grace-cpuonly to send them back.
+#SBATCH --partition=grace
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
