@@ -1145,7 +1145,25 @@ def main() -> None:
             "observations": "all BMD + IMERG S04",
             "verification_role": "spatial maps only; gauge fit is in-sample",
         },
+        "routed_withheld": {
+            "observations": "BMD except supported holdout + IMERG S04, scale-routed",
+            "verification_role": "independent withheld gauges",
+        },
+        "routed_all": {
+            "observations": "all BMD + IMERG S04, scale-routed",
+            "verification_role": "spatial maps only; gauge fit is in-sample",
+        },
     }
+    # The archive writer compares these keys against the sampled fields and
+    # refuses a mismatch.  That check fires only after every arm has been
+    # sampled, so a name added to METHODS but forgotten here costs a whole run.
+    if set(method_specs) != set(METHODS):
+        missing = set(METHODS) - set(method_specs)
+        extra = set(method_specs) - set(METHODS)
+        raise ValueError(
+            "method_specs does not describe exactly the sampled arms; "
+            f"missing {sorted(missing)}, unexpected {sorted(extra)}"
+        )
     output = Path(args.out_store)
     write_hierarchical_sample_zarr(
         output,

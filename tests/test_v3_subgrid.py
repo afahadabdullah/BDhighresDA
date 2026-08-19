@@ -1661,3 +1661,41 @@ def test_unrouted_arms_survive_the_routing_change():
     # None of the pre-existing arms may acquire a routing argument.
     prefix = sampler.split('"routed_withheld"')[0]
     assert "routing=" not in prefix, "an existing arm was silently routed"
+
+
+def test_every_sampled_arm_is_described_in_method_specs():
+    """The archive writer rejects a mismatch only after all sampling is done.
+
+    ``write_hierarchical_sample_zarr`` compares ``method_specs`` against the
+    physical fields and raises if they differ.  That happens at the very end of
+    the run, so an arm added to METHODS but not described here throws away every
+    GPU-hour already spent.  This catches it in the 30-second test job instead.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+    tree = ast.parse(source)
+
+    methods = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "METHODS" for target in node.targets
+        ):
+            methods = {element.value for element in node.value.elts}
+    assert methods, "could not locate METHODS"
+
+    specs = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "method_specs" for target in node.targets
+        ):
+            specs = {key.value for key in node.value.keys}
+    assert specs, "could not locate method_specs"
+
+    assert methods == specs, (
+        f"METHODS and method_specs disagree: only in METHODS {sorted(methods - specs)}, "
+        f"only in method_specs {sorted(specs - methods)}"
+    )
