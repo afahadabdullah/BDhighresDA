@@ -43,7 +43,12 @@ if [[ -n "${V4_JOINT_JOB_ID:-}" ]]; then
         echo "ERROR: V4_JOINT_JOB_ID must be a numeric Slurm job ID" >&2
         exit 1
     }
-    dependency=(--dependency="afterok:${V4_JOINT_JOB_ID}")
+    # Without kill-on-invalid-dep, a failed training job leaves this one parked
+    # in the queue indefinitely rather than failing where it can be noticed.
+    dependency=(
+        --dependency="afterok:${V4_JOINT_JOB_ID}"
+        --kill-on-invalid-dep=yes
+    )
 elif [[ ! -f "$V4_TEST_CHECKPOINT" ]]; then
     echo "ERROR: joint best checkpoint is not present: $V4_TEST_CHECKPOINT" >&2
     echo "Wait for training, or set V4_JOINT_JOB_ID to submit with afterok dependency." >&2
