@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=bdhires-v7-prepare-meso
-#SBATCH --partition=grace-cpuonly
+# grace-cpuonly is capacity-limited, so this lists both partitions and lets
+# Slurm take whichever frees first.  This job requests no --gres, so landing
+# on a GPU node never reserves a GPU -- it uses that node's Grace cores only.
+#SBATCH --partition=grace,grace-cpuonly
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
