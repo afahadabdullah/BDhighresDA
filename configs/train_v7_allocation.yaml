@@ -1,0 +1,48 @@
+# V7 stage B: 0.1-degree amounts -> 0.05-degree structure, factor 2.
+#
+# Conservation applies HERE and only here, to the analysed 0.1-degree field --
+# which is observed by IMERG, so conserving to it is a statement about data
+# rather than about CPC.  At factor 2 a block is four cells, so a gauge acting on
+# this stage redistributes over three neighbours instead of ninety-nine, and the
+# increment is quantised to 11 km rather than 55 km.
+#
+# conditioning_augmentation matters more than usual: this stage trains on clean
+# 0.1-degree targets but will run on ANALYSED 0.1-degree fields, whose error
+# looks nothing like clean CHIRPS.  Calibrate max_coarse_noise against the stage-A
+# analysis spread once that exists rather than leaving it at a guess.
+stage: allocation
+data:
+  zarr: data/processed/v7/wide_v7.zarr
+  crop: 160
+  factor: 2
+  downsamplings: 3
+  years:
+    train: [1981, 2018]
+    val: [2019, 2020]
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [20, 40]
+  dropout: 0.15
+  num_heads: 4
+train:
+  out_dir: runs/v7/allocation
+  epochs: 400
+  batch_size: 16
+  lr: 0.00015
+  warmup_fraction: 0.02
+  lr_min_fraction: 0.01
+  precision: bf16
+  weight_decay: 0.01
+  grad_clip: 1.0
+  occurrence_weight: 0.10
+  inactive_positive_weight: 0.05
+  use_ema: true
+  ema_decay: 0.9995
+  num_workers: 8
+  seed: 7102
+  ckpt_every: 5
+  conditioning_augmentation:
+    max_coarse_noise: 1.0
+    clean_probability: 0.15

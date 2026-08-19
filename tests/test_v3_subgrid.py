@@ -1755,3 +1755,155 @@ def test_osse_block_support_changes_only_what_is_assimilated():
     assert "class _BlockSubsetOperator" in source
     assert "_BlockSubsetOperator(block_operator" in source
     assert '"osse_gauge_support"' in source, "support is not recorded in the report"
+
+
+def test_v7_coarse_driver_replicates_cpc_onto_a_finer_support():
+    """V7's analysis level is finer than CPC, so CPC must be replicated.
+
+    V3-SG's coarse support WAS CPC's own 0.5-degree grid, so exact selection was
+    correct.  A 0.1-degree support is finer, and nearest selection there is block
+    replication -- which preserves the CPC block mean exactly, because a constant
+    equals its own mean.  Interpolating instead would not, and the archive would
+    then disagree with CPC about how much rain fell.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    import numpy as np
+
+    xr = pytest.importorskip("xarray")
+    from bdhires.grids import Grid
+
+    path = Path(__file__).resolve().parents[1] / "scripts/56_build_chirps_subgrid_targets.py"
+    spec = importlib.util.spec_from_file_location("builder56", path)
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    cpc_lat = np.arange(20.25, 23.0, 0.5)
+    cpc_lon = np.arange(88.25, 91.0, 0.5)
+    data = xr.DataArray(
+        np.arange(cpc_lat.size * cpc_lon.size, dtype=float).reshape(cpc_lat.size, cpc_lon.size),
+        coords={"lat": cpc_lat, "lon": cpc_lon}, dims=("lat", "lon"),
+    )
+
+    meso = Grid(name="meso", lon_min=88.0, lat_min=20.0, nlon=20, nlat=20, res=0.1)
+    placed, native = builder._coarse_driver(data, meso, "CPC")
+    assert not native, "0.5-degree CPC must not report native on a 0.1-degree grid"
+    assert np.allclose(placed.lat.values, meso.lat)
+    assert np.allclose(placed.lon.values, meso.lon)
+    block = placed.values.reshape(4, 5, 4, 5).mean(axis=(1, 3))
+    assert np.allclose(block, data.values[:4, :4]), "replication lost the CPC block mean"
+
+    # v5 reproduction: on CPC's own grid nothing changes and it still says native.
+    native_grid = Grid(
+        name="cpc", lon_min=88.0, lat_min=20.0,
+        nlon=cpc_lon.size, nlat=cpc_lat.size, res=0.5,
+    )
+    same, is_native = builder._coarse_driver(data, native_grid, "CPC")
+    assert is_native and np.allclose(same.values, data.values)
+
+    # A driver finer than the coarse grid would be silently subsampled.
+    finer = xr.DataArray(
+        np.zeros((40, 40)),
+        coords={"lat": np.arange(20.0, 24.0, 0.1), "lon": np.arange(88.0, 92.0, 0.1)},
+        dims=("lat", "lon"),
+    )
+    with pytest.raises(ValueError, match="finer than the coarse grid"):
+        builder._coarse_driver(finer, native_grid, "IMERG")
+
+
+def test_v7_stage_a_is_cpcv2_with_only_the_resolution_changed():
+    """Stage A must be CPCv2 verbatim apart from what the resolution forces.
+
+    The point of V7 stage A is that it inherits v2's working assimilation
+    behaviour.  That only holds if it inherits v2's training as well -- in
+    particular the SOFT coarse-consistency penalty, which lets the analysis
+    depart from CPC when an observation says CPC was wrong, and the wet
+    sampling, which is what stops the amount head learning a light-day
+    distribution.  A quiet divergence from v2 here would reproduce V5's failures
+    at a new resolution and look like a fresh mystery.
+    """
+    import yaml
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    v2 = yaml.safe_load((root / "configs/train_h100_cpc_v2.yaml").read_text())
+    v7 = yaml.safe_load((root / "configs/train_v7_meso.yaml").read_text())
+
+    assert v7["model"] == v2["model"], "stage A changed the v2 architecture"
+    assert v7["data"]["cond_channels"] == v2["data"]["cond_channels"]
+    assert v7["train"]["wet_sampling"] == v2["train"]["wet_sampling"], (
+        "wet sampling is what addresses the amount compression; keep it identical"
+    )
+
+    # Soft consistency, not a decoder constraint -- the defining V7 property.
+    consistency = v7["train"]["coarse_consistency"]
+    assert consistency["target_weight"] == v2["train"]["coarse_consistency"]["target_weight"]
+    assert consistency["cpc_weight"] == v2["train"]["coarse_consistency"]["cpc_weight"]
+    # 0.1 -> 0.5 degrees is five cells where 0.05 -> 0.5 was ten.
+    assert consistency["factor"] * 2 == v2["train"]["coarse_consistency"]["factor"]
+
+    # The crop must cover the SAME ground, so attention lands on real levels.
+    assert v7["data"]["crop"] * 2 == v2["data"]["crop"]
+    levels = [v7["data"]["crop"] // 2**i for i in range(len(v7["model"]["channel_mult"]))]
+    for resolution in v7["model"]["attn_resolutions"]:
+        assert resolution in levels, f"attention at {resolution} has no U-Net level"
+
+    # Everything in train: apart from paths and the consistency factor is v2's.
+    ignored = {"out_dir", "coarse_consistency"}
+    for key, value in v2["train"].items():
+        if key in ignored:
+            continue
+        assert v7["train"][key] == value, f"stage A diverged from v2 on train.{key}"
+
+    # Statistics belong to the archive they were measured on.
+    assert v7["data"]["stats"] != v2["data"]["stats"], (
+        "stage A must not reuse the 0.05-degree statistics"
+    )
+    assert v7["data"]["zarr"] != v2["data"]["zarr"]
+
+
+def test_v7_stage_b_is_the_factor_two_allocation_branch():
+    """Stage B is V3-SG's allocation branch, which is the part that worked."""
+    import yaml
+    from pathlib import Path
+
+    from bdhires.grids import WIDE_CPC
+
+    # No grid rebuild: the canvas closes on 0.1-degree edges at factor 2.
+    validate_cpc_alignment(WIDE_CPC, factor=2, coarse_res=0.1)
+
+    root = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((root / "configs/train_v7_allocation.yaml").read_text())
+    assert config["stage"] == "allocation"
+    data = config["data"]
+    assert int(data["factor"]) == 2, "V7 stage B is a factor-2 design"
+    validate_aligned_crop((0, 0), data["crop"], data["factor"], data["downsamplings"])
+    levels = len(config["model"]["channel_mult"]) - 1
+    assert data["crop"] % 2**levels == 0
+    assert "init_coarse" not in config["train"], "V7 has no coupled joint stage"
+    # Conditioning augmentation is what lets stage B survive being run on
+    # ANALYSED 0.1-degree fields rather than the clean ones it trains on.
+    assert config["train"]["conditioning_augmentation"]["max_coarse_noise"] > 0.0
+
+
+def test_v7_coarsened_archive_keeps_the_v2_layout():
+    """The coarsened archive must be a drop-in for the packed one.
+
+    ``06_compute_stats.py`` and ``scripts/train.py`` are used unchanged, so array
+    names, channel order and the attribute block have to survive coarsening --
+    and the result must be identifiable as coarsened so it can never be mistaken
+    for a packed archive.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/71_coarsen_pack_archive.py"
+    ).read_text()
+    for name in ("time", "lat", "lon", "valid", "static", "target", "cond"):
+        assert f'"{name}"' in source, f"the coarsened archive drops {name}"
+    assert 'attributes["coarsened_from"]' in source, "provenance is not recorded"
+    assert 'attributes["coarsen_factor"]' in source
+    assert "area_weighted_block_mean" in source, "coarsening must be area weighted"
+    # Channel order is inherited rather than rebuilt.
+    assert 'source.attrs["cond_channels"]' in source

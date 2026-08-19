@@ -1,0 +1,105 @@
+# V7 stage A: CPCv2, verbatim, at 0.1 degrees instead of 0.05.
+#
+# Every model and training choice below is copied from train_h100_cpc_v2.yaml.
+# Three things and only three things differ, and each is forced by the change of
+# resolution:
+#
+#   data.zarr           the coarsened archive, not the 0.05-degree one
+#   data.crop           128 -> 64, which is the SAME physical crop (6.4 degrees)
+#                       at half the cell count, so attn_resolutions [16, 32]
+#                       still land on real U-Net levels
+#   coarse_consistency  factor 10 -> 5, because 0.1 -> 0.5 degrees is five cells
+#
+# What is deliberately kept, because it is what made v2's assimilation work and
+# what V5 lacked:
+#
+#   coarse_consistency is a PENALTY, not a decoder constraint.  The analysis can
+#   depart from CPC when an observation says CPC was wrong, so a gauge increment
+#   is shaped by the prior covariance instead of being quantised to a block.
+#   That single property is the difference between v2's gauge DA helping and
+#   V5's hurting.
+#
+#   wet_sampling oversamples wet days and wet crops.  V5's coarse branch
+#   under-predicted heavy days by 40 percent (regression slope 0.473), which is
+#   what a model learns when light days dominate its sample.
+#
+#   no hurdle.  This is a plain flow on sqrt-transformed precipitation; V5's dry
+#   bias and its all-dry members lived in the occurrence gate.
+data:
+  zarr: data/processed/bd_wide_cpc_0p1.zarr
+  stats: data/processed/stats_v7_meso.json
+  crop: 64
+  seasonal_encoding: true
+  min_valid_fraction: 0.3
+  monitor_grid: bd
+  precip_cond_index: 0
+  precip_coverage_cond_index: 1
+  precip_baseline_label: CPC input
+  precip_baseline_channel: cpc_precip
+  precip_baseline_coverage_channel: cpc_valid
+  cond_channels:
+    - cpc_precip
+    - cpc_valid
+    - era5_tcwv
+    - era5_cape
+    - era5_u10
+    - era5_v10
+    - era5_msl
+  years:
+    train: [1981, 2018]
+    val:   [2019, 2020]
+    test:  [2021, 2025]
+
+model:
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 32]
+  dropout: 0.2
+  num_heads: 4
+  multiscale_conditioning: true
+
+train:
+  out_dir: runs/v7/meso
+  epochs: 150
+  batch_size: 32
+  lr: 1.5e-4
+  weight_decay: 0.01
+  warmup_steps: 2000
+  grad_clip: 1.0
+  use_ema: true
+  ema_decay: 0.9995
+  cond_dropout: 0.0
+  logit_normal_t: true
+  num_workers: 8
+  seed: 0
+  log_every: 50
+  ckpt_every: 5
+  keep_every: 10
+  early_stop_patience: 0
+  coarse_consistency:
+    factor: 5
+    target_weight: 0.10
+    cpc_weight: 0.02
+  wet_sampling:
+    enabled: true
+    day_quantile: 0.90
+    wet_component_fraction: 0.35
+    crop_probability: 0.50
+    crop_quantile: 0.95
+    crop_tries: 8
+
+validation:
+  enabled: true
+  start_epoch: 10
+  every: 5
+  members: 8
+  n_steps: 30
+  cfg_scale: 1.0
+  month: 7
+  quantiles:
+    [0.01, 0.08, 0.15, 0.22, 0.29, 0.36, 0.43, 0.50, 0.57, 0.64,
+     0.71, 0.78, 0.85, 0.92, 0.99]
+  max_cases: 15
+  max_map_cases: 4
+  save_maps: true

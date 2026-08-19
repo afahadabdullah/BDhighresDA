@@ -97,6 +97,41 @@ def _exact_grid(data: xr.DataArray, grid: Grid, label: str) -> xr.DataArray:
     return selected
 
 
+def _coarse_driver(
+    data: xr.DataArray, grid: Grid, label: str
+) -> tuple[xr.DataArray, bool]:
+    """Place a coarse driver on the coarse grid, replicating when it is coarser.
+
+    V3-SG's coarse support WAS CPC's native 0.5-degree grid, so every coarse cell
+    carried its own CPC value and exact selection was the right operation.  A
+    0.1-degree support is FINER than CPC, so several coarse cells share one CPC
+    cell.  Nearest selection is then block replication, which preserves the CPC
+    block mean exactly because a constant equals its own mean -- but the
+    coordinates must be relabelled onto the target grid or every downstream
+    alignment assertion fails.
+
+    Selecting a driver that is finer than the coarse grid would silently discard
+    the cells not landed on, so that is refused rather than subsampled.
+    """
+    source_lat = np.asarray(data.lat.values, dtype=float)
+    if source_lat.size > 1:
+        source_res = float(np.abs(np.diff(source_lat)).min())
+        if source_res < grid.res - 1.0e-9:
+            raise ValueError(
+                f"{label} resolution {source_res} deg is finer than the coarse grid "
+                f"{grid.res} deg; aggregate it with an area-weighted mean first "
+                "rather than letting nearest selection discard cells"
+            )
+    selected = data.sel(lat=grid.lat, lon=grid.lon, method="nearest")
+    native = bool(
+        np.allclose(selected.lat.values, grid.lat, atol=1.0e-5)
+        and np.allclose(selected.lon.values, grid.lon, atol=1.0e-5)
+    )
+    if not native:
+        selected = selected.assign_coords(lat=grid.lat, lon=grid.lon)
+    return selected, native
+
+
 def _interpolate_grid(data: xr.DataArray, grid: Grid, label: str) -> xr.DataArray:
     lat = np.asarray(data.lat.values)
     lon = np.asarray(data.lon.values)
@@ -468,11 +503,17 @@ def main() -> None:
     ).sel(time=slice(args.start, args.end)).transpose("time", "lat", "lon")
     if chirps.sizes.get("time", 0) == 0:
         raise ValueError(f"CHIRPS has no dates in {args.start}..{args.end}")
-    cpc = _exact_grid(
+    cpc, native_cpc = _coarse_driver(
         _variable(cpc_ds, ("precip", "precipitation"), "CPC"),
         coarse_grid,
-        "native CPC",
-    ).transpose("time", "lat", "lon")
+        "CPC",
+    )
+    cpc = cpc.transpose("time", "lat", "lon")
+    print(
+        "CPC on the coarse grid: "
+        + ("native cells" if native_cpc else "block-replicated from its own grid"),
+        flush=True,
+    )
     imerg = None
     if imerg_ds is not None:
         imerg = _exact_grid(
@@ -627,7 +668,7 @@ def main() -> None:
         coarse_cond_std=coarse_std.tolist(),
         fine_cond_mean=fine_mean.tolist(),
         fine_cond_std=fine_std.tolist(),
-        native_cpc=True,
+        native_cpc=native_cpc,
         source_start_date=str(times[0].astype("datetime64[D]")),
         source_end_date=str(times[-1].astype("datetime64[D]")),
         target="CHIRPS 0.05 degree and its exact area-weighted CPC-block mean",
