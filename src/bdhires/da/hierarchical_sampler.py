@@ -38,12 +38,57 @@ class HierarchicalSamplerConfig:
     soft_hard_p95_sigma: float = 0.50
 
 
+ROUTING_CHOICES = ("both", "amount", "allocation", "split")
+
+
 @dataclass
 class HierarchicalObservations:
+    """One observation stream, and which part of the state it may correct.
+
+    ``routing`` exists because the hard per-block reconstruction has a null
+    direction: any observation on a support SMALLER than the conservation block
+    can be satisfied either by changing the block amount or by redistributing
+    mass inside the block.  Score guidance takes whichever is cheaper, and for a
+    point gauge under an amount-compressed prior that is always redistribution --
+    which drains the rest of the block and degrades every other cell in it.
+
+    Routing removes the ambiguity instead of damping it:
+
+      ``amount``      the stream may only move ``m``.  Correct for observations
+                      at or above the conservation support (IMERG footprints,
+                      block-aggregated gauges), which genuinely constrain a
+                      block total and cannot be satisfied by redistribution.
+      ``allocation``  the stream may only move ``z``.  Correct for a within-block
+                      anomaly, whose block mean has already been constrained by
+                      an amount-routed stream, so what remains is unambiguously
+                      about structure.
+      ``both``        the unrouted behaviour, kept as the declared ablation.
+    """
+
     operator: torch.nn.Module
     values: torch.Tensor
     variance: torch.Tensor
     guidance: GuidanceConfig = field(default_factory=GuidanceConfig)
+    routing: str = "both"
+    amount_mask: torch.Tensor | None = None
+
+    def __post_init__(self) -> None:
+        if self.routing not in ROUTING_CHOICES:
+            raise ValueError(
+                f"routing must be one of {ROUTING_CHOICES}, got {self.routing!r}"
+            )
+        if self.routing == "split":
+            if self.amount_mask is None:
+                raise ValueError("routing='split' requires amount_mask")
+            if self.amount_mask.shape != self.variance.shape:
+                raise ValueError(
+                    f"amount_mask shape {tuple(self.amount_mask.shape)} must match "
+                    f"variance {tuple(self.variance.shape)}"
+                )
+            if self.amount_mask.dtype != torch.bool:
+                raise ValueError("amount_mask must be a boolean tensor")
+        elif self.amount_mask is not None:
+            raise ValueError("amount_mask is only meaningful with routing='split'")
 
 
 @dataclass
@@ -145,10 +190,38 @@ def hierarchical_guidance_grad(
         )
         hx = observations.operator(physical)
         values = _expand_observations(observations, state.coarse.shape[0])
-        likelihood = obs_log_likelihood(
-            values, hx, observations.variance, t, observations.guidance
-        ).sum()
-        gradient = torch.autograd.grad(likelihood, (coarse, allocation))
+        if observations.routing == "split":
+            # One forward pass, two backward passes.  A stream is suppressed by
+            # inflating its variance rather than by indexing, so this stays
+            # correct for any observation layout the operator produces.  Taking
+            # the coarse component from the amount-routed likelihood and the
+            # allocation component from the other is what makes each stream act
+            # only on the scale it can actually resolve.
+            suppressed = torch.full_like(observations.variance, 1.0e12)
+            amount_variance = torch.where(
+                observations.amount_mask, observations.variance, suppressed
+            )
+            allocation_variance = torch.where(
+                observations.amount_mask, suppressed, observations.variance
+            )
+            amount_likelihood = obs_log_likelihood(
+                values, hx, amount_variance, t, observations.guidance
+            ).sum()
+            allocation_likelihood = obs_log_likelihood(
+                values, hx, allocation_variance, t, observations.guidance
+            ).sum()
+            amount_grad = torch.autograd.grad(
+                amount_likelihood, (coarse, allocation), retain_graph=True
+            )
+            allocation_grad = torch.autograd.grad(
+                allocation_likelihood, (coarse, allocation)
+            )
+            gradient = (amount_grad[0], allocation_grad[1])
+        else:
+            likelihood = obs_log_likelihood(
+                values, hx, observations.variance, t, observations.guidance
+            ).sum()
+            gradient = torch.autograd.grad(likelihood, (coarse, allocation))
 
     coarse_gradient, allocation_gradient = (part.detach() for part in gradient)
     for label, part in (
@@ -159,6 +232,14 @@ def hierarchical_guidance_grad(
             raise FloatingPointError(
                 f"non-finite {label} joint guidance gradient: {count}/{part.numel()}"
             )
+    # Route before clipping.  Zeroing a component after the norm was computed
+    # over both would let a suppressed component shrink the one that survives,
+    # making the routed increment weaker than the unrouted one for no reason.
+    if observations.routing == "amount":
+        allocation_gradient = torch.zeros_like(allocation_gradient)
+    elif observations.routing == "allocation":
+        coarse_gradient = torch.zeros_like(coarse_gradient)
+
     clip = observations.guidance.clip_norm
     if clip is not None:
         norm = torch.sqrt(

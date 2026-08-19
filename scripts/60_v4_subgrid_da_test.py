@@ -82,6 +82,12 @@ METHODS = (
     "simultaneous_withheld",
     "gauges_all",
     "simultaneous_all",
+    # Scale-routed arms: IMERG constrains the block amount, gauges constrain only
+    # the within-block structure.  The unrouted simultaneous arms above are kept
+    # as the declared ablation, because the contrast between them is the evidence
+    # that the routing is needed rather than an assertion that it is.
+    "routed_withheld",
+    "routed_all",
 )
 MM_PER_DAY = {"mm/day", "mmday-1", "mmd-1", "mmday^-1", "mmd^-1"}
 
@@ -1032,6 +1038,44 @@ def main() -> None:
                 torch.from_numpy(gauge_perturbed["all"][:, None]).to(device),
                 torch.from_numpy(gauge_variance["all"]).to(device),
                 guidance,
+            ),
+            # Same observations as the simultaneous arms, same concatenation
+            # order, differing only in which part of the state each stream is
+            # allowed to move.  Anything else held fixed keeps the comparison
+            # clean: a difference in scores is the routing and nothing else.
+            "routed_withheld": HierarchicalObservations(
+                combined_operators["withheld"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["withheld"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["withheld"]).to(device), satellite_r]
+                ),
+                guidance,
+                routing="split",
+                amount_mask=torch.cat([
+                    torch.zeros(len(gauge_variance["withheld"]), dtype=torch.bool),
+                    torch.ones(satellite_r.shape[0], dtype=torch.bool),
+                ]).to(device),
+            ),
+            "routed_all": HierarchicalObservations(
+                combined_operators["all"],
+                torch.from_numpy(
+                    np.concatenate(
+                        [gauge_perturbed["all"], satellite_perturbed], axis=1
+                    )[:, None]
+                ).to(device),
+                torch.cat(
+                    [torch.from_numpy(gauge_variance["all"]).to(device), satellite_r]
+                ),
+                guidance,
+                routing="split",
+                amount_mask=torch.cat([
+                    torch.zeros(len(gauge_variance["all"]), dtype=torch.bool),
+                    torch.ones(satellite_r.shape[0], dtype=torch.bool),
+                ]).to(device),
             ),
             "simultaneous_all": HierarchicalObservations(
                 combined_operators["all"],

@@ -38,12 +38,14 @@ POINT_METHODS = (
     "gauges_withheld",
     "imerg_only",
     "simultaneous_withheld",
+    "routed_withheld",
 )
 MAP_METHODS = (
     "background",
     "gauges_all",
     "imerg_only",
     "simultaneous_all",
+    "routed_all",
 )
 DISPLAY = {
     "background": "background",
@@ -52,6 +54,8 @@ DISPLAY = {
     "simultaneous_withheld": "simultaneous (withheld)",
     "gauges_all": "gauges (all)",
     "simultaneous_all": "simultaneous (all)",
+    "routed_withheld": "routed (withheld)",
+    "routed_all": "routed (all)",
 }
 
 

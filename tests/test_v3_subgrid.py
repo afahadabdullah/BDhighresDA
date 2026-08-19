@@ -1482,3 +1482,182 @@ def test_target_build_round_trip_survives_an_ocean_masked_canvas():
     reference = targets.coarse_mm
     relative = (mean[live] - reference[live]).abs() / reference[live].clamp_min(1.0e-6)
     assert float(relative.max()) < 1.0e-4, f"conservation broke: {float(relative.max()):.2e}"
+
+
+class _TwoPoint(torch.nn.Module):
+    """Two observations: a block-mean one and a single-cell one."""
+
+    def forward(self, field):
+        block = field.mean(dim=(-1, -2))
+        point = field[:, :, 3, 4]
+        return torch.stack([block, point], dim=-1)
+
+
+def _routing_gradient(routing, amount_mask=None):
+    encoding = _encoding()
+    coarse = torch.tensor([[[[2.0]], [[4.0]]]])
+    allocation = torch.zeros(1, 2, 10, 10)
+    allocation[:, 1] = 4.0
+    observations = HierarchicalObservations(
+        _TwoPoint(),
+        torch.tensor([[[10.0, 12.0]]]),
+        torch.tensor([1.0, 1.0]),
+        GuidanceConfig(gamma=1.0e-3, clip_norm=None),
+        routing=routing,
+        amount_mask=amount_mask,
+    )
+    _, gradient, _ = hierarchical_guidance_grad(
+        _ToyJoint(), HierarchicalState(coarse, allocation), torch.tensor([0.7]),
+        None, None, observations, HierarchicalRectifiedFlow(), encoding,
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10), 1.0,
+    )
+    return gradient
+
+
+def test_observation_routing_confines_each_stream_to_one_scale():
+    """A stream may be restricted to the part of the state it can resolve.
+
+    The hard per-block reconstruction has a null direction: an observation on a
+    support smaller than the conservation block can be satisfied by moving the
+    block amount OR by redistributing mass inside the block.  Guidance takes the
+    cheaper route, which for a point gauge is redistribution -- and that drains
+    every other cell in the block.  Routing removes the choice.
+    """
+    both = _routing_gradient("both")
+    assert both.coarse.abs().sum() > 0.0
+    assert both.allocation.abs().sum() > 0.0
+
+    amount = _routing_gradient("amount")
+    assert amount.coarse.abs().sum() > 0.0
+    assert float(amount.allocation.abs().sum()) == 0.0, "amount routing moved allocation"
+
+    allocation = _routing_gradient("allocation")
+    assert float(allocation.coarse.abs().sum()) == 0.0, "allocation routing moved the amount"
+    assert allocation.allocation.abs().sum() > 0.0
+
+
+def test_split_routing_takes_each_component_from_its_own_stream():
+    """The operational arm: IMERG constrains the amount, gauges the structure.
+
+    The coarse component must come from the amount-routed observations alone and
+    the allocation component from the others, so neither stream can reach the
+    scale it cannot resolve.  Checked against single-stream runs rather than
+    against itself.
+    """
+    mask = torch.tensor([True, False])
+    split = _routing_gradient("split", mask)
+
+    # Only the block-mean observation may move the amount.
+    only_block = HierarchicalObservations(
+        _TwoPoint(), torch.tensor([[[10.0, 12.0]]]),
+        torch.tensor([1.0, 1.0e12]),
+        GuidanceConfig(gamma=1.0e-3, clip_norm=None), routing="amount",
+    )
+    encoding = _encoding()
+    coarse = torch.tensor([[[[2.0]], [[4.0]]]])
+    allocation = torch.zeros(1, 2, 10, 10)
+    allocation[:, 1] = 4.0
+    _, block_only, _ = hierarchical_guidance_grad(
+        _ToyJoint(), HierarchicalState(coarse, allocation), torch.tensor([0.7]),
+        None, None, only_block, HierarchicalRectifiedFlow(), encoding,
+        torch.ones(1, 1, 1, 1, dtype=torch.bool),
+        torch.ones(1, 1, 10, 10, dtype=torch.bool),
+        torch.ones(10, 10), 1.0,
+    )
+    assert torch.allclose(split.coarse, block_only.coarse, atol=1.0e-6), (
+        "split routing's amount component is contaminated by the point stream"
+    )
+    assert split.allocation.abs().sum() > 0.0
+
+
+def test_routing_is_validated_rather_than_silently_ignored():
+    """A mistyped routing must fail loudly; a split without a mask is undefined."""
+    values, variance = torch.tensor([[[1.0]]]), torch.tensor([1.0])
+    with pytest.raises(ValueError, match="routing must be one of"):
+        HierarchicalObservations(_Point(), values, variance, routing="coarse")
+    with pytest.raises(ValueError, match="requires amount_mask"):
+        HierarchicalObservations(_Point(), values, variance, routing="split")
+    with pytest.raises(ValueError, match="only meaningful"):
+        HierarchicalObservations(
+            _Point(), values, variance, amount_mask=torch.tensor([True])
+        )
+    with pytest.raises(ValueError, match="must match"):
+        HierarchicalObservations(
+            _Point(), values, torch.tensor([1.0, 1.0]), routing="split",
+            amount_mask=torch.tensor([True]),
+        )
+
+
+def test_unrouted_guidance_is_unchanged_by_the_routing_feature():
+    """Existing arms must score identically; routing defaults to the old path."""
+    encoding = _encoding()
+    coarse = torch.tensor([[[[2.0]], [[4.0]]]])
+    allocation = torch.zeros(1, 2, 10, 10)
+    allocation[:, 1] = 4.0
+    kwargs = dict(
+        values=torch.tensor([[[10.0]]]), variance=torch.tensor([1.0]),
+        guidance=GuidanceConfig(gamma=1.0e-3, clip_norm=None),
+    )
+    default = HierarchicalObservations(_Point(), **kwargs)
+    explicit = HierarchicalObservations(_Point(), **kwargs, routing="both")
+    grads = []
+    for observations in (default, explicit):
+        _, gradient, _ = hierarchical_guidance_grad(
+            _ToyJoint(), HierarchicalState(coarse, allocation), torch.tensor([0.7]),
+            None, None, observations, HierarchicalRectifiedFlow(), encoding,
+            torch.ones(1, 1, 1, 1, dtype=torch.bool),
+            torch.ones(1, 1, 10, 10, dtype=torch.bool),
+            torch.ones(10, 10), 1.0,
+        )
+        grads.append(gradient)
+    assert torch.equal(grads[0].coarse, grads[1].coarse)
+    assert torch.equal(grads[0].allocation, grads[1].allocation)
+    assert grads[0].coarse.abs().sum() > 0.0
+
+
+def test_routed_arms_are_declared_everywhere_they_are_consumed():
+    """An arm added in one place and missed in another fails hours into a job.
+
+    Script 60 samples the arms, script 58 scores them on the grid, and script 61
+    reads both.  A name present in the sampler but absent from the sbatch's
+    --methods list produces a KeyError in the evaluator after the GPU work is
+    already spent, which is the most expensive possible place to find out.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sampler = (root / "scripts/60_v4_subgrid_da_test.py").read_text()
+    evaluator = (root / "scripts/61_evaluate_v4_subgrid_da_test.py").read_text()
+    sbatch = (root / "slurm/v4_subgrid_da_test.sbatch").read_text()
+
+    for name in ("routed_withheld", "routed_all"):
+        assert f'"{name}"' in sampler, f"{name} is not sampled"
+        assert f'"{name}"' in evaluator, f"{name} is not evaluated"
+        assert name in sbatch, f"{name} is missing from the sbatch --methods list"
+
+    # The routed arms must differ from the simultaneous ones ONLY by routing.
+    assert 'routing="split"' in sampler
+    assert sampler.count("amount_mask=torch.cat") == 2, (
+        "both routed arms need an explicit amount mask"
+    )
+    # Gauges are concatenated before the satellite, so the mask must be
+    # False for the gauge block and True for the satellite block, in that order.
+    assert "torch.zeros(len(gauge_variance" in sampler
+    assert "torch.ones(satellite_r.shape[0]" in sampler
+
+
+def test_unrouted_arms_survive_the_routing_change():
+    """The existing arms are the control; they must keep their old behaviour."""
+    from pathlib import Path
+
+    sampler = (
+        Path(__file__).resolve().parents[1] / "scripts/60_v4_subgrid_da_test.py"
+    ).read_text()
+    for name in ("gauges_withheld", "imerg_only", "simultaneous_withheld",
+                 "gauges_all", "simultaneous_all"):
+        assert f'"{name}": HierarchicalObservations(' in sampler, name
+    # None of the pre-existing arms may acquire a routing argument.
+    prefix = sampler.split('"routed_withheld"')[0]
+    assert "routing=" not in prefix, "an existing arm was silently routed"
