@@ -25,6 +25,19 @@ export V7_FACTOR="${V7_FACTOR:-2}"
 export V7_COARSE_RES="${V7_COARSE_RES:-0.1}"
 V7_RUN_TESTS="${V7_RUN_TESTS:-1}"
 
+# The three CPU-only jobs -- tests, prepare-meso, prepare-alloc -- default to
+# grace-cpuonly.  When that partition is short of capacity, point them at the GPU
+# partition instead: none of them requests --gres, so they use a GPU node's Grace
+# cores without ever reserving a GPU.  Slurm associations here reject
+# multi-partition requests, so this is one name, not a list.
+#
+#   V7_CPU_PARTITION=grace bash slurm/submit_v7_pipeline.sh
+cpu_partition=()
+if [[ -n "${V7_CPU_PARTITION:-}" ]]; then
+    cpu_partition=(--partition="$V7_CPU_PARTITION")
+    echo "  CPU-only jobs -> partition $V7_CPU_PARTITION"
+fi
+
 for required in \
     scripts/71_v7_coarsen_pack_archive.py scripts/06_compute_stats.py scripts/train.py \
     scripts/56_build_chirps_subgrid_targets.py scripts/57_train_subgrid_oracle.py \
@@ -73,12 +86,12 @@ echo "  stage B: allocation, factor ${V7_FACTOR}       $V7_PREP_OUT"
 
 dependency=()
 if [[ "$V7_RUN_TESTS" == "1" ]]; then
-    tests="$(sbatch --parsable --export=ALL "$@" slurm/v3_subgrid_tests.sbatch)"
+    tests="$(sbatch --parsable "${cpu_partition[@]}" --export=ALL "$@" slurm/v3_subgrid_tests.sbatch)"
     dependency=(--dependency="afterok:${tests}" --kill-on-invalid-dep=yes)
     echo "submitted tests:        $tests"
 fi
 
-prep_a="$(sbatch --parsable "${dependency[@]}" --export=ALL "$@" slurm/v7_prepare_meso.sbatch)"
+prep_a="$(sbatch --parsable "${dependency[@]}" "${cpu_partition[@]}" --export=ALL "$@" slurm/v7_prepare_meso.sbatch)"
 echo "submitted prepare-meso: $prep_a"
 
 meso="$(CONFIG="$MESO_CFG" \
@@ -88,7 +101,7 @@ meso="$(CONFIG="$MESO_CFG" \
         --export=ALL "$@" "$MESO_SBATCH")"
 echo "submitted meso:         $meso (afterok:$prep_a)"
 
-prep_b="$(sbatch --parsable "${dependency[@]}" --export=ALL "$@" slurm/v7_prepare.sbatch)"
+prep_b="$(sbatch --parsable "${dependency[@]}" "${cpu_partition[@]}" --export=ALL "$@" slurm/v7_prepare.sbatch)"
 echo "submitted prepare-alloc: $prep_b"
 
 alloc="$(V7_CONFIG="$ALLOC_CFG" V7_EXPECTED_STAGE=allocation \
