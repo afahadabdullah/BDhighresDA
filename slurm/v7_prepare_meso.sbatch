@@ -81,10 +81,37 @@ else
     rm -f "$STATS"
 fi
 
+# The statistics recipe is CPCv2's, verbatim -- taken from
+# slurm/submit_compute_stats_cpc_v2.sh, not from 06_compute_stats.py's defaults.
+# Those defaults are log1p, an ABSOLUTE target and no daily wetness; a model
+# trained against them is not CPCv2 one resolution up, it is a different model,
+# and nothing downstream would have flagged it.  All five choices below are part
+# of the contract stage A inherits.
+STATS_TRAIN_START="${V7_STATS_TRAIN_START:-1981}"
+STATS_TRAIN_END="${V7_STATS_TRAIN_END:-2018}"
+STATS_SAMPLE_DAYS="${V7_STATS_SAMPLE_DAYS:-1500}"
+
+# cpc_precip's position in the archive's conditioning stack, READ from the
+# archive rather than pinned.  v2 passed 6 as a literal; coarsening preserves
+# channel order so it is still 6, but a literal that happens to be right is
+# indistinguishable from one that has silently drifted.
+RESIDUAL_BASE_INDEX="$("$PYTHON_BIN" -c 'import sys, zarr; c = list(zarr.open_group(sys.argv[1], mode="r").attrs["cond_channels"]); sys.exit(f"cpc_precip absent from {c}") if "cpc_precip" not in c else print(c.index("cpc_precip"))' "$OUT")"
+echo "residual base cpc_precip at conditioning index $RESIDUAL_BASE_INDEX"
+
 if [[ -s "$STATS" ]]; then
     echo "Reusing statistics: $STATS"
 else
-    "$PYTHON_BIN" -u scripts/06_compute_stats.py --zarr "$OUT" --out "$STATS"
+    "$PYTHON_BIN" -u scripts/06_compute_stats.py \
+        --zarr "$OUT" \
+        --train-years "$STATS_TRAIN_START" "$STATS_TRAIN_END" \
+        --transform sqrt \
+        --cond-transform "cpc_precip=sqrt" \
+        --daily-wetness \
+        --residual \
+        --residual-base cpc_precip \
+        --residual-base-index "$RESIDUAL_BASE_INDEX" \
+        --sample-days "$STATS_SAMPLE_DAYS" \
+        --out "$STATS"
 fi
 
 "$PYTHON_BIN" - "$OUT" "$STATS" "$FACTOR" <<'PY'

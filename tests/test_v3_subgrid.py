@@ -2272,3 +2272,52 @@ def test_stage_b_trainer_samples_before_it_drops_the_ema_weights():
     # And the kept-checkpoint cadence is the one the diagnostic is tied to.
     assert "monitor.validate_cadence(keep_every(config))" in source
     assert "(epoch + 1) % keep_every(config) == 0" in source
+
+
+def test_v7_stage_a_statistics_use_the_cpcv2_recipe():
+    """Stage A's stats must be measured the way CPCv2 measured its own.
+
+    ``06_compute_stats.py``'s defaults are log1p, an ABSOLUTE target and no
+    daily wetness.  CPCv2 used none of them: sqrt on the target, sqrt on
+    cpc_precip, daily wetness on, and a RESIDUAL parameterisation based on
+    cpc_precip.  A stage A trained against the defaults would normalise its
+    inputs differently AND predict a different quantity, while every schema
+    gate, preflight and shape check still passed -- so this is asserted rather
+    than trusted.  The recipe of record is slurm/submit_compute_stats_cpc_v2.sh.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    v2 = (root / "slurm/submit_compute_stats_cpc_v2.sh").read_text()
+    meso = (root / "slurm/v7_prepare_meso.sbatch").read_text()
+
+    def v2_default(name):
+        match = re.search(rf'{name}:-([^}}]+)\}}', v2)
+        assert match, f"{name} is no longer set in the v2 recipe"
+        return match.group(1)
+
+    assert v2_default("STATS_TRANSFORM") == "sqrt"
+    assert v2_default("STATS_CPC_PRECIP_TRANSFORM") == "sqrt"
+    assert v2_default("STATS_DAILY_WETNESS") == "1"
+    assert v2_default("STATS_RESIDUAL") == "1"
+    assert v2_default("STATS_RESIDUAL_BASE") == "cpc_precip"
+
+    # ...and V7 passes each of them through to the same script.
+    for flag in (
+        "--transform sqrt",
+        '--cond-transform "cpc_precip=sqrt"',
+        "--daily-wetness",
+        "--residual",
+        "--residual-base cpc_precip",
+        "--train-years",
+    ):
+        assert flag in meso, f"V7 stage A statistics are missing {flag}"
+
+    # The residual base index must be derived, never pinned: it is an offset
+    # into the conditioning stack, which is exactly the kind of literal that
+    # stays syntactically valid while becoming wrong.
+    assert 'attrs["cond_channels"]' in meso and 'index("cpc_precip")' in meso, (
+        "the residual base index must be read from the archive"
+    )
+    assert "--residual-base-index 6" not in meso, "the index is hardcoded again"
