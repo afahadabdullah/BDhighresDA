@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=bdhires-v3-tests
-#SBATCH --partition=grace-cpuonly
+# Either partition will do: this job is pure pytest -- 4 cores, no GPU, a few
+# seconds of work.  Listing both lets Slurm start it on whichever frees up
+# first, which matters because it gates the whole V7 pipeline behind an
+# afterok dependency.  It requests no --gres, so it never holds a GPU.
+#SBATCH --partition=grace,grace-cpuonly
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
