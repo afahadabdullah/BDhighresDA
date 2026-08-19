@@ -32,7 +32,14 @@ from bdhires.data import (  # noqa: E402
     validate_aligned_crop,
     validate_cpc_alignment,
 )
-from bdhires.grids import BD, BD_CPC, WIDE, WIDE_CPC, crop_offsets  # noqa: E402
+from bdhires.grids import (  # noqa: E402
+    BD,
+    BD_CPC,
+    WIDE,
+    WIDE_CPC,
+    crop_offsets,
+    get_grid,
+)
 from bdhires.models import (  # noqa: E402
     AllocationFlow,
     CoarseHurdleFlow,
@@ -1849,12 +1856,23 @@ def test_v7_stage_a_is_cpcv2_with_only_the_resolution_changed():
     for resolution in v7["model"]["attn_resolutions"]:
         assert resolution in levels, f"attention at {resolution} has no U-Net level"
 
-    # Everything in train: apart from paths and the consistency factor is v2's.
-    ignored = {"out_dir", "coarse_consistency"}
+    # Everything in train: apart from paths, the consistency factor and the
+    # schedule LENGTH is v2's.  `epochs` is a deliberate, separately justified
+    # departure: both V7 stages run 400 so their curves are comparable epoch for
+    # epoch.  It changes how long the cosine decay is, not the objective, the
+    # architecture or the sampling -- which are the things "verbatim" is about.
+    ignored = {"out_dir", "coarse_consistency", "epochs"}
     for key, value in v2["train"].items():
         if key in ignored:
             continue
         assert v7["train"][key] == value, f"stage A diverged from v2 on train.{key}"
+
+    # If the epoch counts drift apart, the reason above stops being true.
+    alloc = yaml.safe_load((root / "configs/train_v7_allocation.yaml").read_text())
+    assert v7["train"]["epochs"] == alloc["train"]["epochs"], (
+        "the two V7 stages must run the same number of epochs, or the shared "
+        "10-epoch checkpoint cadence stops lining them up"
+    )
 
     # Statistics belong to the archive they were measured on.
     assert v7["data"]["stats"] != v2["data"]["stats"], (
@@ -1941,3 +1959,316 @@ def test_v7_coarsener_uses_the_zarr_api_the_cluster_has():
     # Shape and dtype must be explicit: zarr 3's create_dataset requires shape.
     assert 'kwargs.setdefault("shape"' in source
     assert 'kwargs.setdefault("dtype"' in source
+
+
+def test_v7_stage_a_validation_monitor_is_not_silently_disabled():
+    """The sampled-validation monitor must survive the change of resolution.
+
+    ``build_monitor`` compares the monitor grid's width against ``data.crop`` and
+    returns None when they differ.  BD is 128 cells wide at 0.05 degrees and V7
+    stage A crops 64, so a monitor grid resolved at the packed resolution makes
+    that comparison fail -- and the run then trains for 150 epochs with no CRPS,
+    no panels and no crash to say so.  The grid has to be expressed at the
+    ARCHIVE's resolution, which is where ``at_resolution`` comes in.
+    """
+    import yaml
+    from pathlib import Path
+
+    from bdhires.grids import at_resolution
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "configs/train_v7_meso.yaml").read_text())
+
+    # WIDE coarsened by the same factor is the outer grid the archive records.
+    outer = at_resolution(WIDE, 0.05 * 2)
+    monitor = at_resolution(get_grid(cfg["data"]["monitor_grid"]), outer.res)
+    assert monitor.nlon == cfg["data"]["crop"], (
+        "V7 stage A would train with the validation monitor switched off"
+    )
+    # The same geography, so the offsets scale with the factor rather than moving.
+    assert crop_offsets(outer, monitor) == tuple(o // 2 for o in crop_offsets(WIDE, BD))
+    # v2 must be untouched: at its own resolution this is an identity.
+    assert at_resolution(BD, 0.05) is BD
+
+
+def test_v7_stage_a_monitor_grid_comes_from_the_archive():
+    """A hardcoded outer grid is the bug, not the symptom.
+
+    ``crop_offsets`` requires both grids to share a resolution, so pinning WIDE
+    while the archive is coarsened either raises or -- worse -- disables the
+    monitor.  The trainer must read the grid the archive itself records.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "scripts/train.py").read_text()
+    assert "crop_offsets(WIDE," not in source, "the outer grid must not be hardcoded"
+    assert "crop_offsets(outer, grid)" in source
+    assert "def archive_grid(" in source
+    assert 'at_resolution(get_grid(cfg["data"].get("monitor_grid"' in source
+
+
+# --------------------------------------------------------------------------
+# in-training sampled diagnostics (V7)
+# --------------------------------------------------------------------------
+
+
+def _allocation_monitor_store(days: int = 12, size: int = 16, factor: int = 2):
+    """A tiny but structurally complete allocation archive."""
+    rng = np.random.default_rng(11)
+    coarse = size // factor
+    # A rainfall gradient across days, so quantile-based case selection has a
+    # distribution to pick from rather than noise.
+    scale = np.linspace(0.2, 12.0, days).astype(np.float32)
+    fine = np.abs(rng.gamma(2.0, 1.0, (days, size, size))).astype(np.float32)
+    fine *= scale[:, None, None]
+    area = np.ones((size, size), np.float32)
+    valid = np.ones((size, size), bool)
+    block = fine.reshape(days, coarse, factor, coarse, factor).mean(axis=(2, 4))
+    return _MemoryStore(
+        {
+            "time": np.asarray(
+                [f"2019-07-{d + 1:02d}" for d in range(days)], dtype="datetime64[ns]"
+            ).astype(np.int64),
+            "fine_mm": fine,
+            "coarse_mm": block.astype(np.float32),
+            "fine_valid": valid,
+            "cell_area": area,
+            "coarse_valid": np.ones((coarse, coarse), bool),
+            "coarse_state": rng.normal(size=(days, 2, coarse, coarse)).astype(np.float32),
+            "allocation_state": rng.normal(size=(days, 2, size, size)).astype(np.float32),
+            "fine_cond": rng.normal(size=(days, 3, size, size)).astype(np.float32),
+            "coarse_cond": rng.normal(size=(days, 3, coarse, coarse)).astype(np.float32),
+        },
+        attrs={
+            "schema": SUBGRID_SCHEMA,
+            "subgrid_encoding": {
+                "factor": factor,
+                "amount_sqrt_mean": 1.0,
+                "amount_sqrt_std": 1.0,
+                "intensity_log_mean": 0.0,
+                "intensity_log_std": 0.5,
+                "smooth_base_iterations": 2,
+            },
+        },
+    )
+
+
+def test_sampled_diagnostic_runs_end_to_end_on_the_allocation_branch(tmp_path):
+    """The whole path: pick cases, sample, score, write history and figures.
+
+    This is the part that cannot be checked by reading the source.  The monitor
+    calls the model with the allocation signature, reconstructs through the hard
+    decoder, and has to produce finite numbers for a branch whose weights are
+    random -- because a NaN on epoch 10 of a 48-hour run is indistinguishable
+    from a NaN caused by the training itself.
+    """
+    from bdhires.data import SubgridDataset, SubgridDatasetConfig
+    from bdhires.eval import SubgridMonitor, SubgridMonitorConfig
+
+    dataset = SubgridDataset(
+        SubgridDatasetConfig(root="unused", crop=16, random_crop=False, factor=2),
+        store=_allocation_monitor_store(),
+    )
+    model = AllocationFlow(
+        3, image_size=16, base_channels=8, channel_mult=(1, 2),
+        num_res_blocks=1, attn_resolutions=(8,), num_heads=1,
+    )
+    monitor = SubgridMonitor(
+        dataset, torch.device("cpu"), tmp_path / "diagnostics", "allocation",
+        SubgridMonitorConfig(
+            start_epoch=10, every=10, cases=2, members=3, n_steps=2,
+        ),
+    )
+
+    assert len(monitor.cases) == 2
+    # Chosen by rainfall, and the two cases must not be the same day.
+    assert monitor.cases[0].date != monitor.cases[1].date
+    assert monitor.cases[0].domain_mean_mm < monitor.cases[1].domain_mean_mm
+
+    assert not monitor.should_run(0)          # before start_epoch
+    assert not monitor.should_run(10)         # epoch 11, not a multiple of 10
+    assert monitor.should_run(9)              # epoch 10
+
+    # A failure here must return None rather than raise; assert we did not take
+    # that path by requiring a real summary back.
+    summary = monitor.run(model, epoch=9)
+    assert summary is not None, "the diagnostic swallowed an exception"
+    assert summary["epoch"] == 10
+    assert len(summary["cases"]) == 2
+    for case in summary["cases"]:
+        for key in (
+            "anomaly_r", "smooth_anomaly_r", "crps_mm",
+            "conservation_abs_mm", "seam_index",
+        ):
+            assert key in case, f"{key} missing from the diagnostic"
+        assert np.isfinite(case["crps_mm"])
+        # Hard conservation is the contract this stage is built on.
+        assert case["conservation_abs_mm"] < 1.0e-4, case["conservation_abs_mm"]
+
+    import json
+
+    history = (tmp_path / "diagnostics" / "history.jsonl").read_text().splitlines()
+    assert len(history) == 1
+    assert json.loads(history[0])["stage"] == "allocation"
+    assert (tmp_path / "diagnostics" / "epoch_0010.png").is_file()
+
+
+def test_sampled_diagnostic_leaves_the_model_as_it_found_it(tmp_path):
+    """Training mode and gradients must survive the diagnostic.
+
+    ``run`` puts the model in eval mode for sampling.  If it forgets to restore
+    training mode, every batch after the first diagnostic trains with dropout
+    and batch statistics switched off -- a silent, permanent change of the
+    objective that would surface only as an unexplained kink at epoch 10.
+    """
+    from bdhires.data import SubgridDataset, SubgridDatasetConfig
+    from bdhires.eval import SubgridMonitor, SubgridMonitorConfig
+
+    dataset = SubgridDataset(
+        SubgridDatasetConfig(root="unused", crop=16, random_crop=False, factor=2),
+        store=_allocation_monitor_store(),
+    )
+    model = AllocationFlow(
+        3, image_size=16, base_channels=8, channel_mult=(1, 2),
+        num_res_blocks=1, attn_resolutions=(8,), num_heads=1,
+    )
+    model.train()
+    before = [p.detach().clone() for p in model.parameters()]
+
+    monitor = SubgridMonitor(
+        dataset, torch.device("cpu"), tmp_path / "d", "allocation",
+        SubgridMonitorConfig(start_epoch=0, every=1, cases=1, members=2,
+                             n_steps=2, save_maps=False),
+    )
+    monitor.run(model, epoch=0)
+
+    assert model.training, "the diagnostic left the model in eval mode"
+    for parameter, original in zip(model.parameters(), before):
+        assert torch.equal(parameter, original), "the diagnostic changed weights"
+        assert parameter.grad is None, "the diagnostic accumulated gradients"
+
+
+def test_sampled_diagnostic_is_deterministic_across_calls(tmp_path):
+    """Same weights, same day, same numbers.
+
+    The point of a per-epoch curve is that a change means the model moved.  If
+    the noise draw changed too, every wiggle would be unreadable.
+    """
+    from bdhires.data import SubgridDataset, SubgridDatasetConfig
+    from bdhires.eval import SubgridMonitor, SubgridMonitorConfig
+
+    def build():
+        dataset = SubgridDataset(
+            SubgridDatasetConfig(root="unused", crop=16, random_crop=False, factor=2),
+            store=_allocation_monitor_store(),
+        )
+        return SubgridMonitor(
+            dataset, torch.device("cpu"), tmp_path / "d", "allocation",
+            SubgridMonitorConfig(start_epoch=0, every=1, cases=1, members=2,
+                                 n_steps=2, save_maps=False),
+        )
+
+    torch.manual_seed(0)
+    model = AllocationFlow(
+        3, image_size=16, base_channels=8, channel_mult=(1, 2),
+        num_res_blocks=1, attn_resolutions=(8,), num_heads=1,
+    )
+    model.eval()
+    first = build().run(model, epoch=0)["cases"][0]
+    second = build().run(model, epoch=0)["cases"][0]
+    assert first["crps_mm"] == pytest.approx(second["crps_mm"], rel=1e-9)
+    assert first["anomaly_r"] == pytest.approx(second["anomaly_r"], rel=1e-9)
+
+
+def test_sampled_diagnostic_refuses_a_cadence_that_could_never_fire():
+    """A monitor that never runs looks exactly like a healthy one.
+
+    ``every`` has to be a multiple of ``keep_every``, otherwise the picture and
+    the checkpoint it describes do not both survive.  This must raise at
+    startup, not go quiet for 400 epochs.
+    """
+    from bdhires.eval import SubgridMonitor, SubgridMonitorConfig
+
+    monitor = SubgridMonitor.__new__(SubgridMonitor)
+    monitor.cfg = SubgridMonitorConfig(every=7)
+    with pytest.raises(ValueError, match="multiple"):
+        SubgridMonitor.validate_cadence(monitor, keep_every=10)
+    monitor.cfg = SubgridMonitorConfig(every=10)
+    SubgridMonitor.validate_cadence(monitor, keep_every=10)      # no raise
+    monitor.cfg = SubgridMonitorConfig(every=10, enabled=False)
+    SubgridMonitor.validate_cadence(monitor, keep_every=7)       # disabled: no raise
+
+
+def test_sampled_validation_config_rejects_unknown_keys():
+    """A typo must not become a silently different diagnostic."""
+    from bdhires.eval import SubgridMonitorConfig
+
+    with pytest.raises(ValueError, match="unknown sampled_validation keys"):
+        SubgridMonitorConfig.from_dict({"member": 4})
+    assert SubgridMonitorConfig.from_dict({"members": 4}).members == 4
+
+
+def test_v7_configs_pair_every_kept_checkpoint_with_a_picture():
+    """Both stages: 400 epochs, kept every 10, sampled at the same cadence.
+
+    The two trainers spell this differently -- script 57 reads
+    ``train.sampled_validation`` and ``train.keep_every``; ``scripts/train.py``
+    reads a top-level ``validation`` block and ``train.keep_every`` -- so the
+    agreement between them is a property worth asserting rather than assuming.
+    """
+    import yaml
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    meso = yaml.safe_load((root / "configs/train_v7_meso.yaml").read_text())
+    alloc = yaml.safe_load((root / "configs/train_v7_allocation.yaml").read_text())
+
+    assert meso["train"]["epochs"] == 400
+    assert alloc["train"]["epochs"] == 400
+
+    assert meso["train"]["keep_every"] == 10
+    assert alloc["train"]["keep_every"] == 10
+
+    # Stage A: the monitor fires on kept-checkpoint epochs.
+    assert meso["validation"]["enabled"] is True
+    assert meso["validation"]["every"] == 10
+    assert meso["validation"]["every"] % meso["train"]["ckpt_every"] == 0
+    assert meso["validation"]["n_steps"] == 50
+    assert meso["validation"]["members"] == 4
+    assert len(meso["validation"]["quantiles"]) == 2
+    assert meso["validation"]["max_cases"] == 2
+
+    # Stage B: same cadence, same sampling budget.
+    sampled = alloc["train"]["sampled_validation"]
+    assert sampled["enabled"] is True
+    assert sampled["every"] == alloc["train"]["keep_every"]
+    assert sampled["cases"] == 2
+    assert sampled["members"] == 4
+    assert sampled["n_steps"] == 50
+    # Every key must be one the loader accepts.
+    from bdhires.eval import SubgridMonitorConfig
+
+    SubgridMonitorConfig.from_dict(sampled)
+
+
+def test_stage_b_trainer_samples_before_it_drops_the_ema_weights():
+    """Order matters: the picture must describe the checkpoint.
+
+    Script 57 swaps EMA weights in, validates, then swaps the online weights
+    back before saving.  A diagnostic placed after the restore would sample
+    parameters that are never written to disk, so the figure and the checkpoint
+    would disagree with no way to tell from either one.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/57_train_subgrid_oracle.py"
+    ).read_text()
+    sample_at = source.index("monitor.should_run(epoch)")
+    restore_at = source.index("model.load_state_dict(online)", sample_at - 4000)
+    assert sample_at < restore_at, (
+        "the diagnostic runs after the EMA weights are swapped back out"
+    )
+    # And the kept-checkpoint cadence is the one the diagnostic is tied to.
+    assert "monitor.validate_cadence(keep_every(config))" in source
+    assert "(epoch + 1) % keep_every(config) == 0" in source

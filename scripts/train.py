@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.eval import MonitorConfig, ValidationMonitor  # noqa: E402
-from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
+from bdhires.grids import Grid, WIDE, at_resolution, crop_offsets, get_grid  # noqa: E402
 from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     load_climatology,
@@ -252,6 +252,29 @@ def build_coarse_clean_loss(cfg: dict, dataset: PrecipDataset, batch: dict, devi
     return clean_loss
 
 
+def archive_grid(path: str) -> Grid:
+    """The grid a packed archive was written on, read from the archive itself.
+
+    ``04_regrid_and_pack.py`` records it, and ``71_v7_coarsen_pack_archive.py``
+    updates it when it coarsens.  Falling back to WIDE keeps any older store
+    without the attribute working exactly as before.
+    """
+    import zarr
+
+    try:
+        recorded = dict(zarr.open_group(str(path), mode="r").attrs["grid"])
+    except Exception:
+        return WIDE
+    return Grid(
+        name=str(recorded["name"]),
+        lon_min=float(recorded["lon_min"]),
+        lat_min=float(recorded["lat_min"]),
+        nlon=int(recorded["nlon"]),
+        nlat=int(recorded["nlat"]),
+        res=float(recorded["res"]),
+    )
+
+
 def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
     """Build the sampled-validation monitor, or None if it is switched off.
 
@@ -264,7 +287,11 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
         return None
     stats = json.loads(Path(cfg["data"]["stats"]).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
-    grid = get_grid(cfg["data"].get("monitor_grid", "bd"))
+    # Take the outer grid from the archive rather than assuming WIDE: V7 stage A
+    # trains on a coarsened store, and a hardcoded 0.05-degree outer grid would
+    # either raise in crop_offsets or, worse, silently disable the monitor.
+    outer = archive_grid(cfg["data"]["zarr"])
+    grid = at_resolution(get_grid(cfg["data"].get("monitor_grid", "bd")), outer.res)
     if grid.nlon != cfg["data"]["crop"]:
         print(
             f"[validation monitor] disabled: grid {grid.name} is {grid.nlon} wide "
@@ -278,7 +305,7 @@ def build_monitor(cfg: dict, device, out_dir: Path) -> ValidationMonitor | None:
             root=cfg["data"]["zarr"],
             crop=grid.nlon,
             random_crop=False,
-            crop_origin=crop_offsets(WIDE, grid),
+            crop_origin=crop_offsets(outer, grid),
             years=tuple(cfg["data"]["years"]["val"]),
             seasonal_encoding=cfg["data"].get("seasonal_encoding", True),
             cond_channels=tuple(selected) if selected else None,

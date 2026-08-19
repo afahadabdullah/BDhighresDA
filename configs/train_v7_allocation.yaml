@@ -45,7 +45,37 @@ train:
   ema_decay: 0.9995
   num_workers: 8
   seed: 7102
-  ckpt_every: 5
+  # last.pt and best.pt are rewritten every epoch; this is only how often a
+  # checkpoint is KEPT under its own epoch number.  10 over 400 epochs is 40
+  # permanent copies -- enough to go back to any part of the run, few enough
+  # that the directory stays navigable.
+  keep_every: 10
   conditioning_augmentation:
     max_coarse_noise: 1.0
     clean_probability: 0.15
+  # The sampled diagnostic, at the same cadence as the kept checkpoints, so the
+  # picture and the weights that produced it are always a matched pair.
+  #
+  # The allocation branch has never had one of these.  Its selection signal is a
+  # masked MSE against a random-t velocity target, which barely moves once a run
+  # is past its early epochs -- so best.pt has been close to arbitrary.  What
+  # this measures instead is the within-block anomaly correlation against the
+  # conservative smooth base: the part of the field the branch actually
+  # controls, against the null it has to beat.  Conservation error and the seam
+  # index ride along, because those are the two ways this stage has failed.
+  #
+  # Cost: 2 cases x 4 members x 50 steps x 2 evaluations = 800 forward passes
+  # every 10 epochs, against ~10^5 for an epoch of training.
+  sampled_validation:
+    enabled: true
+    start_epoch: 10
+    every: 10
+    cases: 2
+    members: 4
+    n_steps: 50
+    seed: 20220503
+    save_maps: true
+    # A typical monsoon day and the tail, by rainfall quantile of the validation
+    # split -- NOT by calendar position, which lands on dry-season days where a
+    # pattern correlation is close to pure noise.
+    quantiles: [0.50, 0.95]

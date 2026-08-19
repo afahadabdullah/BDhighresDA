@@ -7,3 +7,12 @@ from .metrics import (  # noqa: F401
     bias, categorical, crps_ensemble, fss, fss_series, mae, rmse, sal, summarize,
 )
 from .monitor import MonitorConfig, ValidationMonitor  # noqa: F401
+from .subgrid_monitor import (  # noqa: F401
+    SubgridMonitor,
+    SubgridMonitorConfig,
+    crps,
+    heun_sample,
+    pattern_correlation,
+    seam_index,
+    within_block_anomaly,
+)

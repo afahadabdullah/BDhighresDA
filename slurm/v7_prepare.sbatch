@@ -8,14 +8,17 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%x-%j.out
 
-# V7 target archive: one store serves BOTH stages.
+# V7 STAGE B target archive.  Stage A does NOT read this file -- it trains on
+# the coarsened CPCv2 pack that slurm/v7_prepare_meso.sbatch builds, so that it
+# runs the v2 code path verbatim.  (An earlier draft of V7 served both stages
+# from this one store; that is no longer the design.)
 #
-# The coarse support is 0.1 degrees and the factor is 2, so the archive's
-# "coarse" arrays are the 0.1-degree meso level and its "fine" arrays are the
-# 0.05-degree product level.  Stage A trains on the coarse state, stage B on the
-# allocation state, from the same file -- there is no second archive to keep in
-# step, and no way for the two stages to disagree about the interface between
-# them.
+# The coarse support here is 0.1 degrees and the factor is 2, so the "coarse"
+# arrays are the meso level and the "fine" arrays are the 0.05-degree product
+# level.  The two archives nest exactly rather than being kept in step: both
+# grids share the origin and the 0.1-degree lattice, so this archive's 120x120
+# coarse grid is the first 120x120 of stage A's 128x128.  The interface between
+# the stages is a crop, not a regrid.
 
 set -euo pipefail
 module purge 2>/dev/null || true

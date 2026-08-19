@@ -67,14 +67,15 @@ takes that output and reduces it by an exact area-weighted factor of 2 —
 nothing is invented. Array names, channel order and the attribute block survive,
 so **`06_compute_stats.py` and `scripts/train.py` run unchanged**.
 
-`configs/train_v7_meso.yaml` differs from `train_h100_cpc_v2.yaml` in exactly
-three places, each forced by the resolution:
+`configs/train_v7_meso.yaml` differs from `train_h100_cpc_v2.yaml` in three
+places forced by the resolution, plus the schedule length:
 
 | | v2 | V7 stage A | why |
 |---|---|---|---|
 | `data.zarr` / `stats` | 0.05° archive | coarsened archive + its own stats | statistics belong to the archive they were measured on |
 | `data.crop` | 128 | 64 | **the same 6.4° of ground**, so `attn_resolutions: [16, 32]` still land on real U-Net levels (64→32→16→8) |
 | `coarse_consistency.factor` | 10 | 5 | 0.1° → 0.5° is five cells |
+| `train.epochs` | 150 | 400 | matches stage B so the two curves are comparable epoch for epoch; stretches the cosine decay, changes nothing about the objective |
 
 Everything else is byte-identical, and a test asserts it. Three of those
 inherited settings are the reason for the whole redesign:
@@ -98,6 +99,38 @@ over three neighbours instead of ninety-nine, and the increment is quantised to
 targets but runs on **analysed** 0.1° fields, whose error looks nothing like
 clean CHIRPS. Calibrate `max_coarse_noise` against the stage-A analysis spread
 once that exists, rather than leaving it at a guess.
+
+## Watching the runs
+
+Both stages run 400 epochs, keep a checkpoint every 10, and **sample at that
+same cadence** — so every kept checkpoint has a picture beside it, at matching
+epoch numbers. 2 cases × 4 members × 50 steps, chosen by rainfall quantile of
+the validation split (a typical monsoon day and the tail) rather than by
+calendar position, which lands on dry-season days where a pattern correlation is
+close to noise.
+
+This exists because the flow-matching validation loss is a masked MSE against a
+random-`t` velocity target: it is dominated by the noise of the `t` and `x0`
+draws and barely moves after the early epochs, which makes `best.pt` close to
+arbitrary. CPCv2 already fixed this for stage A's trainer
+(`bdhires.eval.monitor`); `bdhires.eval.subgrid_monitor` is the counterpart for
+the branches trained by script 57, which had **no sampled validation at all**.
+
+What stage B's diagnostic reports, in `runs/v7/allocation/diagnostics/`:
+
+| number | why it is the one to watch |
+|---|---|
+| within-block anomaly `r`, against the smooth-base null | the only part of the field the allocation branch controls — a full-field correlation is dominated by coarse amounts it was handed for free |
+| CRPS (fair, `(m−1)`-corrected) | comparable across ensemble sizes, so changing `members` does not look like a change of skill |
+| seam index, against CHIRPS's own | the blockiness artifact, which is how this stage failed before |
+| conservation error, absolute | the contract the hard decoder is built on; a ratio is meaningless in a dry block |
+
+Outputs: `history.jsonl` (append-only, one row per evaluation),
+`epoch_XXXX.png` (map panels), `progress.png` (metric-vs-epoch curves). The
+diagnostic samples while the EMA weights are loaded, so the picture describes
+the checkpoint written beside it. It catches its own exceptions — a broken
+figure must not end a 48-hour run — but it will **not** let itself be silently
+disabled: a cadence that could never fire raises at startup.
 
 ## Two archives, and how they meet
 

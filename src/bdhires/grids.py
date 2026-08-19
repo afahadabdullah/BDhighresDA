@@ -101,6 +101,40 @@ def get_grid(name: str) -> Grid:
         raise KeyError(f"unknown grid {name!r}; choose from {sorted(GRIDS)}") from exc
 
 
+def at_resolution(grid: Grid, res: float) -> Grid:
+    """The same geographic extent expressed on a coarser lattice.
+
+    V7 trains stage A at 0.1 degrees on an archive coarsened from the 0.05-degree
+    pack.  Named grids such as ``bd`` are defined at 0.05, so anything that
+    compares a named grid against the archive -- the validation monitor's width
+    check, and the crop offsets it derives -- needs the grid restated at the
+    archive's resolution first.  Returns the grid unchanged when the resolutions
+    already agree, so the 0.05-degree path is untouched.
+    """
+    if abs(grid.res - res) <= 1e-9:
+        return grid
+    ratio = res / grid.res
+    factor = int(round(ratio))
+    if factor < 1 or abs(ratio - factor) > 1e-9:
+        raise ValueError(f"{res} is not a whole multiple of {grid.name}'s {grid.res}")
+    if grid.nlat % factor or grid.nlon % factor:
+        raise ValueError(
+            f"{grid.name} {grid.shape} does not divide by {factor}; the coarser "
+            "lattice would not cover the same extent"
+        )
+    for name, edge in (("lon_min", grid.lon_min), ("lat_min", grid.lat_min)):
+        if abs(edge / res - round(edge / res)) > 1e-6:
+            raise ValueError(f"{grid.name} {name}={edge} is off the {res} lattice")
+    return Grid(
+        name=f"{grid.name}_at{res:g}",
+        lon_min=grid.lon_min,
+        lat_min=grid.lat_min,
+        nlon=grid.nlon // factor,
+        nlat=grid.nlat // factor,
+        res=res,
+    )
+
+
 def crop_offsets(outer: Grid, inner: Grid) -> tuple[int, int]:
     """Row/col offset of ``inner`` inside ``outer`` (both must share ``res``)."""
     if abs(outer.res - inner.res) > 1e-9:

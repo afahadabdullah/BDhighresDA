@@ -42,6 +42,11 @@ from bdhires.models import (  # noqa: E402
     hierarchical_flow_matching_loss,
     select_weights,
 )
+from bdhires.eval.subgrid_monitor import (  # noqa: E402
+    SUPPORTED_STAGES,
+    SubgridMonitor,
+    SubgridMonitorConfig,
+)
 from bdhires.utils.dist import cleanup_distributed, is_main, setup_distributed  # noqa: E402
 
 
@@ -204,6 +209,57 @@ def move_batch(batch, device):
     }
 
 
+def keep_every(config: dict) -> int:
+    """How often a checkpoint is kept under its own epoch-numbered name.
+
+    ``last.pt`` and ``best.pt`` are rewritten every epoch, so this cadence is
+    only about the permanent, epoch-numbered copies.  ``ckpt_every`` is the
+    older name for the same thing and is still honoured, so V5 configs behave
+    exactly as they did.
+    """
+    train = config["train"]
+    return max(1, int(train.get("keep_every", train.get("ckpt_every", 5))))
+
+
+def build_subgrid_monitor(config: dict, device, out_dir: Path):
+    """Build the sampled diagnostic, or None when it is switched off.
+
+    It gets its OWN dataset rather than reusing the validation loader's: that
+    one is built with ``tile_domain=True``, so its items are tiles rather than
+    days and a "case" would be a corner of the domain instead of a field.  This
+    one is a single fixed centred crop with no tiling, which is what makes the
+    same geography comparable from epoch to epoch.
+    """
+    raw = config["train"].get("sampled_validation")
+    cfg = SubgridMonitorConfig.from_dict(raw)
+    if not cfg.enabled:
+        return None
+    if config["stage"] not in SUPPORTED_STAGES:
+        # Loud, not silent: a joint run asking for this should say why it did
+        # not get it rather than leave an empty diagnostics directory.
+        print(
+            f"[sampled validation] disabled: stage {config['stage']!r} is not one "
+            f"of {SUPPORTED_STAGES}",
+            flush=True,
+        )
+        return None
+    data = config["data"]
+    dataset = SubgridDataset(
+        SubgridDatasetConfig(
+            root=data["zarr"],
+            crop=int(data["crop"]),
+            random_crop=False,
+            years=tuple(data["years"]["val"]),
+            factor=int(data.get("factor", 10)),
+            downsamplings=int(data.get("downsamplings", 3)),
+            seed=int(config["train"]["seed"]) + 200_000,
+        )
+    )
+    return SubgridMonitor(
+        dataset, device, out_dir / "diagnostics", config["stage"], cfg
+    )
+
+
 @torch.no_grad()
 def validate(model, loader, config, device, max_batches: int | None = None) -> float:
     model.eval()
@@ -335,6 +391,7 @@ def main() -> None:
         best = float(checkpoint.get("best_val", best))
 
     output = Path(config["train"]["out_dir"])
+    monitor = None
     if is_main():
         output.mkdir(parents=True, exist_ok=True)
         (output / "config_resolved.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
@@ -343,6 +400,12 @@ def main() -> None:
             f"parameters={sum(p.numel() for p in model.parameters()):,} device={device}",
             flush=True,
         )
+        # Built BEFORE the first epoch so a misconfigured cadence fails in
+        # seconds rather than after the first checkpoint would have been kept.
+        monitor = build_subgrid_monitor(config, device, output)
+        if monitor is not None:
+            monitor.validate_cadence(keep_every(config))
+            print(f"[sampled validation] {monitor.describe()}", flush=True)
 
     for epoch in range(start_epoch, epochs):
         if sampler is not None:
@@ -407,13 +470,21 @@ def main() -> None:
                 "config": config,
                 "subgrid_encoding": encoding_metadata(train_dataset.encoding),
             }
+            # Sample WHILE the EMA weights are still loaded, so the picture and
+            # the checkpoint written below come from the same parameters.  A
+            # diagnostic drawn from the online weights would not describe
+            # anything that ever gets saved.
+            if monitor is not None and monitor.should_run(epoch):
+                monitor.run(
+                    model, epoch, weights="ema" if ema is not None else "model"
+                )
             if online is not None:
                 model.load_state_dict(online)
             atomic_save(payload, output / "last.pt")
             if val < best:
                 best = val
                 atomic_save(payload, output / "best.pt")
-            if (epoch + 1) % int(config["train"].get("ckpt_every", 5)) == 0:
+            if (epoch + 1) % keep_every(config) == 0:
                 atomic_save(payload, output / f"epoch_{epoch + 1:04d}.pt")
             print(
                 f"epoch {epoch + 1:4d}/{epochs} "

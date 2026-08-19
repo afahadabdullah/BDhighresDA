@@ -61,7 +61,12 @@ model:
 
 train:
   out_dir: runs/v7/meso
-  epochs: 150
+  # 400, matching stage B, so the two branches are comparable epoch for epoch.
+  # The cosine schedule stretches with it, so this is a genuinely longer decay
+  # rather than v2's 150-epoch schedule with a tail bolted on.  best.pt is
+  # selected on the sampled monitor below, so a run that plateaus early costs
+  # queue time, not quality.
+  epochs: 400
   batch_size: 32
   lr: 1.5e-4
   weight_decay: 0.01
@@ -89,17 +94,26 @@ train:
     crop_quantile: 0.95
     crop_tries: 8
 
+# Sampled validation: the actual sampler on held-out days, not the flow-matching
+# loss.  `every: 10` matches train.keep_every, so every kept checkpoint has a
+# picture beside it and the epoch numbers on the two line up.
+#
+# Two cases rather than v2's fifteen, at 50 steps and 4 members: the point here
+# is a cheap per-checkpoint pulse, and 2 x 4 x 50 x 2 = 800 forward passes is
+# roughly a fortieth of what v2's 15 x 8 x 30 cost.  Quantile 0.50 is a typical
+# monsoon day and 0.99 is the tail -- the pair that matters, because V5 looked
+# fine in the middle of the distribution and lost 40 percent of the amplitude at
+# the top.  Deeper scoring belongs in scripts/58 and 64 after the run, on the
+# checkpoint this picks.
 validation:
   enabled: true
   start_epoch: 10
-  every: 5
-  members: 8
-  n_steps: 30
+  every: 10
+  members: 4
+  n_steps: 50
   cfg_scale: 1.0
   month: 7
-  quantiles:
-    [0.01, 0.08, 0.15, 0.22, 0.29, 0.36, 0.43, 0.50, 0.57, 0.64,
-     0.71, 0.78, 0.85, 0.92, 0.99]
-  max_cases: 15
-  max_map_cases: 4
+  quantiles: [0.50, 0.99]
+  max_cases: 2
+  max_map_cases: 2
   save_maps: true

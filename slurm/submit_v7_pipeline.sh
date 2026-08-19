@@ -28,7 +28,7 @@ V7_RUN_TESTS="${V7_RUN_TESTS:-1}"
 for required in \
     scripts/71_v7_coarsen_pack_archive.py scripts/06_compute_stats.py scripts/train.py \
     scripts/56_build_chirps_subgrid_targets.py scripts/57_train_subgrid_oracle.py \
-    slurm/v7_prepare_meso.sbatch slurm/train_h100.sbatch \
+    slurm/v7_prepare_meso.sbatch "${V7_MESO_SBATCH:-slurm/train_h100.sbatch}" \
     slurm/v7_prepare.sbatch slurm/v7_train.sbatch \
     "$MESO_CFG" "$ALLOC_CFG"; do
     [[ -f "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
@@ -43,6 +43,22 @@ meso_stats="$(awk '$1 == "stats:" {print $2; exit}' "$MESO_CFG")"
     echo "ERROR: $MESO_CFG reads $meso_store, not $V7_MESO_ARCHIVE" >&2; exit 1; }
 [[ "$meso_stats" == "$V7_MESO_STATS" ]] || {
     echo "ERROR: $MESO_CFG uses $meso_stats, not $V7_MESO_STATS" >&2; exit 1; }
+
+# Stage A reuses the CPCv2 launcher, and the ONLY thing that points it at V7 is
+# the CONFIG environment variable.  A launcher that pins its config instead would
+# accept the submission, ignore CONFIG, and quietly retrain CPCv2 at 0.05 degrees
+# for 150 epochs -- with V7's job name on it.  There is no later symptom, so the
+# check has to happen here.
+MESO_SBATCH="${V7_MESO_SBATCH:-slurm/train_h100.sbatch}"
+grep -qE '\$\{?CONFIG' "$MESO_SBATCH" || {
+    echo "ERROR: $MESO_SBATCH never reads \$CONFIG, so it would ignore $MESO_CFG" >&2
+    echo "Point V7_MESO_SBATCH at the launcher CPCv2 actually used." >&2
+    exit 1
+}
+# Every other V7 job asserts aarch64 and runs on the Grace partition.  A launcher
+# named for H100s is worth naming out loud rather than discovering in the queue.
+meso_partition="$(awk -F= '/^#SBATCH --partition/ {print $2; exit}' "$MESO_SBATCH")"
+echo "  stage A launcher: $MESO_SBATCH  (partition ${meso_partition:-unset})"
 
 alloc_store="$(awk '$1 == "zarr:" {print $2; exit}' "$ALLOC_CFG")"
 alloc_factor="$(awk '$1 == "factor:" {print $2; exit}' "$ALLOC_CFG")"
@@ -69,7 +85,7 @@ meso="$(CONFIG="$MESO_CFG" \
     TRAIN_PREFLIGHT_REPORT="data/processed/training_preflight_v7_meso.json" \
     sbatch --parsable --job-name=bdhires-v7-meso \
         --dependency="afterok:${prep_a}" --kill-on-invalid-dep=yes \
-        --export=ALL "$@" slurm/train_h100.sbatch)"
+        --export=ALL "$@" "$MESO_SBATCH")"
 echo "submitted meso:         $meso (afterok:$prep_a)"
 
 prep_b="$(sbatch --parsable "${dependency[@]}" --export=ALL "$@" slurm/v7_prepare.sbatch)"
