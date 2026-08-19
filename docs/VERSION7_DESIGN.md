@@ -61,7 +61,7 @@ stage B so the posterior is not over-tightened.
 Not a re-derivation. `04_regrid_and_pack.py` already places CHIRPS
 (nearest-selected), CPC (**bilinear, with an explicit coverage field and missing
 values renormalised over the available weights**) and ERA5 (bilinear) on one
-common grid, and every choice in it has been exercised. `71_coarsen_pack_archive.py`
+common grid, and every choice in it has been exercised. `71_v7_coarsen_pack_archive.py`
 takes that output and reduces it by an exact area-weighted factor of 2 —
 0.05 → 0.1 is a whole factor on the same lattice, so nothing is interpolated and
 nothing is invented. Array names, channel order and the attribute block survive,
@@ -103,7 +103,7 @@ once that exists, rather than leaving it at a guess.
 
 | stage | archive | built by | grid |
 |---|---|---|---|
-| A | `bd_wide_cpc_0p1.zarr` | `71_coarsen_pack_archive.py` from the v2 pack | `WIDE` 256² → **128² @ 0.1°** |
+| A | `bd_wide_cpc_0p1.zarr` | `71_v7_coarsen_pack_archive.py` from the v2 pack | `WIDE` 256² → **128² @ 0.1°** |
 | B | `v7/wide_v7.zarr` | `56_build_chirps_subgrid_targets.py --factor 2 --coarse-res 0.1` | `WIDE_CPC` 240² @ 0.05°, coarse **120² @ 0.1°** |
 
 **These nest exactly.** Both grids share the origin (84.0 E, 16.0 N) and the

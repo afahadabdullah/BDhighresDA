@@ -26,7 +26,7 @@ export V7_COARSE_RES="${V7_COARSE_RES:-0.1}"
 V7_RUN_TESTS="${V7_RUN_TESTS:-1}"
 
 for required in \
-    scripts/71_coarsen_pack_archive.py scripts/06_compute_stats.py scripts/train.py \
+    scripts/71_v7_coarsen_pack_archive.py scripts/06_compute_stats.py scripts/train.py \
     scripts/56_build_chirps_subgrid_targets.py scripts/57_train_subgrid_oracle.py \
     slurm/v7_prepare_meso.sbatch slurm/train_h100.sbatch \
     slurm/v7_prepare.sbatch slurm/v7_train.sbatch \

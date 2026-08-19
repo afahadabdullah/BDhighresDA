@@ -82,6 +82,25 @@ assert target.attrs.get("schema") == SUBGRID_SCHEMA, (
 )
 target_encoding = dict(target.attrs["subgrid_encoding"])
 
+# Tiled validation covers the domain with non-overlapping crops, so the crop has
+# to divide it.  The dataset enforces this, but only once the training job has
+# started and loaded data -- by which point the archive build and the queue wait
+# are already spent.  Check it here, in seconds, instead.
+crop = int(cfg["data"]["crop"])
+height, width = target["fine_mm"].shape[-2:]
+for name, extent in (("height", height), ("width", width)):
+    assert extent % crop == 0, (
+        f"crop {crop} does not divide the domain {name} {extent}; tiled validation "
+        "would overlap and weight some cells twice"
+    )
+levels = len(
+    cfg["model"].get("channel_mult", cfg["model"].get("allocation", {}).get("channel_mult", [1]))
+) - 1
+side = crop if cfg["stage"] != "coarse" else crop // int(cfg["data"].get("factor", 2))
+assert side % 2**levels == 0, (
+    f"stage {cfg['stage']} runs at {side} cells, which does not survive {levels} downsamplings"
+)
+
 output = Path(output_path)
 last = output / "last.pt"
 if last.exists():

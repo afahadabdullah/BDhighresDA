@@ -13,7 +13,10 @@
 stage: allocation
 data:
   zarr: data/processed/v7/wide_v7.zarr
-  crop: 160
+  # 120 divides the 240-cell domain, which tiled validation requires -- an
+  # overlapping tile would weight some cells twice, so the dataset refuses it.
+  # It also survives three downsamplings (120/8 = 15).
+  crop: 120
   factor: 2
   downsamplings: 3
   years:
@@ -23,7 +26,7 @@ model:
   base_channels: 64
   channel_mult: [1, 2, 3, 4]
   num_res_blocks: 2
-  attn_resolutions: [20, 40]
+  attn_resolutions: [30, 60]
   dropout: 0.15
   num_heads: 4
 train:

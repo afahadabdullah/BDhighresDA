@@ -1882,6 +1882,19 @@ def test_v7_stage_b_is_the_factor_two_allocation_branch():
     levels = len(config["model"]["channel_mult"]) - 1
     assert data["crop"] % 2**levels == 0
     assert "init_coarse" not in config["train"], "V7 has no coupled joint stage"
+    # Tiled validation covers the domain with non-overlapping crops, so the crop
+    # must divide it.  A crop that merely satisfies the lattice rule is not
+    # enough, and the dataset only discovers that after the job has started.
+    from bdhires.grids import WIDE_CPC
+
+    for extent in WIDE_CPC.shape:
+        assert extent % data["crop"] == 0, (
+            f"crop {data['crop']} does not divide the {extent}-cell domain; "
+            "tiled validation would weight some cells twice"
+        )
+    levels = [data["crop"] // 2**i for i in range(len(config["model"]["channel_mult"]))]
+    for resolution in config["model"]["attn_resolutions"]:
+        assert resolution in levels, f"attention at {resolution} has no U-Net level"
     # Conditioning augmentation is what lets stage B survive being run on
     # ANALYSED 0.1-degree fields rather than the clean ones it trains on.
     assert config["train"]["conditioning_augmentation"]["max_coarse_noise"] > 0.0
@@ -1898,7 +1911,7 @@ def test_v7_coarsened_archive_keeps_the_v2_layout():
     from pathlib import Path
 
     source = (
-        Path(__file__).resolve().parents[1] / "scripts/71_coarsen_pack_archive.py"
+        Path(__file__).resolve().parents[1] / "scripts/71_v7_coarsen_pack_archive.py"
     ).read_text()
     for name in ("time", "lat", "lon", "valid", "static", "target", "cond"):
         assert f'"{name}"' in source, f"the coarsened archive drops {name}"
@@ -1907,3 +1920,24 @@ def test_v7_coarsened_archive_keeps_the_v2_layout():
     assert "area_weighted_block_mean" in source, "coarsening must be area weighted"
     # Channel order is inherited rather than rebuilt.
     assert 'source.attrs["cond_channels"]' in source
+
+
+def test_v7_coarsener_uses_the_zarr_api_the_cluster_has():
+    """The cluster runs zarr 2; the container runs zarr 3.
+
+    ``create_array`` exists only on zarr 3, so a script that uses it passes every
+    local check and then dies on the compute node -- after the archive read and
+    the queue wait are already spent.  ``create_dataset`` with an explicit shape
+    works on both, and is what ``bdhires.zarr_output`` already uses, so there is
+    one convention rather than two.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/71_v7_coarsen_pack_archive.py"
+    ).read_text()
+    assert ".create_array(" not in source, "create_array is unavailable on zarr 2"
+    assert "group.create_dataset(name, **kwargs)" in source
+    # Shape and dtype must be explicit: zarr 3's create_dataset requires shape.
+    assert 'kwargs.setdefault("shape"' in source
+    assert 'kwargs.setdefault("dtype"' in source

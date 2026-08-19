@@ -35,17 +35,53 @@ OVERWRITE="${V7_COARSEN_OVERWRITE:-0}"
     exit 1
 }
 
+# Reuse only a COMPLETE archive.  A directory left behind by a failed run looks
+# exactly like a finished one to an existence test, and reusing it would train on
+# a half-written file -- so completeness is checked against the source rather than
+# against the filesystem.
+REUSABLE=0
 if [[ -d "$OUT" && "$OVERWRITE" != "1" ]]; then
-    echo "Reusing existing coarsened archive: $OUT"
-else
-    ARGS=(--in "$SOURCE" --out "$OUT" --factor "$FACTOR")
-    [[ "$OVERWRITE" == "1" ]] && ARGS+=(--overwrite)
-    "$PYTHON_BIN" -u scripts/71_coarsen_pack_archive.py "${ARGS[@]}"
+    REUSABLE="$("$PYTHON_BIN" - "$OUT" "$SOURCE" "$FACTOR" <<'PY'
+import sys
+import zarr
+
+try:
+    out = zarr.open_group(sys.argv[1], mode="r")
+    src = zarr.open_group(sys.argv[2], mode="r")
+    grid = dict(out.attrs["grid"])
+    ok = (
+        int(out.attrs.get("coarsen_factor", 0)) == int(sys.argv[3])
+        and out.attrs.get("coarsened_from") == sys.argv[2]
+        and list(out.attrs["cond_channels"]) == list(src.attrs["cond_channels"])
+        and out["time"].shape[0] == src["time"].shape[0]
+        and out["target"].shape[0] == src["target"].shape[0]
+        and tuple(out["target"].shape[-2:]) == (grid["nlat"], grid["nlon"])
+        and out["cond"].shape[0] == src["cond"].shape[0]
+    )
+    print("1" if ok else "0")
+except Exception:
+    print("0")
+PY
+)"
 fi
 
-# Statistics belong to the archive they were measured on.  Reusing the
-# 0.05-degree file here would normalise the model with the wrong moments.
-"$PYTHON_BIN" -u scripts/06_compute_stats.py --zarr "$OUT" --out "$STATS"
+if [[ "$REUSABLE" == "1" ]]; then
+    echo "Reusing complete coarsened archive: $OUT"
+else
+    if [[ -d "$OUT" ]]; then
+        echo "Existing $OUT is incomplete or does not match its source; rebuilding"
+    fi
+    "$PYTHON_BIN" -u scripts/71_v7_coarsen_pack_archive.py \
+        --in "$SOURCE" --out "$OUT" --factor "$FACTOR" --overwrite
+    # Statistics must never outlive the archive they were measured on.
+    rm -f "$STATS"
+fi
+
+if [[ -s "$STATS" ]]; then
+    echo "Reusing statistics: $STATS"
+else
+    "$PYTHON_BIN" -u scripts/06_compute_stats.py --zarr "$OUT" --out "$STATS"
+fi
 
 "$PYTHON_BIN" - "$OUT" "$STATS" "$FACTOR" <<'PY'
 import json
