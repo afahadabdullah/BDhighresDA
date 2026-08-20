@@ -565,13 +565,21 @@ def score_stations(ensemble_mm: np.ndarray, truth_mm: np.ndarray) -> dict:
     members = ensemble_mm[:, finite]
     observed = truth_mm[finite]
     mean = members.mean(axis=0)
+    rmse = float(np.sqrt(((mean - observed) ** 2).mean()))
+    spread = float(members.std(axis=0).mean())
     return {
         "stations": int(finite.sum()),
         "crps_mm": crps(members, observed),
         "mae_mm": float(np.abs(mean - observed).mean()),
         "bias_mm": float((mean - observed).mean()),
-        "rmse_mm": float(np.sqrt(((mean - observed) ** 2).mean())),
-        "spread_mm": float(members.std(axis=0).mean()),
+        "rmse_mm": rmse,
+        "spread_mm": spread,
+        # Spread-skill ratio. ~1 is calibrated, >1 over-dispersed, <1
+        # over-confident.  CRPS rewards sharpness, so an over-dispersed ensemble
+        # improves its CRPS simply by tightening -- which is what shrinking the
+        # observation error does.  Without this column that shows up as
+        # "smaller R is better" and gets mistaken for a statement about gauges.
+        "spread_skill": float(spread / rmse) if rmse > 0 else float("nan"),
     }
 
 
@@ -1252,7 +1260,8 @@ def main() -> None:
         entries = results["arms"][arm]["days"]
         results["arms"][arm]["mean"] = {
             key: float(np.nanmean([e["withheld"].get(key, np.nan) for e in entries]))
-            for key in ("crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm")
+            for key in ("crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm",
+                    "spread_skill")
         }
 
     # Named for the experiment it actually is.  A file called ..._osse.json
@@ -1458,11 +1467,16 @@ def report(results: dict, arms: list[str]) -> None:
            else "(REAL: actual BMD reports, assimilated and verified)")
     )
     print("=" * 78)
-    print(f"{'arm':<12} {'CRPS':>8} {'MAE':>8} {'bias':>8} {'RMSE':>8} {'spread':>8}")
+    print(f"{'arm':<16} {'CRPS':>8} {'MAE':>8} {'bias':>8} {'RMSE':>8} "
+          f"{'spread':>8} {'sprd/rmse':>10}")
     for arm in arms:
         m = results["arms"][arm]["mean"]
-        print(f"{arm:<12} {m['crps_mm']:8.3f} {m['mae_mm']:8.3f} "
-              f"{m['bias_mm']:+8.3f} {m['rmse_mm']:8.3f} {m['spread_mm']:8.3f}")
+        ratio = m.get("spread_skill", float("nan"))
+        flag = "" if 0.8 <= ratio <= 1.25 else ("  over" if ratio > 1.25 else "  under")
+        print(f"{arm:<16} {m['crps_mm']:8.3f} {m['mae_mm']:8.3f} "
+              f"{m['bias_mm']:+8.3f} {m['rmse_mm']:8.3f} {m['spread_mm']:8.3f} "
+              f"{ratio:10.2f}{flag}")
+    print("  spread/rmse ~1 is calibrated; >1 over-dispersed, <1 over-confident.")
 
     if "background" not in arms:
         return
@@ -1488,8 +1502,12 @@ def report(results: dict, arms: list[str]) -> None:
             marks = "   <- best" if sweep[arm] == floor else ""
             if abs(total - cpcv2) < 0.01:
                 marks += "   (CPCv2's tuned 0.10+0.25)"
+            mean = results["arms"][arm]["mean"]
             print(f"  total {total:5.3f}  CRPS {sweep[arm]:7.3f} mm"
-                  f"  ({100 * (sweep[arm] - floor) / floor:+5.1f}%){marks}")
+                  f"  ({100 * (sweep[arm] - floor) / floor:+5.1f}%)"
+                  f"  RMSE {mean['rmse_mm']:6.3f}  bias {mean['bias_mm']:+6.3f}"
+                  f"  sprd/rmse {mean.get('spread_skill', float('nan')):4.2f}"
+                  f"{marks}")
         best = min(sweep, key=sweep.get)
         values = list(results["arm_sigma"].values())
         if results["arm_sigma"][best] in (min(values), max(values)):
@@ -1498,6 +1516,23 @@ def report(results: dict, arms: list[str]) -> None:
         print("  One day of 11 withheld stations is a noisy objective; treat a "
               "difference under ~5% as unresolved.")
         # The caveat that matters more than the number.
+        # Which metric wins is the real question, and they often disagree.
+        for label, key, pick in (
+            ("CRPS", "crps_mm", min),
+            ("RMSE", "rmse_mm", min),
+            ("|bias|", "bias_mm", min),
+        ):
+            chosen = pick(
+                sweep,
+                key=lambda a: abs(results["arms"][a]["mean"][key])
+                if key == "bias_mm" else results["arms"][a]["mean"][key],
+            )
+            print(f"  best by {label:<7} total {results['arm_sigma'][chosen]:5.3f}")
+        print("  When these disagree, prefer bias and RMSE. CRPS rewards SHARPNESS,")
+        print("  so an over-dispersed analysis improves its CRPS merely by")
+        print("  tightening -- which is exactly what shrinking R does -- and that")
+        print("  is a spread-calibration problem being paid for with an")
+        print("  observation error that is physically wrong.")
         print("  CAUTION: assimilated and withheld gauges are the SAME instrument")
         print("  network. Any bias BMD shares against the model is corrected at")
         print("  both, so driving this error down improves withheld-gauge CRPS")

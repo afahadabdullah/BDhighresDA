@@ -2902,3 +2902,49 @@ def test_v7_osse_lag_check_finds_a_planted_day_shift():
             assert r > 0.99, "a zero shift must correlate perfectly"
         else:
             assert r < 0.5, f"a {offset:+d} day shift should decorrelate"
+
+
+def test_v7_osse_reports_spread_skill_so_sharpness_is_not_mistaken_for_skill():
+    """CRPS rewards sharpness, so shrinking R always looks like an improvement.
+
+    An over-dispersed analysis lowers its CRPS merely by tightening, and
+    tightening is exactly what a smaller observation error does.  Read alone,
+    that reads as "the gauges deserve more trust" when it is really a
+    spread-calibration problem.  The spread/RMSE ratio is what separates the
+    two, so it is computed, reported and stored rather than left implicit.
+    """
+    import numpy as np
+
+    module = _osse_module()
+
+    truth = np.array([10.0, 20.0, 5.0, 30.0], np.float32)
+    # Same ensemble mean error, very different spread.
+    tight = np.repeat(truth[None] + 2.0, 8, axis=0) + np.linspace(
+        -0.2, 0.2, 8
+    )[:, None].astype(np.float32)
+    wide = np.repeat(truth[None] + 2.0, 8, axis=0) + np.linspace(
+        -12.0, 12.0, 8
+    )[:, None].astype(np.float32)
+
+    tight_score = module.score_stations(tight, truth)
+    wide_score = module.score_stations(wide, truth)
+
+    for score in (tight_score, wide_score):
+        assert "spread_skill" in score, "the calibration diagnostic is missing"
+    # Same mean, so the same RMSE and bias -- only the spread differs.
+    assert tight_score["rmse_mm"] == pytest.approx(wide_score["rmse_mm"], rel=1e-6)
+    assert tight_score["bias_mm"] == pytest.approx(wide_score["bias_mm"], rel=1e-6)
+    assert wide_score["spread_skill"] > tight_score["spread_skill"]
+    # And the wide one is flagged as over-dispersed while the tight one is not.
+    assert wide_score["spread_skill"] > 1.25
+    assert tight_score["spread_skill"] < 1.25
+
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+    # The sweep must say which metric it optimised, because they disagree.
+    assert "best by " in source
+    assert "prefer bias and RMSE" in source
+    assert "over-dispersed" in source
