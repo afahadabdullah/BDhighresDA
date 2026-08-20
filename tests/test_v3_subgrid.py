@@ -2321,3 +2321,215 @@ def test_v7_stage_a_statistics_use_the_cpcv2_recipe():
         "the residual base index must be read from the archive"
     )
     assert "--residual-base-index 6" not in meso, "the index is hardcoded again"
+
+
+# --------------------------------------------------------------------------
+# V7 two-stage OSSE diagnostic
+# --------------------------------------------------------------------------
+
+
+def test_v7_window_nests_the_two_stages_over_bangladesh():
+    """The stages meet by cropping, never by regridding -- and cover the country.
+
+    Stage A trains at 64 cells of 0.1 degree and stage B at 120 cells of 0.05,
+    which are NOT the same window.  A convolutional U-Net accepts either size
+    silently and simply stops applying attention when the level sizes no longer
+    match attn_resolutions, so running one stage at the other's size is a
+    different model wearing the same weights.  Each therefore runs at its own
+    size and the windows nest -- which only works because both 0.1-degree grids
+    share an origin and a lattice.
+    """
+    from bdhires.eval.v7_window import (
+        BANGLADESH_LAT,
+        BANGLADESH_LON,
+        bangladesh_window,
+    )
+
+    window = bangladesh_window()
+
+    # A stage B fine index is exactly twice its coarse index: no interpolation.
+    assert window.fine_origin == tuple(2 * o for o in window.coarse_origin)
+    assert window.fine_size == 2 * window.coarse_size
+
+    # Stage B's coarse window lies wholly inside stage A's output.
+    row, column = window.meso_local
+    assert row >= 0 and column >= 0, "a negative offset slices from the wrong end"
+    assert row + window.coarse_size <= window.meso_size
+    assert column + window.coarse_size <= window.meso_size
+
+    # And the product actually covers Bangladesh.
+    grid = window.fine_grid()
+    assert grid.lon_min <= BANGLADESH_LON[0]
+    assert grid.lon_min + grid.nlon * grid.res >= BANGLADESH_LON[1]
+    assert grid.lat_min <= BANGLADESH_LAT[0]
+    assert grid.lat_min + grid.nlat * grid.res >= BANGLADESH_LAT[1]
+
+
+def test_v7_window_refuses_a_crop_too_small_for_the_country():
+    """Silently clipping Bangladesh would be the worst possible failure."""
+    from bdhires.eval.v7_window import bangladesh_window
+
+    with pytest.raises(ValueError, match="cannot cover|does not cover"):
+        bangladesh_window(meso_size=64, fine_size=40)   # 2.0 deg, far too small
+    with pytest.raises(ValueError, match="cannot be composed"):
+        bangladesh_window(meso_size=16, fine_size=120)  # stage A too small to feed B
+
+
+def _osse_module():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    spec = importlib.util.spec_from_file_location("v7_osse", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_v7_osse_coarse_context_round_trips_through_the_decoder():
+    """Stage B must receive the encoding it was TRAINED on, not raw millimetres.
+
+    The allocation branch reads the archive's stored ``coarse_state``: channel 0
+    a standardised square root, channel 1 a dequantised binary logit -- not a
+    +/-1 flag.  Handing it mm/day, or a hand-rolled occurrence channel, is a
+    domain shift that no shape check catches and that would show up only as
+    inexplicably poor samples.  Decoding what we build must return what we
+    started from.
+    """
+    from bdhires.data import SubgridEncoding, decode_coarse_amount
+
+    module = _osse_module()
+    encoding = SubgridEncoding(
+        factor=2, amount_sqrt_mean=1.0, amount_sqrt_std=1.0,
+        intensity_log_mean=0.0, intensity_log_std=0.5, smooth_base_iterations=2,
+    )
+    rng = np.random.default_rng(0)
+    mm = torch.from_numpy(np.abs(rng.gamma(2.0, 3.0, (4, 1, 8, 8))).astype(np.float32))
+    mm[mm < 0.5] = 0.0                      # genuinely dry cells, so the gate matters
+
+    generator = torch.Generator(device="cpu").manual_seed(7)
+    context = module.coarse_context_of(mm, encoding, generator)
+    assert context.shape == (4, 2, 8, 8)
+
+    recovered = decode_coarse_amount(
+        context, torch.ones_like(mm, dtype=torch.bool), encoding, hard=True
+    )
+    assert torch.allclose(recovered, mm, atol=1.0e-4), (
+        "the coarse context stage B receives does not decode to stage A's analysis"
+    )
+
+
+def test_v7_osse_allocation_sampling_conserves_with_and_without_guidance():
+    """Guidance may redistribute inside a block; it may not change the total.
+
+    Conservation to the analysed 0.1-degree field is what bounds the gauge
+    increment to 11 km, and that bound is the entire reason V7 might succeed
+    where V5 failed.  If guidance broke conservation the experiment would be
+    measuring something else.
+    """
+    from bdhires.da import BilinearObsOperator, GuidanceConfig, build_R
+    from bdhires.data import SubgridEncoding, area_weighted_block_mean
+    from bdhires.grids import Grid
+
+    module = _osse_module()
+    torch.manual_seed(0)
+    encoding = SubgridEncoding(
+        factor=2, amount_sqrt_mean=1.0, amount_sqrt_std=1.0,
+        intensity_log_mean=0.0, intensity_log_std=0.5, smooth_base_iterations=2,
+    )
+    members, size = 3, 40
+    model = AllocationFlow(
+        3, image_size=size, base_channels=8, channel_mult=(1, 2),
+        num_res_blocks=1, attn_resolutions=(20,), num_heads=1,
+    ).eval()
+    rng = np.random.default_rng(1)
+    coarse = torch.from_numpy(
+        np.abs(rng.gamma(2.0, 3.0, (members, 1, size // 2, size // 2))).astype(np.float32)
+    )
+    cond = torch.randn(members, 3, size, size)
+    valid = torch.ones(members, 1, size, size, dtype=torch.bool)
+    area = torch.ones(members, 1, size, size)
+
+    def run(observation):
+        generator = torch.Generator().manual_seed(3)
+        return module.allocation_sample(
+            model, coarse, cond, valid, area, encoding, 4, generator,
+            observation=observation,
+            gcfg=GuidanceConfig(gamma=1e-3, clip_norm=50.0, huber_delta=3.0),
+        )
+
+    grid = Grid(name="t", lon_min=88.0, lat_min=21.0, nlon=size, nlat=size, res=0.05)
+    operator = BilinearObsOperator(
+        grid, np.array([21.5, 22.0, 22.5]), np.array([88.5, 89.0, 89.5])
+    )
+    observation = {
+        "H": operator,
+        "y": torch.full((members, 1, 3), 40.0),   # demand far more than the prior gives
+        "R": build_R(3, 0.5, representativeness=0.0),
+    }
+
+    plain = run(None)
+    guided = run(observation)
+
+    for label, field in (("unguided", plain), ("guided", guided)):
+        assert torch.isfinite(field).all(), f"{label} sampling produced non-finite values"
+        block, _, _ = area_weighted_block_mean(field, area, valid, 2, 0.0)
+        assert (block - coarse).abs().max() < 1.0e-4, (
+            f"{label} sampling broke conservation to the 0.1-degree field"
+        )
+
+    # Guidance has to actually do something, and in the right direction.
+    with torch.no_grad():
+        before = operator(plain)[:, 0].mean().item()
+        after = operator(guided)[:, 0].mean().item()
+    assert after > before, "guidance did not move the field toward the observations"
+
+
+def test_v7_osse_arms_are_declared_consistently():
+    """Every arm must have a note, and the four must be distinct settings.
+
+    Script 60 shipped a run where the arm list and its description table had
+    drifted apart, and the check fired only AFTER all the sampling was done.
+    """
+    module = _osse_module()
+    assert set(module.ARMS) == set(module.ARM_NOTES)
+    assert module.ARMS["background"] == (False, False)
+    assert module.ARMS["da_both"] == (True, True)
+    # The two single-stage arms are what make a degradation attributable.
+    assert module.ARMS["da_meso"] != module.ARMS["da_fine"]
+    assert len(set(module.ARMS.values())) == len(module.ARMS)
+
+
+def test_v7_osse_crps_is_ensemble_size_fair():
+    """An (m-1)-corrected CRPS, so changing --members is not a change of skill."""
+    module = _osse_module()
+    truth = np.array([1.0, 5.0, 0.0])
+    assert module.crps(np.tile(truth, (4, 1)), truth) == pytest.approx(0.0)
+    assert module.crps(np.tile(truth + 1.0, (4, 1)), truth) == pytest.approx(1.0)
+    # A wider ensemble around the truth must not look better than a tight one.
+    rng = np.random.default_rng(0)
+    tight = truth[None] + rng.normal(0, 0.1, (32, 3))
+    wide = truth[None] + rng.normal(0, 3.0, (32, 3))
+    assert module.crps(tight, truth) < module.crps(wide, truth)
+
+
+def test_v7_osse_slurm_job_never_writes_into_a_live_run_directory():
+    """The diagnostic runs against training that is still going.
+
+    Anything it wrote into runs/v7/*/ could collide with the trainer's own
+    checkpointing.  It reads best.pt and writes only under --out.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sbatch = (root / "slurm/v7_osse_diagnostic.sbatch").read_text()
+    source = (root / "scripts/72_v7_two_stage_osse.py").read_text()
+
+    assert "--partition=grace" in sbatch and "--gres=gpu:1" in sbatch
+    # Checkpoints are copied before use, not read in place.
+    assert "shutil.copy2" in source, "the checkpoints are not snapshotted"
+    assert "_frozen.pt" in source
+    # No write path anywhere near the run directories.
+    for forbidden in ('"runs/v7/meso/last', "runs/v7/allocation/last", "best.pt.part"):
+        assert forbidden not in source
+    assert 'out_dir.mkdir' in source
