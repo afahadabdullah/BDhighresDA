@@ -71,21 +71,22 @@ CPCV2_CKPT="${V7_COMPARE_CPCV2_CKPT:-runs/prior_h100_cpc_v2/best.pt}"
 CPCV2_CONFIG="${V7_COMPARE_CPCV2_CONFIG:-configs/da.yaml}"
 # CPCv2's frozen simultaneous winner used S04 (factor 8 = 0.4 degrees), not
 # V7's native 0.1-degree stream.  Keep each model's winning observation setup.
-CPCV2_IMERG="${V7_COMPARE_CPCV2_IMERG:-}"
-if [[ "$CPCV2_IMERG" == /path/to/* ]]; then
-    echo "WARNING: ignoring placeholder CPCv2 IMERG path: $CPCV2_IMERG" >&2
-    CPCV2_IMERG=""
+CPCV2_IMERG_SOURCE="${V7_COMPARE_CPCV2_IMERG:-}"
+if [[ "$CPCV2_IMERG_SOURCE" == /path/to/* ]]; then
+    echo "WARNING: ignoring placeholder CPCv2 IMERG path: $CPCV2_IMERG_SOURCE" >&2
+    CPCV2_IMERG_SOURCE=""
 fi
-CPCV2_IMERG="${CPCV2_IMERG:-$IMERG_PREP_DIR/imerg_0p4deg_20220501_20220510.nc}"
+CPCV2_IMERG_SOURCE="${CPCV2_IMERG_SOURCE:-$IMERG_PREP_DIR/imerg_0p4deg_20220501_20220510.nc}"
 
 BMD_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 
 for required in "$MESO_CKPT" "$ALLOC_CKPT" "$MESO_ARCHIVE" "$MESO_STATS" \
                 "$SUBGRID" "$V7_IMERG" "$CPCV2_CKPT" "$CPCV2_CONFIG" \
-                "$CPCV2_IMERG" "$CATALOG" \
+                "$CPCV2_IMERG_SOURCE" "$CATALOG" \
                 scripts/05_convert_bmd_dir.py scripts/28_simultaneous_method_sweep.py \
-                scripts/72_v7_two_stage_osse.py scripts/73_compare_v7_cpcv2_day.py; do
+                scripts/43_subset_prepared_imerg.py scripts/72_v7_two_stage_osse.py \
+                scripts/73_compare_v7_cpcv2_day.py; do
     [[ -f "$required" || -d "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
 [[ -d "$BMD_DIR" ]] || { echo "ERROR: missing BMD directory $BMD_DIR" >&2; exit 1; }
@@ -100,7 +101,20 @@ next_day() {
 # observation day C+1 plus --background-day-offset -1.
 CPCV2_DAY="$(next_day "$START")"
 
-mkdir -p "$OUT/checkpoints"
+# CPCv2 deliberately requires the source time axis to be exactly the requested
+# checkpoint day.  Its standard S04 product is 1--10 May, so cut it here rather
+# than weakening that alignment check or accidentally using ten analysis days.
+CPCV2_DAY_CLEAN="${CPCV2_DAY//-/}"
+mkdir -p "$OUT/checkpoints" "$OUT/imerg"
+CPCV2_IMERG="$OUT/imerg/imerg_0p4deg_${CPCV2_DAY_CLEAN}_${CPCV2_DAY_CLEAN}.nc"
+if [[ ! -s "$CPCV2_IMERG" ]]; then
+    "$PYTHON_BIN" -u scripts/43_subset_prepared_imerg.py \
+        --input "$CPCV2_IMERG_SOURCE" \
+        --start "$CPCV2_DAY" --end "$CPCV2_DAY" \
+        --out "$CPCV2_IMERG" \
+        --report "${CPCV2_IMERG%.nc}_qc.json"
+fi
+
 DAILY="$OUT/bmd_daily.csv"
 if [[ ! -s "$DAILY" ]]; then
     "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
