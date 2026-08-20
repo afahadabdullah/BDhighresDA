@@ -17,7 +17,10 @@ COMPARISON = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COMPARISON)
 
 
-def write_matched_dumps(tmp_path: Path, *, changed_observation: bool = False):
+def write_matched_dumps(
+    tmp_path: Path, *, changed_observation: bool = False,
+    extra_v7_simultaneous: bool = False,
+):
     """Create matching dumps with deliberately different station ordering."""
     v7_path = tmp_path / "v7.npz"
     cpc_path = tmp_path / "cpcv2.npz"
@@ -36,6 +39,13 @@ def write_matched_dumps(tmp_path: Path, *, changed_observation: bool = False):
         observed_mm=observations,
         station_da_meso=v7_base,
         station_da_sim=v7_base + 0.05,
+        **(
+            {
+                "station_da_sim_r27": v7_base + 0.10,
+                "station_da_sim_r81": v7_base + 0.15,
+            }
+            if extra_v7_simultaneous else {}
+        ),
     )
     cpc_observed = observations[:, [2, 1, 0]].copy()
     if changed_observation:
@@ -73,6 +83,19 @@ def test_comparison_refuses_different_bmd_values(tmp_path):
     v7_path, cpc_path = write_matched_dumps(tmp_path, changed_observation=True)
     with pytest.raises(ValueError, match="BMD values differ"):
         COMPARISON.compare_dumps(v7_path, cpc_path)
+
+
+def test_comparison_scores_optional_v7_r_sweep_against_same_cpc_arm(tmp_path):
+    v7_path, cpc_path = write_matched_dumps(tmp_path, extra_v7_simultaneous=True)
+    report = COMPARISON.compare_dumps(v7_path, cpc_path)
+
+    assert list(report["comparisons"]) == [
+        "gauges_only", "simultaneous", "simultaneous_r27", "simultaneous_r81"
+    ]
+    assert report["comparisons"]["simultaneous_r27"]["v7_arm"] == "da_sim_r27"
+    assert report["comparisons"]["simultaneous_r27"]["cpcv2_arm"] == (
+        "v2_simul_s04_ig010"
+    )
 
 
 def test_cpcv2_comparison_group_contains_only_the_two_selected_winners():

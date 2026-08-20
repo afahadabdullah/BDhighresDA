@@ -899,6 +899,12 @@ def main() -> None:
         # L^2 cells per independent datum, floored at 1 (no inflation when the
         # error really is white).
         args.imerg_r_multiplier = max(1.0, float(args.imerg_error_corr_cells) ** 2)
+    # Put the unsuffixed simultaneous arm into the same reporting axis as any
+    # additional R-sweep arms.  This is metadata only: its likelihood already
+    # uses args.imerg_r_multiplier below.  Without it a 9/27/81 experiment
+    # prints only 27 and 81 in the sweep table and hides its control.
+    if args.imerg_r_sweep and "da_sim" in arms:
+        arm_imerg_r["da_sim"] = float(args.imerg_r_multiplier)
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
@@ -1930,8 +1936,8 @@ def report(results: dict, arms: list[str]) -> None:
         if axis[best] in (min(values), max(values)):
             print("    The CRPS optimum sits at the EDGE of the swept range; the "
                   "true minimum is outside it.")
-        print("    One day of 11 withheld stations cannot resolve a difference "
-              "under ~5%.")
+        print("    Treat small CRPS differences over this limited withheld sample "
+              "as unresolved without paired uncertainty analysis.")
 
     sweep_table(
         "arm_imerg_r",
@@ -1963,8 +1969,8 @@ def report(results: dict, arms: list[str]) -> None:
         if results["arm_sigma"][best] in (min(values), max(values)):
             print("  The optimum sits at the EDGE of the swept range, so the true "
                   "minimum is outside it -- widen the sweep before concluding.")
-        print("  One day of 11 withheld stations is a noisy objective; treat a "
-              "difference under ~5% as unresolved.")
+        print("  Treat small CRPS differences over this limited withheld sample as "
+              "unresolved without paired uncertainty analysis.")
         # The caveat that matters more than the number.
         # Which metric wins is the real question, and they often disagree.
         for label, key, pick in (

@@ -11,6 +11,11 @@ two like-for-like rows:
 * simultaneous: V7 ``da_sim`` at the selected IMERG R multiplier 9 vs CPCv2
   ``v2_simul_s04_ig010``.
 
+When the V7 dump also contains ``da_sim_r*`` calibration arms, each is scored
+against that same CPCv2 simultaneous ensemble.  This keeps dates, observations,
+members, and random draw fixed while testing only V7's satellite likelihood
+weight.
+
 The CPCv2 runner writes ``gauge_mm``; the V7 diagnostic writes ``observed_mm``
 when called with ``--station-dump``.  This program refuses to compare summary
 numbers alone: it verifies the raw observations and selected holdout IDs first.
@@ -29,6 +34,20 @@ COMPARISONS = {
     "gauges_only": ("da_meso", "guided_s6_g010_t100"),
     "simultaneous": ("da_sim", "v2_simul_s04_ig010"),
 }
+
+
+def _available_comparisons(v7: np.lib.npyio.NpzFile) -> dict[str, tuple[str, str]]:
+    """Base winners plus any optional V7 simultaneous R-calibration arms."""
+    comparisons = dict(COMPARISONS)
+    prefix = "station_da_sim_r"
+    arms = sorted(
+        (key[len("station_"):] for key in v7.files if key.startswith(prefix)),
+        key=lambda arm: float(arm.removeprefix("da_sim_r")),
+    )
+    for arm in arms:
+        suffix = arm.removeprefix("da_sim_")
+        comparisons[f"simultaneous_{suffix}"] = (arm, "v2_simul_s04_ig010")
+    return comparisons
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,7 +119,10 @@ def _align_cpc_to_v7(
     cpc: np.lib.npyio.NpzFile,
     v7_path: Path,
     cpc_path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    dict[str, np.ndarray], dict[str, tuple[str, str]],
+]:
     _required(
         v7, v7_path, "times", "model_times", "station_ids", "station_lat",
         "station_lon", "eval_idx", "observed_mm",
@@ -163,8 +185,9 @@ def _align_cpc_to_v7(
             f"(same finite mask={same_finite}, max |difference|={maximum:g} mm)"
         )
 
+    comparisons = _available_comparisons(v7)
     members: dict[str, np.ndarray] = {}
-    for label, (v7_arm, cpc_arm) in COMPARISONS.items():
+    for label, (v7_arm, cpc_arm) in comparisons.items():
         v7_key, cpc_key = f"station_{v7_arm}", f"station_{cpc_arm}"
         _required(v7, v7_path, v7_key)
         _required(cpc, cpc_path, cpc_key)
@@ -182,17 +205,17 @@ def _align_cpc_to_v7(
         members[f"v7_{label}"] = v7_members
         members[f"cpcv2_{label}"] = cpc_members
 
-    return v7_times, v7_ids, eval_idx, observed, members
+    return v7_times, v7_ids, eval_idx, observed, members, comparisons
 
 
 def compare_dumps(v7_path: Path, cpc_path: Path) -> dict:
     """Load, audit, and score the two raw outputs on identical station-days."""
     with np.load(v7_path, allow_pickle=False) as v7, np.load(cpc_path, allow_pickle=False) as cpc:
-        times, ids, eval_idx, observed, members = _align_cpc_to_v7(
+        times, ids, eval_idx, observed, members, comparisons = _align_cpc_to_v7(
             v7, cpc, v7_path, cpc_path
         )
         results: dict[str, dict] = {}
-        for label in COMPARISONS:
+        for label in comparisons:
             v7_score = score(members[f"v7_{label}"][:, :, eval_idx], observed[:, eval_idx])
             cpc_score = score(
                 members[f"cpcv2_{label}"][:, :, eval_idx], observed[:, eval_idx]
@@ -211,8 +234,8 @@ def compare_dumps(v7_path: Path, cpc_path: Path) -> dict:
             }
             delta["mean_paired_crps_mm"] = float(np.mean(v7_crps - cpc_crps))
             results[label] = {
-                "v7_arm": COMPARISONS[label][0],
-                "cpcv2_arm": COMPARISONS[label][1],
+                "v7_arm": comparisons[label][0],
+                "cpcv2_arm": comparisons[label][1],
                 "v7": v7_score,
                 "cpcv2": cpc_score,
                 "v7_minus_cpcv2": delta,
