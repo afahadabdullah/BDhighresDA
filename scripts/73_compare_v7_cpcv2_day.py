@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the matched one-day V7 and CPCv2 DA analyses at BMD gauges.
+"""Compare matched-window V7 and CPCv2 DA analyses at BMD gauges.
 
 The two model families have different checkpoints and different satellite
 footprint resolutions, but this comparison locks everything that can otherwise
@@ -236,7 +236,7 @@ def compare_dumps(v7_path: Path, cpc_path: Path) -> dict:
                 "station pool, and withheld IDs verified"
             ),
             "caveat": (
-                "This is one matched day, not a significance test. V7 uses its "
+                "This is a matched evaluation window, not a significance test. V7 uses its "
                 "native 0.1-degree IMERG stage-A stream, while CPCv2 retains its "
                 "frozen winning S04 (0.4-degree) stream."
             ),
@@ -247,7 +247,7 @@ def compare_dumps(v7_path: Path, cpc_path: Path) -> dict:
 
 def markdown(report: dict) -> str:
     lines = [
-        "# Matched one-day V7 vs CPCv2 comparison",
+        "# Matched-window V7 vs CPCv2 comparison",
         "",
         report["scope"]["audit"] + ".",
         "",

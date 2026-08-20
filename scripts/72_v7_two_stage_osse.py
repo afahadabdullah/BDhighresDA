@@ -666,6 +666,15 @@ def parse_args() -> argparse.Namespace:
             "different model without reselecting stations."
         ),
     )
+    p.add_argument(
+        "--map-dump",
+        default=None,
+        help=(
+            "optional compressed NPZ of daily ensemble-mean 0.05-degree fields. "
+            "This retains the V7 subgrid output for a matched spatial comparison "
+            "with another DA model without writing the full ensemble."
+        ),
+    )
     p.add_argument("--members", type=int, default=8)
     p.add_argument("--n-steps", type=int, default=50)
     p.add_argument("--withhold", type=float, default=0.30,
@@ -1137,6 +1146,21 @@ def main() -> None:
         np.full((len(days), len(stations)), np.nan, dtype=np.float32)
         if args.station_dump else None
     )
+    # A mean-field dump is deliberately separate from the station dump: maps
+    # are useful for checking whether a model retains 0.05-degree structure,
+    # while the raw station ensembles are the audit trail for fair CRPS.
+    map_means = (
+        {
+            arm: np.full((len(days), fine_grid.nlat, fine_grid.nlon), np.nan,
+                         dtype=np.float32)
+            for arm in arms
+        }
+        if args.map_dump else None
+    )
+    map_valid = (
+        np.zeros((len(days), fine_grid.nlat, fine_grid.nlon), dtype=bool)
+        if args.map_dump else None
+    )
 
     panels: dict = {}
     truth_fields: dict = {}
@@ -1449,6 +1473,11 @@ def main() -> None:
             fine_mean = fine_mm[:, 0].mean(dim=0).cpu().numpy()
             meso_valid = np.asarray(meso_ds.fixed_valid).astype(bool)
             fine_keep = sub["fine_valid"][0].numpy().astype(bool)
+            if map_means is not None:
+                map_means[arm][day_position] = np.where(
+                    fine_keep, fine_mean, np.nan
+                ).astype(np.float32)
+                map_valid[day_position] = fine_keep
             pattern = {
                 "chirps_0p05": field_pattern_r(
                     fine_mean, fine_truth[0, 0].cpu().numpy(), fine_keep
@@ -1547,6 +1576,21 @@ def main() -> None:
             **{f"station_{arm}": values for arm, values in station_ensembles.items()},
         )
         results["station_dump"] = str(dump_path)
+
+    if args.map_dump:
+        map_path = Path(args.map_dump)
+        map_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            map_path,
+            times=gauge_times.astype("datetime64[D]").astype(str),
+            model_times=day_times.astype("datetime64[D]").astype(str),
+            grid_lat=fine_grid.lat,
+            grid_lon=fine_grid.lon,
+            valid=map_valid,
+            arm_names=np.asarray(arms, dtype=str),
+            **{f"meanfield_{arm}": values for arm, values in map_means.items()},
+        )
+        results["map_dump"] = str(map_path)
 
     # Named for the experiment it actually is.  A file called ..._osse.json
     # holding real-data results is a trap for whoever opens it in a month.
