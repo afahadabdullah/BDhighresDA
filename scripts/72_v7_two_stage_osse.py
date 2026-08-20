@@ -609,12 +609,13 @@ def parse_args() -> argparse.Namespace:
                         "space). Defaults to configs/da.yaml's tuned 0.10 for real "
                         "observations and 0.05 for OSSE")
     p.add_argument("--meso-sigma-sweep", default=None,
-                   help="comma-separated stage-A gauge sigmas (transformed units). "
-                        "Adds one da_meso arm per value so the weighting can be "
-                        "TUNED on withheld stations instead of asserted. CPCv2's "
-                        "0.10+0.25 was tuned against 0.05-degree cells; stage A "
-                        "assimilates onto 0.1-degree cells, four times the area, so "
-                        "the representativeness term is not obviously transferable")
+                   help="comma-separated TOTAL stage-A gauge errors (transformed "
+                        "units): each value replaces sqrt(sigma^2 + "
+                        "representativeness^2) outright, so the sweep can go below "
+                        "the representativeness floor. CPCv2's tuned pair 0.10+0.25 "
+                        "is a total of 0.269, and it was tuned against 0.05-degree "
+                        "cells; stage A assimilates onto 0.1-degree cells, four "
+                        "times the area, so it is not obviously transferable")
     p.add_argument("--meso-gauge-representativeness", type=float, default=None,
                    help="stage A point-vs-cell mismatch, TRANSFORMED units. Defaults "
                         "to 0.25 for real (usually the DOMINANT term) and 0.0 for "
@@ -737,9 +738,11 @@ def main() -> None:
             value = float(token)
             if value <= 0.0:
                 raise SystemExit(f"sweep sigma {value} must be positive")
-            name = f"da_meso_s{token}"
+            name = f"da_meso_tot{token}"
             ARMS[name] = ("gauges", False)
-            ARM_NOTES[name] = f"gauges at 0.1 deg, sigma {value:g} (transformed)"
+            ARM_NOTES[name] = (
+                f"gauges at 0.1 deg, TOTAL observation error {value:g} (transformed)"
+            )
             arm_sigma[name] = value
             if name not in arms:
                 arms.append(name)
@@ -1083,10 +1086,17 @@ def main() -> None:
                         ).to(device)
                     )
                     # Transformed units: this likelihood sees tf.forward(mm).
+                    # A swept value is the TOTAL error, so its representativeness
+                    # folds to zero -- otherwise 0.25 floors the sweep and the
+                    # interesting region below CPCv2's 0.269 is unreachable.
+                    swept = arm in arm_sigma
                     gauge_R = build_R(
                         len(assimilated),
-                        arm_sigma.get(arm, args.meso_gauge_sigma), device=device,
-                        representativeness=args.meso_gauge_representativeness,
+                        arm_sigma[arm] if swept else args.meso_gauge_sigma,
+                        device=device,
+                        representativeness=(
+                            0.0 if swept else args.meso_gauge_representativeness
+                        ),
                     )
                     variances.append(gauge_R)
                     # A station that did not report enters as NaN and the
@@ -1468,20 +1478,32 @@ def report(results: dict, arms: list[str]) -> None:
     sweep = {a: results["arms"][a]["mean"]["crps_mm"]
              for a in arms if a in results.get("arm_sigma", {})}
     if sweep:
-        print("\nStage-A gauge sigma sweep (withheld CRPS; lower is better):")
+        import math
+
+        cpcv2 = math.sqrt(0.10**2 + 0.25**2)
+        print("\nStage-A TOTAL gauge error sweep (withheld CRPS; lower is better):")
+        floor = min(sweep.values())
         for arm in sorted(sweep, key=lambda a: results["arm_sigma"][a]):
-            sigma = results["arm_sigma"][arm]
-            print(f"  sigma {sigma:5.3f}  CRPS {sweep[arm]:7.3f} mm"
-                  f"{'   <- best' if sweep[arm] == min(sweep.values()) else ''}")
+            total = results["arm_sigma"][arm]
+            marks = "   <- best" if sweep[arm] == floor else ""
+            if abs(total - cpcv2) < 0.01:
+                marks += "   (CPCv2's tuned 0.10+0.25)"
+            print(f"  total {total:5.3f}  CRPS {sweep[arm]:7.3f} mm"
+                  f"  ({100 * (sweep[arm] - floor) / floor:+5.1f}%){marks}")
         best = min(sweep, key=sweep.get)
-        edge = results["arm_sigma"][best] in (
-            min(results["arm_sigma"].values()), max(results["arm_sigma"].values())
-        )
-        if edge:
+        values = list(results["arm_sigma"].values())
+        if results["arm_sigma"][best] in (min(values), max(values)):
             print("  The optimum sits at the EDGE of the swept range, so the true "
                   "minimum is outside it -- widen the sweep before concluding.")
         print("  One day of 11 withheld stations is a noisy objective; treat a "
               "difference under ~5% as unresolved.")
+        # The caveat that matters more than the number.
+        print("  CAUTION: assimilated and withheld gauges are the SAME instrument")
+        print("  network. Any bias BMD shares against the model is corrected at")
+        print("  both, so driving this error down improves withheld-gauge CRPS")
+        print("  partly by fitting a network-wide offset rather than by making the")
+        print("  field more accurate. A total error near zero asserts a gauge is a")
+        print("  perfect measurement of an 11 km cell average, which it is not.")
 
     if "da_fine" not in arms:
         return
