@@ -48,11 +48,15 @@ END="${V7_COMPARE_END:-2022-05-10}"
 }
 MEMBERS="${V7_COMPARE_MEMBERS:-16}"
 STEPS="${V7_COMPARE_STEPS:-50}"
-SEED="${V7_COMPARE_SEED:-20220501}"
+SEED="${V7_COMPARE_SEED:-20220503}"
 OUT="${V7_COMPARE_OUT:-data/processed/v7_cpcv2_matched_may2022/$(date +%Y%m%d_%H%M)}"
 
-MESO_CKPT="${V7_OSSE_MESO_CKPT:-runs/v7/meso/best.pt}"
-ALLOC_CKPT="${V7_OSSE_ALLOC_CKPT:-runs/v7/allocation/best.pt}"
+# Hold V7 to the checkpoint pair that produced the selected May 3 configuration
+# (da_meso and da_sim at R x9).  Do not silently swap in a later best.pt while
+# extending the window: that would turn this into a checkpoint comparison.
+V7_REFERENCE_ROOT="${V7_COMPARE_V7_REFERENCE_ROOT:-data/processed/v7_osse/20260820_1356}"
+MESO_CKPT="${V7_COMPARE_MESO_CKPT:-$V7_REFERENCE_ROOT/checkpoints/meso_frozen.pt}"
+ALLOC_CKPT="${V7_COMPARE_ALLOC_CKPT:-$V7_REFERENCE_ROOT/checkpoints/allocation_frozen.pt}"
 MESO_ARCHIVE="${V7_MESO_ARCHIVE:-data/processed/bd_wide_cpc_0p1.zarr}"
 MESO_STATS="${V7_MESO_STATS:-data/processed/stats_v7_meso.json}"
 SUBGRID="${V7_PREP_OUT:-data/processed/v7/wide_v7.zarr}"
@@ -138,6 +142,7 @@ WITHHELD_IDS="$OUT/v7_withheld_station_ids.txt"
 echo "Matched V7 vs CPCv2 comparison"
 echo "  model days: $START through $END; BMD observation days: $CPCV2_START through $CPCV2_END"
 echo "  V7 arms: background (diagnostic), da_meso, da_sim (IMERG R x9)"
+echo "  V7 frozen reference: $V7_REFERENCE_ROOT"
 echo "  CPCv2 arms: guided_s6_g010_t100, v2_simul_s04_ig010"
 echo "  sampling: $MEMBERS members, $STEPS Heun steps, seed $SEED"
 echo "  output: $OUT"
