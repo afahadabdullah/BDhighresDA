@@ -3014,14 +3014,88 @@ def test_v7_osse_shifts_imerg_onto_the_same_window_as_the_gauges():
         Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
     ).read_text()
 
-    assert "load_imerg_meso(args.imerg, gauge_times, window, meso_grid)" in source, (
-        "IMERG is read on unshifted model dates"
-    )
-    assert "np.datetime64(d) for d, _, _ in days]),\n            window, meso_grid" \
-        not in source, "the old unshifted IMERG load survives"
-    # The window requirement is what licenses reusing the gauge offset.
+    # The shift is chosen from the FILE's declared window, not hardcoded: a
+    # BMD-windowed file takes the gauge offset, a calendar-day file takes none.
+    assert "args.imerg, day_times, int(args.gauge_day_offset), window, meso_grid" \
+        in source, "the day shift is no longer derived from the file"
+    assert "offset = int(gauge_offset)          # BMD window: same shift as a gauge" \
+        in source
+    assert "elif end_hour in (0, 24):" in source
     assert "bmd_accumulation_end_hour_utc" in source
-    assert 'int(end_hour) != 3' in source
     # And a cross-check that fires when the alignment is wrong anyway.
     assert "imerg vs cpc (same day, both 0.1 deg)" in source
     assert "suspiciously low; check the day alignment" in source
+
+
+def test_v7_osse_accepts_a_native_imerg_file_and_refuses_a_coarsened_one():
+    """``observation_factor`` marks a file as COARSENED, not as valid.
+
+    ``08_prepare_imerg_observations.py`` writes native 0.1-degree footprints
+    nested over BD and does NOT write observation_factor; only
+    ``44_coarsen_imerg_observations.py`` adds it, when coarsening further.  An
+    earlier version of this loader demanded the attribute and so rejected
+    exactly the right file -- the prepared 0.1-degree product -- while a
+    coarsened 0.4-degree one would have carried it happily.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+    import xarray as xr
+
+    module = _osse_module()
+    from bdhires.eval.v7_window import bangladesh_window
+
+    window = bangladesh_window()
+    grid = module._meso_grid(window)
+    days = np.array(
+        ["2022-05-02", "2022-05-03", "2022-05-04"], "datetime64[D]"
+    )
+    rng = np.random.default_rng(0)
+
+    def build(end_hour, factor=None, lat=None):
+        attrs = {"bmd_accumulation_end_hour_utc": end_hour}
+        if factor is not None:
+            attrs["observation_factor"] = factor
+        dataset = xr.Dataset(
+            {
+                "precipitation": (
+                    ("time", "lat", "lon"),
+                    rng.gamma(2.0, 4.0, (3, grid.nlat, grid.nlon)).astype("f4"),
+                    {"units": "mm/day"},
+                ),
+                "randomError": (
+                    ("time", "lat", "lon"),
+                    rng.gamma(1.0, 1.0, (3, grid.nlat, grid.nlon)).astype("f4"),
+                    {"units": "mm/day"},
+                ),
+            },
+            coords={
+                "time": days.astype("datetime64[ns]"),
+                "lat": grid.lat if lat is None else lat,
+                "lon": grid.lon,
+            },
+            attrs=attrs,
+        )
+        path = Path(tempfile.mkdtemp()) / "imerg.nc"
+        dataset.to_netcdf(path)
+        return str(path)
+
+    model = np.array(["2022-05-03"], "datetime64[D]")
+
+    # Native + BMD window -> takes the gauge offset.
+    assert module.load_imerg_meso(build(3), model, 1, window, grid)["day_offset"] == 1
+    # Native + calendar window -> the model's own days, no shift.
+    assert module.load_imerg_meso(build(0), model, 1, window, grid)["day_offset"] == 0
+    # Explicit factor 2 is fine; anything else was coarsened past what stage A wants.
+    assert module.load_imerg_meso(build(3, 2), model, 1, window, grid)["day_offset"] == 1
+    with pytest.raises(SystemExit, match="coarsened to observation_factor 8"):
+        module.load_imerg_meso(build(3, 8), model, 1, window, grid)
+    # An unknown window has no defined shift, so it must not be guessed.
+    with pytest.raises(SystemExit, match="neither the BMD window"):
+        module.load_imerg_meso(build(12), model, 1, window, grid)
+    # The coordinates remain the authoritative check: right attributes, wrong grid.
+    with pytest.raises(SystemExit, match="do not sit on stage A"):
+        module.load_imerg_meso(
+            build(3, lat=grid.lat + 0.3), model, 1, window, grid
+        )

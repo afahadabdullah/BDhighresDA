@@ -260,14 +260,29 @@ def corrupt_satellite(
     return np.where(finite, observed, np.nan).astype(np.float32), sigma
 
 
-def load_imerg_meso(path: str, days: np.ndarray, window, grid) -> dict:
-    """Read BMD-aligned IMERG onto stage A's own cells, or refuse.
+def load_imerg_meso(path: str, model_times: np.ndarray, gauge_offset: int,
+                    window, grid) -> dict:
+    """Read IMERG onto stage A's own cells, choosing the day shift from the file.
 
-    ``observation_factor`` 2 means footprint centres on BD-at-0.1, which is
-    exactly the grid stage A runs on when the window is anchored there.  This
-    checks that rather than trusting it: a file on a different lattice would
-    still have the right shape and would assimilate rainfall into the wrong
-    places.
+    Two attributes decide everything, and both are written by
+    ``08_prepare_imerg_observations.py``:
+
+    * ``bmd_accumulation_end_hour_utc`` -- 3 means the file was built on the BMD
+      24 h window, so its day D is ~87 percent calendar day D-1 and it takes the
+      SAME offset as a gauge report.  0 or 24 means calendar days, which is what
+      the model already runs on, so it takes no offset.  Choosing this from the
+      file rather than a flag is what stops a calendar-day file being shifted a
+      day, and vice versa.
+    * ``observation_factor`` -- written only by ``44_coarsen_imerg_observations``
+      when a prepared file is coarsened FURTHER.  Its absence therefore means
+      native 0.1-degree footprints, which is precisely what stage A wants; an
+      earlier version of this function required it and rejected exactly the
+      right file.
+
+    Neither attribute is authoritative on its own.  The coordinates are: a file
+    on a different lattice would have the right shape and the right attributes
+    and still put rainfall in the wrong cells, so the lat/lon check below is the
+    one that cannot be talked around.
     """
     import xarray as xr
 
@@ -279,17 +294,37 @@ def load_imerg_meso(path: str, days: np.ndarray, window, grid) -> dict:
             if units not in ("mm/day", "mmday-1", "mm day-1", "mm/d"):
                 raise SystemExit(f"{path} {name} units are {units!r}; expected mm/day")
         factor = dataset.attrs.get("observation_factor")
-        if factor is None or int(factor) != 2:
+        if factor is not None and int(factor) != 2:
             raise SystemExit(
-                f"{path} declares observation_factor {factor!r}; stage A needs 2, "
-                f"which is the 0.1-degree BMD-aligned product"
+                f"{path} was coarsened to observation_factor {int(factor)}; stage A "
+                f"needs 0.1-degree footprints (factor 2 relative to BD's 0.05 "
+                f"degrees, or an uncoarsened file from "
+                f"08_prepare_imerg_observations.py)"
             )
+        native = factor is None
+
         end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
-        if end_hour is None or int(end_hour) != 3:
+        if end_hour is None:
             raise SystemExit(
-                f"{path} is not on the BMD 03:00 UTC accumulation window "
-                f"(declares {end_hour!r}); it would be a different day"
+                f"{path} does not declare bmd_accumulation_end_hour_utc, so its "
+                f"24-hour window is unknown and the day alignment cannot be "
+                f"determined; rebuild it with 08_prepare_imerg_observations.py"
             )
+        end_hour = int(end_hour)
+        if end_hour == 3:
+            offset = int(gauge_offset)          # BMD window: same shift as a gauge
+            window_note = "BMD 03 UTC window"
+        elif end_hour in (0, 24):
+            offset = 0                          # calendar days: same as the model
+            window_note = "calendar 00-24 UTC window"
+        else:
+            raise SystemExit(
+                f"{path} declares an accumulation window ending at {end_hour} UTC, "
+                f"which is neither the BMD window (3) nor a calendar day (0/24); "
+                f"the correct day shift is undefined"
+            )
+        days = model_times + np.timedelta64(offset, "D")
+
         source_days = np.asarray(dataset.time.values).astype("datetime64[D]")
         lookup = {day: index for index, day in enumerate(source_days)}
         missing = [str(day) for day in days if day not in lookup]
@@ -322,11 +357,15 @@ def load_imerg_meso(path: str, days: np.ndarray, window, grid) -> dict:
             f"{grid.lat[-1]:.3f}); assimilating it would displace rainfall"
         )
     print(
-        f"[imerg] {path}: {precipitation.shape[0]} days on stage A's own cells "
-        f"({grid.nlat}x{grid.nlon} @0.1 deg), identity operator",
+        f"[imerg] {path}\n"
+        f"        {precipitation.shape[0]} day(s) on stage A's own cells "
+        f"({grid.nlat}x{grid.nlon} @0.1 deg), identity operator\n"
+        f"        {window_note}; day offset {offset:+d} "
+        f"(model {model_times[0]} <- IMERG {days[0]})\n"
+        f"        footprints: {'native 0.1 deg' if native else 'coarsened, factor 2'}",
         flush=True,
     )
-    return {"precipitation": precipitation, "error": error}
+    return {"precipitation": precipitation, "error": error, "day_offset": offset}
 
 
 # --------------------------------------------------------------------------
@@ -978,14 +1017,9 @@ def main() -> None:
         # That table is measured against BMD GAUGES, not against the model: it
         # says IMERG and the gauges already share a window, which is precisely
         # why they take the same offset relative to a calendar-day model.
-        imerg = load_imerg_meso(args.imerg, gauge_times, window, meso_grid)
-        if args.gauge_day_offset:
-            print(
-                f"  imerg read on the same shifted dates as the gauges "
-                f"(model {day_times[0]} <- IMERG {gauge_times[0]}), because a "
-                f"BMD-windowed satellite shares the gauges' accumulation window",
-                flush=True,
-            )
+        imerg = load_imerg_meso(
+            args.imerg, day_times, int(args.gauge_day_offset), window, meso_grid
+        )
 
     gcfg = GuidanceConfig(
         gamma=args.guidance_gamma,
@@ -1009,6 +1043,7 @@ def main() -> None:
         "n_steps": args.n_steps,
         "observations": args.observations,
         "osse": args.observations == "osse",
+        "imerg_day_offset": (imerg or {}).get("day_offset"),
         "satellite": (
             "pseudo (CHIRPS + error model)" if args.osse_satellite
             else (args.imerg if args.imerg else "none")
