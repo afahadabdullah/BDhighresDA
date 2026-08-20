@@ -3208,6 +3208,47 @@ def test_v7_osse_perturbs_with_true_error_and_weights_with_inflated_r():
     assert "operators, values, variances, perturb_variances = [], [], [], []" in source
     assert "stacked, torch.cat(perturb_variances), args.members," in source
     # The inflation still reaches the likelihood.
-    assert "args.imerg_r_multiplier * true_variance" in source
+    # The multiplier may be overridden per arm by the sweep, but the inflated
+    # value is still what reaches the likelihood.
+    assert "multiplier = arm_imerg_r.get(arm, args.imerg_r_multiplier)" in source
+    assert "multiplier * true_variance" in source
     # And a Jensen check that reports the residual in mm.
     assert "Jensen {drawn - raw:+.2f} mm" in source
+
+
+def test_v7_osse_satellite_weight_sweep_is_declared_and_applied():
+    """da_sim won on real gauges; the sweep asks how far that direction goes.
+
+    The satellite R multiplier is the relative weight of satellite against
+    gauges: 1 trusts every footprint as an independent datum, L^2 assumes one
+    per correlation patch, larger treats it as broad-scale guidance.  Sweeping
+    it is how the optimum is found rather than asserted -- and the arms must
+    differ ONLY in that multiplier, or the comparison means nothing.
+    """
+    from pathlib import Path
+
+    module = _osse_module()
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    assert '"--imerg-r-sweep"' in source
+    # Swept arms are simultaneous arms: same observations, same everything else.
+    assert 'ARMS[name] = ("both", False)' in source
+    assert "arm_imerg_r[name] = value" in source
+    # The sweep needs a satellite to sweep.
+    assert "--imerg-r-sweep needs --imerg or --osse-satellite" in source
+    # Anchors are forced in, so a sweep is always readable against a baseline.
+    assert 'for anchor in ("da_meso", "background"):' in source
+
+    # The table must report every metric, because they disagreed on the real
+    # run: CRPS and calibration preferred da_sim, MAE and RMSE preferred
+    # da_meso. A single-metric table would have hidden that.
+    for metric in ("CRPS", "RMSE", "|bias|", "calibration"):
+        assert f'("{metric}"' in source or f'"{metric}"' in source
+    assert "best by" in source
+    assert "sits at the EDGE of the swept range" in source
+
+    # And the base arms still mean what they meant.
+    assert module.ARMS["da_sim"] == ("both", False)
+    assert module.ARMS["da_meso"] == ("gauges", False)

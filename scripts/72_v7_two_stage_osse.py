@@ -761,6 +761,13 @@ def parse_args() -> argparse.Namespace:
                         "datum, so the default is L^2: without it a diagonal R "
                         "asserts 4096 independent constraints where there are a few "
                         "hundred, and the ensemble is crushed")
+    p.add_argument("--imerg-r-sweep", default=None,
+                   help="comma-separated satellite R multipliers. Adds one da_sim "
+                        "arm per value, so the RELATIVE weight of satellite against "
+                        "gauges can be scanned. 1 trusts every footprint as an "
+                        "independent datum; L^2 = 9 assumes one datum per "
+                        "correlation patch; larger still treats the satellite as "
+                        "broad-scale guidance only")
     p.add_argument("--imerg-representativeness", type=float, default=0.10,
                    help="footprint-vs-block-mean mismatch in TRANSFORMED units, "
                         "matching configs/da.yaml; the retrieval error itself is "
@@ -812,6 +819,28 @@ def main() -> None:
     # of the configuration is identical, so a difference between them is the
     # weighting and nothing else.
     arm_sigma: dict[str, float] = {}
+    arm_imerg_r: dict[str, float] = {}
+    if args.imerg_r_sweep:
+        if not (args.imerg or args.osse_satellite):
+            raise SystemExit("--imerg-r-sweep needs --imerg or --osse-satellite")
+        for token in args.imerg_r_sweep.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            value = float(token)
+            if value <= 0.0:
+                raise SystemExit(f"sweep R multiplier {value} must be positive")
+            name = f"da_sim_r{token}"
+            ARMS[name] = ("both", False)
+            ARM_NOTES[name] = (
+                f"IMERG + gauges simultaneously, satellite R x{value:g}"
+            )
+            arm_imerg_r[name] = value
+            if name not in arms:
+                arms.append(name)
+        for anchor in ("da_meso", "background"):
+            if anchor not in arms:
+                arms.insert(0, anchor)
     if args.meso_sigma_sweep:
         for token in args.meso_sigma_sweep.split(","):
             token = token.strip()
@@ -1056,6 +1085,7 @@ def main() -> None:
     results = {
         "window": window.describe(),
         "arm_sigma": arm_sigma,
+        "arm_imerg_r": arm_imerg_r,
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
         "members": args.members,
         "n_steps": args.n_steps,
@@ -1244,9 +1274,10 @@ def main() -> None:
                     true_variance = (
                         sigma_t.reshape(-1) ** 2 + args.imerg_representativeness ** 2
                     ).astype(np.float32)
+                    multiplier = arm_imerg_r.get(arm, args.imerg_r_multiplier)
                     variances.append(
                         torch.from_numpy(
-                            (args.imerg_r_multiplier * true_variance).astype(np.float32)
+                            (multiplier * true_variance).astype(np.float32)
                         ).to(device)
                     )
                     perturb_variances.append(
@@ -1261,7 +1292,8 @@ def main() -> None:
                         f"({'pseudo, from CHIRPS' if satellite_mm is not None else 'IMERG'})"
                         f"; error correlated over "
                         f"{args.imerg_error_corr_cells:g} cells -> ~{effective:.0f} "
-                        f"independent, R inflated x{args.imerg_r_multiplier:g}",
+                        f"independent, R inflated x"
+                        f"{arm_imerg_r.get(arm, args.imerg_r_multiplier):g}",
                         flush=True,
                     )
                     flat = field.reshape(-1)
@@ -1766,6 +1798,47 @@ def report(results: dict, arms: list[str]) -> None:
         delta = results["arms"][arm]["mean"]["crps_mm"] - reference
         percent = 100.0 * delta / reference if reference else float("nan")
         print(f"  {arm:<11} {delta:+.3f} mm ({percent:+.1f}%)   {ARM_NOTES[arm]}")
+
+    def sweep_table(axis_key: str, title: str, unit: str, reference=None) -> None:
+        axis = results.get(axis_key) or {}
+        members = [a for a in arms if a in axis]
+        if not members:
+            return
+        print(f"\n{title} (withheld scores):")
+        print(f"  {'value':>8} {'CRPS':>8} {'MAE':>8} {'RMSE':>8} {'bias':>8} "
+              f"{'sp/rm':>7}")
+        floor = min(results["arms"][a]["mean"]["crps_mm"] for a in members)
+        for arm in sorted(members, key=lambda a: axis[a]):
+            m = results["arms"][arm]["mean"]
+            mark = "   <- best CRPS" if m["crps_mm"] == floor else ""
+            if reference is not None and abs(axis[arm] - reference) < 1e-9:
+                mark += "   (current default)"
+            print(f"  {axis[arm]:8.3g} {m['crps_mm']:8.3f} {m['mae_mm']:8.3f} "
+                  f"{m['rmse_mm']:8.3f} {m['bias_mm']:+8.3f} "
+                  f"{m['spread_skill']:7.2f}{mark}")
+        for label, key in (("CRPS", "crps_mm"), ("RMSE", "rmse_mm"),
+                           ("|bias|", "bias_mm"), ("calibration", "spread_skill")):
+            if key == "bias_mm":
+                pick = min(members, key=lambda a: abs(results["arms"][a]["mean"][key]))
+            elif key == "spread_skill":
+                pick = min(members,
+                           key=lambda a: abs(results["arms"][a]["mean"][key] - 1.0))
+            else:
+                pick = min(members, key=lambda a: results["arms"][a]["mean"][key])
+            print(f"    best by {label:<12} {axis[pick]:g} {unit}")
+        values = [axis[a] for a in members]
+        best = min(members, key=lambda a: results["arms"][a]["mean"]["crps_mm"])
+        if axis[best] in (min(values), max(values)):
+            print("    The CRPS optimum sits at the EDGE of the swept range; the "
+                  "true minimum is outside it.")
+        print("    One day of 11 withheld stations cannot resolve a difference "
+              "under ~5%.")
+
+    sweep_table(
+        "arm_imerg_r",
+        "Satellite weight sweep -- R multiplier on IMERG (higher = trust it less)",
+        "x", reference=results.get("imerg_r_multiplier"),
+    )
 
     sweep = {a: results["arms"][a]["mean"]["crps_mm"]
              for a in arms if a in results.get("arm_sigma", {})}
