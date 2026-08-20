@@ -966,10 +966,26 @@ def main() -> None:
     meso_grid = _meso_grid(window)
     imerg = None
     if args.imerg:
-        imerg = load_imerg_meso(
-            args.imerg, np.asarray([np.datetime64(d) for d, _, _ in days]),
-            window, meso_grid,
-        )
+        # SAME shift as the gauges, and for the same reason.  load_imerg_meso
+        # refuses any file that is not on the BMD 03:00 UTC window, so the file
+        # IS BMD-windowed by construction: IMERG day D covers the 24 h ending
+        # 03 UTC on D and is therefore ~87 percent calendar day D-1, exactly
+        # like a BMD report.  The model is on calendar days, so model day C
+        # reads IMERG day C+1.
+        #
+        # This is easy to get backwards, because docs/METHOD_SWEEP_PLAN.md's lag
+        # table shows IMERG peaking at lag 0 while CHIRPS and CPC peak at -1.
+        # That table is measured against BMD GAUGES, not against the model: it
+        # says IMERG and the gauges already share a window, which is precisely
+        # why they take the same offset relative to a calendar-day model.
+        imerg = load_imerg_meso(args.imerg, gauge_times, window, meso_grid)
+        if args.gauge_day_offset:
+            print(
+                f"  imerg read on the same shifted dates as the gauges "
+                f"(model {day_times[0]} <- IMERG {gauge_times[0]}), because a "
+                f"BMD-windowed satellite shares the gauges' accumulation window",
+                flush=True,
+            )
 
     gcfg = GuidanceConfig(
         gamma=args.guidance_gamma,
@@ -1267,9 +1283,24 @@ def main() -> None:
                 ),
             }
             if imerg is not None:
+                satellite_field = imerg["precipitation"][day_position]
                 pattern["imerg_0p1"] = field_pattern_r(
-                    meso_mean, imerg["precipitation"][day_position], meso_valid
+                    meso_mean, satellite_field, meso_valid
                 )
+                if arm == "background":
+                    # IMERG against the CPC field the model was conditioned on,
+                    # both at 0.1 degrees.  Two independent products of the same
+                    # day should agree well; a low value here means one of them
+                    # is describing a different day, and every satellite arm
+                    # below would then be assimilating the wrong rainfall.
+                    agreement = field_pattern_r(
+                        satellite_field, item["base_mm"][0].numpy(), meso_valid
+                    )
+                    print(f"      imerg vs cpc (same day, both 0.1 deg): "
+                          f"r = {agreement:+.3f}"
+                          + ("   <- suspiciously low; check the day alignment"
+                             if np.isfinite(agreement) and agreement < 0.3 else ""),
+                          flush=True)
             if satellite_mm is not None:
                 pattern["pseudo_sat_0p1"] = field_pattern_r(
                     meso_mean, satellite_mm, meso_valid

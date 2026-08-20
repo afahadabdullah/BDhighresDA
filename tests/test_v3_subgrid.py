@@ -2991,3 +2991,37 @@ def test_v7_osse_matrix_pairs_point_and_field_verification():
     # The matrix is printed and drawn.
     assert "MATRIX: withheld-gauge CRPS beside spatial pattern correlation" in source
     assert 'out_dir / "matrix.png"' in source
+
+
+def test_v7_osse_shifts_imerg_onto_the_same_window_as_the_gauges():
+    """A BMD-windowed satellite takes the SAME day offset as a BMD gauge.
+
+    load_imerg_meso refuses any file whose bmd_accumulation_end_hour_utc is not
+    3, so the file is BMD-windowed by construction: IMERG day D covers the 24 h
+    ending 03 UTC on D and is ~87 percent calendar day D-1, exactly like a gauge
+    report.  The model is on calendar days, so both take offset +1.
+
+    The trap is docs/METHOD_SWEEP_PLAN.md's lag table, which shows IMERG peaking
+    at lag 0 while CHIRPS and CPC peak at -1.  That table is measured against
+    the GAUGES, not against the model -- it says IMERG and the gauges already
+    share a window, which is exactly why they take the same offset here.  Read
+    as a model-relative statement it says the opposite, and IMERG would be
+    assimilated a day early with every shape and grid check still passing.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    assert "load_imerg_meso(args.imerg, gauge_times, window, meso_grid)" in source, (
+        "IMERG is read on unshifted model dates"
+    )
+    assert "np.datetime64(d) for d, _, _ in days]),\n            window, meso_grid" \
+        not in source, "the old unshifted IMERG load survives"
+    # The window requirement is what licenses reusing the gauge offset.
+    assert "bmd_accumulation_end_hour_utc" in source
+    assert 'int(end_hour) != 3' in source
+    # And a cross-check that fires when the alignment is wrong anyway.
+    assert "imerg vs cpc (same day, both 0.1 deg)" in source
+    assert "suspiciously low; check the day alignment" in source
