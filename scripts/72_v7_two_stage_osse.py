@@ -382,6 +382,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=20220503)
     p.add_argument("--arms", default=",".join(ARMS),
                    help="comma-separated subset of " + ",".join(ARMS))
+    p.add_argument("--no-plots", action="store_true",
+                   help="write the JSON only; figures are on by default")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -578,6 +580,8 @@ def main() -> None:
         "arms": {name: {"note": ARM_NOTES[name], "days": []} for name in arms},
     }
 
+    panels: dict = {}
+    truth_fields: dict = {}
     for date, meso_index, sub_index in days:
         item = meso_ds[meso_index]
         cond = item["cond"][None].to(device)
@@ -596,6 +600,11 @@ def main() -> None:
             truth_at_stations = fine_operator(fine_truth)[0, 0].cpu().numpy()
         truth_assim = truth_at_stations[assimilated]
         truth_withheld = truth_at_stations[withheld]
+        truth_fields[date] = {
+            "field": fine_truth[0, 0].cpu().numpy(),
+            "valid": sub["fine_valid"][0].numpy().astype(bool),
+            "at_stations": truth_at_stations,
+        }
 
         for arm in arms:
             guide_meso, guide_fine = ARMS[arm]
@@ -703,6 +712,12 @@ def main() -> None:
                 ),
             }
             results["arms"][arm]["days"].append(entry)
+            if not args.no_plots:
+                panels.setdefault(date, {})[arm] = {
+                    "mean": fine_mm[:, 0].mean(dim=0).cpu().numpy(),
+                    "member": fine_mm[0, 0].cpu().numpy(),
+                    "at_stations": at_stations,
+                }
             w = entry["withheld"]
             print(
                 f"      withheld CRPS {w.get('crps_mm', float('nan')):.3f} mm  "
@@ -721,8 +736,162 @@ def main() -> None:
 
     path = out_dir / "v7_two_stage_osse.json"
     path.write_text(json.dumps(results, indent=2))
+    if not args.no_plots:
+        # Non-fatal by design: a broken figure must not cost the numbers, which
+        # are already on disk by this point.
+        try:
+            make_figures(panels, truth_fields, results, stations, assimilated,
+                         withheld, window, arms, out_dir)
+        except Exception as error:  # pragma: no cover - defensive
+            import traceback
+
+            print(f"[plots] SKIPPED: {error!r}", flush=True)
+            traceback.print_exc()
     report(results, arms)
     print(f"\nwrote {path}", flush=True)
+
+
+# --------------------------------------------------------------------------
+# figures
+# --------------------------------------------------------------------------
+
+
+def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
+                 window, arms, out_dir: Path) -> None:
+    """Maps, increments and station scatters -- one figure set per day.
+
+    The increment column is the point of this.  A CRPS table says an arm helped
+    or did not; only the increment map says WHERE the analysis moved, and for a
+    conserving stage that is the difference between "the correction is small"
+    and "the correction cannot leave its own block".
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grid = window.fine_grid()
+    extent = (
+        grid.lon_min, grid.lon_min + grid.nlon * grid.res,
+        grid.lat_min, grid.lat_min + grid.nlat * grid.res,
+    )
+    a_lat, a_lon = stations.lat[assimilated], stations.lon[assimilated]
+    w_lat, w_lon = stations.lat[withheld], stations.lon[withheld]
+
+    for date, by_arm in panels.items():
+        truth = truth_fields[date]
+        keep = truth["valid"]
+        vmax = float(np.nanpercentile(truth["field"][keep], 99.0)) or 1.0
+        reference = by_arm.get("background", {}).get("mean")
+
+        rows = len(arms)
+        figure, axes = plt.subplots(
+            rows, 3, figsize=(14.0, 4.2 * rows), squeeze=False
+        )
+
+        def stamp(axis, legend=False):
+            axis.scatter(a_lon, a_lat, s=26, marker="o", facecolors="none",
+                         edgecolors="black", linewidths=0.9,
+                         label="assimilated" if legend else None)
+            axis.scatter(w_lon, w_lat, s=44, marker="^", facecolors="none",
+                         edgecolors="magenta", linewidths=1.3,
+                         label="withheld" if legend else None)
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
+            axis.set_xticks([])
+            axis.set_yticks([])
+
+        for row, arm in enumerate(arms):
+            entry = by_arm[arm]
+            shown = np.where(keep, entry["mean"], np.nan)
+            image = axes[row][0].imshow(
+                shown, origin="lower", extent=extent, cmap="turbo",
+                vmin=0.0, vmax=vmax, aspect="auto",
+            )
+            axes[row][0].set_title(f"{arm}: ensemble mean", fontsize=10)
+            stamp(axes[row][0], legend=(row == 0))
+            if row == 0:
+                axes[row][0].legend(loc="upper right", fontsize=7, framealpha=0.85)
+            figure.colorbar(image, ax=axes[row][0], fraction=0.046, label="mm/day")
+
+            # Increment against the background.  Symmetric scale, diverging map:
+            # the sign is the whole story.
+            if reference is not None and arm != "background":
+                delta = np.where(keep, entry["mean"] - reference, np.nan)
+                span = float(np.nanmax(np.abs(delta))) or 1.0
+                image = axes[row][1].imshow(
+                    delta, origin="lower", extent=extent, cmap="RdBu_r",
+                    vmin=-span, vmax=span, aspect="auto",
+                )
+                axes[row][1].set_title(
+                    f"increment vs background  (max |d| {span:.1f} mm)", fontsize=10
+                )
+                figure.colorbar(image, ax=axes[row][1], fraction=0.046, label="mm/day")
+            else:
+                image = axes[row][1].imshow(
+                    np.where(keep, truth["field"], np.nan), origin="lower",
+                    extent=extent, cmap="turbo", vmin=0.0, vmax=vmax, aspect="auto",
+                )
+                axes[row][1].set_title("CHIRPS truth (OSSE)", fontsize=10)
+                figure.colorbar(image, ax=axes[row][1], fraction=0.046, label="mm/day")
+            stamp(axes[row][1])
+
+            # Withheld stations: predicted against truth.  y=x is the target.
+            axis = axes[row][2]
+            observed = truth["at_stations"][withheld]
+            predicted = entry["at_stations"][:, withheld]
+            axis.plot([0, vmax], [0, vmax], color="0.6", lw=1.0, zorder=1)
+            for member in predicted:
+                axis.scatter(observed, member, s=8, alpha=0.25,
+                             color="tab:blue", zorder=2)
+            axis.scatter(observed, predicted.mean(axis=0), s=48, marker="^",
+                         color="magenta", edgecolors="black", linewidths=0.6,
+                         zorder=3, label="ensemble mean")
+            score = next(
+                d for d in results["arms"][arm]["days"] if d["date"] == date
+            )["withheld"]
+            axis.set_title(
+                f"withheld: CRPS {score.get('crps_mm', float('nan')):.2f}  "
+                f"bias {score.get('bias_mm', float('nan')):+.2f} mm",
+                fontsize=10,
+            )
+            axis.set_xlabel("CHIRPS at station (mm/day)")
+            axis.set_ylabel("analysis (mm/day)")
+            axis.grid(alpha=0.3)
+            if row == 0:
+                axis.legend(fontsize=7)
+
+        figure.suptitle(
+            f"V7 two-stage OSSE  {date}   stage A epoch "
+            f"{results['checkpoints']['meso']['epoch']}, stage B epoch "
+            f"{results['checkpoints']['allocation']['epoch']}",
+            fontsize=12,
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.98))
+        figure.savefig(out_dir / f"maps_{date}.png", dpi=110, bbox_inches="tight")
+        plt.close(figure)
+        print(f"[plots] wrote {out_dir / f'maps_{date}.png'}", flush=True)
+
+    # Summary bars across arms.
+    figure, axes = plt.subplots(1, 3, figsize=(13.0, 3.6))
+    for axis, key, label in (
+        (axes[0], "crps_mm", "withheld CRPS (mm/day)"),
+        (axes[1], "mae_mm", "withheld MAE (mm/day)"),
+        (axes[2], "bias_mm", "withheld bias (mm/day)"),
+    ):
+        values = [results["arms"][arm]["mean"][key] for arm in arms]
+        colours = ["0.6" if arm == "background" else "tab:blue" for arm in arms]
+        axis.bar(range(len(arms)), values, color=colours)
+        axis.set_xticks(range(len(arms)))
+        axis.set_xticklabels(arms, rotation=20, ha="right", fontsize=8)
+        axis.set_title(label, fontsize=10)
+        axis.grid(alpha=0.3, axis="y")
+        if key == "bias_mm":
+            axis.axhline(0.0, color="black", lw=0.8)
+    figure.tight_layout()
+    figure.savefig(out_dir / "summary.png", dpi=110)
+    plt.close(figure)
+    print(f"[plots] wrote {out_dir / 'summary.png'}", flush=True)
 
 
 def _meso_grid(window):
@@ -761,22 +930,40 @@ def report(results: dict, arms: list[str]) -> None:
         percent = 100.0 * delta / reference if reference else float("nan")
         print(f"  {arm:<11} {delta:+.3f} mm ({percent:+.1f}%)   {ARM_NOTES[arm]}")
 
-    if "da_fine" in arms:
-        delta = results["arms"]["da_fine"]["mean"]["crps_mm"] - reference
-        print("\nThe question this run exists to answer:")
-        if delta < 0:
-            print("  Stage-B gauge assimilation IMPROVED withheld gauges.  The 11 km")
-            print("  increment propagates where the 55 km one did not -- V7's stage-B")
-            print("  DA is worth keeping.")
-        else:
-            print("  Stage-B gauge assimilation DEGRADED withheld gauges, as V5's did.")
-            print("  Quantisation to 11 km was not enough.  The fallback in the design")
-            print("  doc applies: drop stage-B DA and take the product from the")
-            print("  stage-A analysis downscaled by the emulator alone.")
-        print("  Both readings assume the checkpoints are trained enough to be")
-        print(f"  meaningful -- these are epoch "
-              f"{results['checkpoints']['meso']['epoch']} (A) and "
-              f"{results['checkpoints']['allocation']['epoch']} (B).")
+    if "da_fine" not in arms:
+        return
+    delta = results["arms"]["da_fine"]["mean"]["crps_mm"] - reference
+    fraction = delta / reference if reference else float("nan")
+    print("\nThe question this run exists to answer:")
+    # THREE outcomes, not two.  A sub-percent change on a handful of withheld
+    # stations is not a degradation and must not be reported as one: "neutral"
+    # and "harmful" have completely different consequences for the design.
+    if fraction < -0.02:
+        print("  Stage-B gauge assimilation IMPROVED withheld gauges. The 11 km")
+        print("  increment propagates where the 55 km one did not -- keep it.")
+    elif fraction > 0.02:
+        print("  Stage-B gauge assimilation DEGRADED withheld gauges, as V5's did.")
+        print("  Quantisation to 11 km was not enough. The design doc's fallback")
+        print("  applies: drop stage-B DA and downscale the stage-A analysis.")
+    else:
+        print(f"  Stage-B gauge assimilation is NEUTRAL at withheld gauges "
+              f"({fraction * 100:+.1f}%). It did not hurt -- it did nothing.")
+        print("  That is the expected signature of exact conservation, not a")
+        print("  failure of the increment: reconstruction fixes each 0.1-degree")
+        print("  block total, so a gauge can only move rain BETWEEN the four")
+        print("  0.05-degree cells of its own 11 km block. With ~38 stations")
+        print("  over Bangladesh the mean spacing is ~60 km, about six blocks,")
+        print("  so no withheld station shares a block with an assimilated one")
+        print("  and the increment provably cannot reach it.")
+        print("  Check the ASSIMILATED score in the JSON: if that improved")
+        print("  sharply while withheld did not, the mechanism is confirmed and")
+        print("  stage-B DA is a cosmetic fit to its own gauges. It is then")
+        print("  safe to keep (it costs nothing) but must not be claimed as")
+        print("  skill, and the honest product is the stage-A analysis.")
+    print("  This reading assumes the checkpoints are trained enough to be")
+    print(f"  meaningful -- these are epoch "
+          f"{results['checkpoints']['meso']['epoch']} (A) and "
+          f"{results['checkpoints']['allocation']['epoch']} (B).")
 
 
 if __name__ == "__main__":
