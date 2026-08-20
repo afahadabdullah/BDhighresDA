@@ -2753,11 +2753,12 @@ def test_v7_osse_real_mode_verifies_against_actual_gauge_reports():
 def test_v7_osse_gauge_sigma_follows_the_observation_mode():
     """A real gauge is not a perfect gauge, and R must say so.
 
-    The OSSE assimilates pseudo-gauges at 0.5 mm/day because they ARE the truth.
-    Carrying that sigma into a real-data run tells the filter a rain gauge is
-    accurate to half a millimetre, so the analysis chases gauge noise and
-    over-fits the assimilated stations -- which then flatters every arm that
-    uses gauges, in exactly the comparison the real-data run exists to make.
+    The OSSE assimilates pseudo-gauges tightly because they ARE the truth, and
+    with no point-vs-cell mismatch its representativeness term is zero.  Real
+    reports carry both, and configs/da.yaml's tuned values say the
+    representativeness term is usually the DOMINANT one -- carrying the OSSE
+    settings into a real run would over-fit the assimilated stations and
+    flatter every gauge arm in exactly the comparison the run exists to make.
     """
     from pathlib import Path
 
@@ -2765,17 +2766,74 @@ def test_v7_osse_gauge_sigma_follows_the_observation_mode():
         Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
     ).read_text()
 
-    assert '"--gauge-sigma-mm"' in source
+    assert '"--meso-gauge-sigma"' in source
+    assert '"--meso-gauge-representativeness"' in source
+    assert '"--fine-gauge-sigma-mm"' in source
     # Resolved once from the mode, not sprinkled through the call sites.
-    assert "args.osse_sigma_mm if args.observations == \"osse\" else 3.0" in source
-    # And no build_R call may still reach for the OSSE sigma directly.
-    assert "args.osse_sigma_mm, device=device" not in source, (
-        "a gauge covariance is still built from the OSSE sigma"
+    assert "real = args.observations == \"real\"" in source
+    assert "args.fine_gauge_sigma_mm = 3.0 if real else args.osse_sigma_mm" in source
+    # Printed and recorded, so two runs cannot be compared across a silent
+    # change of observation error.
+    assert "gauge error: stage A sigma" in source
+    assert '"meso_gauge_sigma_transformed": args.meso_gauge_sigma,' in source
+    assert '"fine_gauge_sigma_mm": args.fine_gauge_sigma_mm,' in source
+
+
+def test_v7_osse_observation_error_uses_the_right_units_per_stage():
+    """The two stages evaluate their likelihoods in different spaces.
+
+    Stage A compares ``tf.forward(rainfall)``, so build_R -- whose docstring
+    says "in transformed space" -- must be given transformed units.  Stage B
+    compares reconstructed PHYSICAL mm.  One shared number made the 0.1-degree
+    gauge variance 9.0 against configs/da.yaml's tuned 0.0725, i.e. 124x too
+    weak: the analysis then ignored the very gauges it was assimilating, fitting
+    them only 18% better than the background where the OSSE managed 94%.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    # Separate flags, each named for its own unit system.
+    assert '"--meso-gauge-sigma"' in source and '"--fine-gauge-sigma-mm"' in source
+    assert "args.gauge_sigma_mm" not in source, "the conflated sigma survives"
+    # CPCv2's tuned values are the real-data defaults.
+    assert "args.meso_gauge_sigma = 0.10 if real else 0.05" in source
+    assert "args.meso_gauge_representativeness = 0.25 if real else 0.0" in source
+    # Each build_R call gets the sigma belonging to its own space.
+    assert "len(assimilated), args.meso_gauge_sigma, device=device" in source
+    assert "len(assimilated), args.fine_gauge_sigma_mm, device=device" in source
+
+
+def test_v7_osse_converts_a_millimetre_error_into_transformed_units():
+    """IMERG reports randomError in mm; stage A's R is in transformed units.
+
+    Feeding millimetres straight in is wrong by orders of magnitude and wrong in
+    a rain-rate-dependent direction, so the satellite would be over-trusted in
+    heavy rain and ignored in light rain -- the opposite of its actual error.
+    """
+    import numpy as np
+
+    from bdhires.transforms import PrecipTransform
+
+    module = _osse_module()
+    transform = PrecipTransform.from_dict(
+        {"kind": "sqrt", "mu": 1.5, "sd": 1.2, "eps": 0.02}
     )
-    assert source.count("args.gauge_sigma_mm, device=device") == 2, (
-        "both the 0.1-degree and 0.05-degree gauge covariances must use it"
-    )
-    # It is printed and recorded, so two runs can never be compared across a
-    # silent change of observation error.
-    assert 'f"   gauge sigma {args.gauge_sigma_mm:g} mm/day"' in source
-    assert '"gauge_sigma_mm": args.gauge_sigma_mm,' in source
+    rainfall = np.array([0.0, 1.0, 5.0, 25.0, 100.0], np.float32)
+    sigma = module.transformed_sigma(transform, rainfall, np.full(5, 3.0, np.float32))
+
+    assert np.all(np.isfinite(sigma)), "a transformed sigma went non-finite"
+    assert np.all(sigma > 0.0)
+    # sqrt compresses the tail, so the SAME millimetre error is a smaller
+    # transformed error in heavy rain.  That intensity dependence is the point.
+    assert sigma[-1] < sigma[2] < sigma[1]
+    # And the dry cell must stay finite: sqrt has infinite slope at zero, so a
+    # pointwise derivative would report ~25 units here and discard the
+    # observation entirely.  A secant across the error is what keeps it sane.
+    assert sigma[0] < 2.0, f"dry-cell sigma blew up ({sigma[0]:.2f})"
+    assert "SECANT" in (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()

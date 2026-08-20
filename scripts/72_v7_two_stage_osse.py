@@ -119,6 +119,35 @@ ARM_NOTES = {
 }
 
 
+def transformed_sigma(transform, mm: np.ndarray, sigma_mm: np.ndarray) -> np.ndarray:
+    """Carry a physical error into the transform's units by linearisation.
+
+    Stage A's likelihood compares ``tf.forward(rainfall)``, so an error quoted
+    in mm/day -- which is how IMERG reports randomError, and how anyone
+    naturally thinks about gauges -- is in the wrong units for R.  Ignoring that
+    is not a small mistake: with a sqrt transform a 3 mm error is ~0.3
+    transformed units in a wet cell and much larger in a dry one, so a flat mm
+    figure used directly is wrong by orders of magnitude AND wrong in a
+    rain-rate-dependent direction.
+
+    Differentiating numerically rather than by hand keeps this correct for
+    whichever transform the statistics were fitted with (sqrt, cbrt, log1p);
+    the derivative is evaluated at the observed value, which is the standard
+    first-order propagation.
+    """
+    rainfall = np.clip(np.nan_to_num(mm, nan=0.0), 0.0, None).astype(np.float32)
+    error = np.abs(np.asarray(sigma_mm, np.float32))
+    # A SECANT across +/- sigma, not a derivative at the point.  sqrt has an
+    # infinite slope at zero rainfall, so a pointwise derivative reports a 3 mm
+    # error as ~25 transformed units in a dry cell and effectively discards the
+    # observation.  The secant asks the question that is actually meant -- how
+    # far does this much rainfall error move the transformed value -- and stays
+    # finite everywhere.
+    upper = np.asarray(transform.forward(rainfall + error), np.float32)
+    lower = np.asarray(transform.forward(np.maximum(rainfall - error, 0.0)), np.float32)
+    return np.maximum(0.5 * np.abs(upper - lower), 1.0e-4)
+
+
 def corrupt_satellite(
     truth_mm: np.ndarray,
     *,
@@ -513,12 +542,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--osse-sigma-mm", type=float, default=0.5,
                    help="assumed gauge error in OSSE mode; small but nonzero keeps "
                         "R invertible")
-    p.add_argument("--gauge-sigma-mm", type=float, default=None,
-                   help="assumed gauge error in mm/day. Defaults to --osse-sigma-mm "
-                        "under --observations osse and to 3.0 under real, matching "
-                        "the v4 diagnostic. A REAL gauge assimilated at the OSSE "
-                        "sigma is treated as near-perfect and the analysis chases "
-                        "its noise")
+    # TWO sigmas, because the two stages evaluate their likelihoods in different
+    # spaces and there is no single number that is correct for both:
+    #   stage A compares tf.forward(gauge_mm) -> TRANSFORMED units
+    #   stage B compares reconstruct_from_amount(...) -> PHYSICAL mm/day
+    # Sharing one value silently made the 0.1-degree gauge variance 124x too
+    # large, so the analysis ignored the observations it was assimilating.
+    p.add_argument("--meso-gauge-sigma", type=float, default=None,
+                   help="stage A gauge error in TRANSFORMED units (build_R's own "
+                        "space). Defaults to configs/da.yaml's tuned 0.10 for real "
+                        "observations and 0.05 for OSSE")
+    p.add_argument("--meso-gauge-representativeness", type=float, default=None,
+                   help="stage A point-vs-cell mismatch, TRANSFORMED units. Defaults "
+                        "to 0.25 for real (usually the DOMINANT term) and 0.0 for "
+                        "OSSE, where the pseudo-gauge is read with the same operator "
+                        "the analysis uses and there is no mismatch")
+    p.add_argument("--fine-gauge-sigma-mm", type=float, default=None,
+                   help="stage B gauge error in PHYSICAL mm/day, because that "
+                        "likelihood is evaluated on reconstructed rainfall. "
+                        "Defaults to 3.0 for real and 0.5 for OSSE")
     p.add_argument("--representativeness-mm", type=float, default=0.0)
     p.add_argument("--min-coverage", type=float, default=0.8)
     p.add_argument("--guidance-gamma", type=float, default=1.0e-3)
@@ -563,7 +605,10 @@ def parse_args() -> argparse.Namespace:
                         "enables the da_imerg / da_sim / da_sim_fine arms")
     p.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0,
                    help="floor on IMERG randomError, so a zero error is not infinite weight")
-    p.add_argument("--imerg-representativeness-mm", type=float, default=0.0)
+    p.add_argument("--imerg-representativeness", type=float, default=0.10,
+                   help="footprint-vs-block-mean mismatch in TRANSFORMED units, "
+                        "matching configs/da.yaml; the retrieval error itself is "
+                        "read from the file in mm and converted")
     p.add_argument("--arms", default=",".join(DEFAULT_ARMS),
                    help="comma-separated subset of " + ",".join(ARMS)
                         + " (IMERG arms require --imerg)")
@@ -613,19 +658,23 @@ def main() -> None:
 
     window = bangladesh_window()
     print(window.describe(), flush=True)
-    # One sigma, resolved once and printed: an observation error that silently
-    # differs between modes is the kind of thing that makes two runs look like a
-    # scientific difference when it is a configuration difference.
-    if args.gauge_sigma_mm is None:
-        args.gauge_sigma_mm = (
-            args.osse_sigma_mm if args.observations == "osse" else 3.0
-        )
+    # Resolved once and printed: an observation error that silently differs
+    # between runs makes a configuration difference look like a scientific one.
+    real = args.observations == "real"
+    if args.meso_gauge_sigma is None:
+        args.meso_gauge_sigma = 0.10 if real else 0.05
+    if args.meso_gauge_representativeness is None:
+        args.meso_gauge_representativeness = 0.25 if real else 0.0
+    if args.fine_gauge_sigma_mm is None:
+        args.fine_gauge_sigma_mm = 3.0 if real else args.osse_sigma_mm
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
            if args.observations == "osse"
            else "  (actual BMD reports, assimilated and verified)")
-        + f"   gauge sigma {args.gauge_sigma_mm:g} mm/day",
+        + f"\n  gauge error: stage A sigma {args.meso_gauge_sigma:g} + "
+        f"representativeness {args.meso_gauge_representativeness:g} (transformed); "
+        f"stage B sigma {args.fine_gauge_sigma_mm:g} mm/day (physical)",
         flush=True,
     )
 
@@ -808,7 +857,9 @@ def main() -> None:
             "pseudo (CHIRPS + error model)" if args.osse_satellite
             else (args.imerg if args.imerg else "none")
         ),
-        "gauge_sigma_mm": args.gauge_sigma_mm,
+        "meso_gauge_sigma_transformed": args.meso_gauge_sigma,
+        "meso_gauge_representativeness": args.meso_gauge_representativeness,
+        "fine_gauge_sigma_mm": args.fine_gauge_sigma_mm,
         "stations": {
             "total": int(len(stations)),
             "assimilated": [str(s) for s in stations.ids[assimilated]],
@@ -914,9 +965,10 @@ def main() -> None:
                             stations.lon[assimilated],
                         ).to(device)
                     )
+                    # Transformed units: this likelihood sees tf.forward(mm).
                     gauge_R = build_R(
-                        len(assimilated), args.gauge_sigma_mm, device=device,
-                        representativeness=args.representativeness_mm,
+                        len(assimilated), args.meso_gauge_sigma, device=device,
+                        representativeness=args.meso_gauge_representativeness,
                     )
                     variances.append(gauge_R)
                     # A station that did not report enters as NaN and the
@@ -944,10 +996,12 @@ def main() -> None:
                         sigma = np.maximum(
                             imerg["error"][day_position], args.imerg_sigma_floor_mm
                         )
+                    # sigma is mm/day; this likelihood is in transformed units.
+                    sigma_t = transformed_sigma(tf, field, sigma)
                     variances.append(
                         torch.from_numpy(
-                            (sigma.reshape(-1) ** 2
-                             + args.imerg_representativeness_mm ** 2).astype(np.float32)
+                            (sigma_t.reshape(-1) ** 2
+                             + args.imerg_representativeness ** 2).astype(np.float32)
                         ).to(device)
                     )
                     print(
@@ -995,8 +1049,9 @@ def main() -> None:
             # -- stage B ------------------------------------------------------
             observation = None
             if guide_fine:
+                # Physical mm: this likelihood sees reconstructed rainfall.
                 fine_R = build_R(
-                    len(assimilated), args.gauge_sigma_mm, device=device,
+                    len(assimilated), args.fine_gauge_sigma_mm, device=device,
                     representativeness=args.representativeness_mm,
                 )
                 draws = perturb_observations(
