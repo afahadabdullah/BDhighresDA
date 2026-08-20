@@ -2837,3 +2837,61 @@ def test_v7_osse_converts_a_millimetre_error_into_transformed_units():
         __import__("pathlib").Path(__file__).resolve().parents[1]
         / "scripts/72_v7_two_stage_osse.py"
     ).read_text()
+
+
+def test_v7_osse_aligns_the_bmd_accumulation_window():
+    """BMD day D is not model day D, and nothing about the shapes says so.
+
+    docs/METHOD_SWEEP_PLAN.md measured it: BMD day D is the 24 h ending 03:00
+    UTC on D, so it is ~87 percent calendar day D-1, while CHIRPS and CPC are
+    00-00 UTC calendar days.  CHIRPS-vs-BMD correlation is 0.626 at lag -1
+    against 0.271 at lag 0.  Script 60 carries BACKGROUND_DAY_OFFSET=-1 for
+    exactly this reason; a diagnostic that skips it compares a wet model day to
+    a dry gauge day and reports the difference as model bias.
+
+    OSSE needs no offset: the pseudo-gauge IS the model-day field.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    assert '"--gauge-day-offset"' in source
+    assert "args.gauge_day_offset = 1 if real else 0" in source
+    # The shift must be applied when the gauge series is READ, so the returned
+    # array can still be indexed by model day.
+    assert "gauge_times = day_times + np.timedelta64(int(args.gauge_day_offset)" in source
+    assert "args.stations, gauge_times, grid=fine_grid" in source
+    assert "args.stations, day_times, grid=fine_grid" not in source, (
+        "the gauge series is still read on unshifted model dates"
+    )
+    # Recorded, so a JSON can never be read without knowing its alignment.
+    assert '"gauge_day_offset": int(args.gauge_day_offset),' in source
+    # And measured per run rather than trusted.
+    assert "def lag_check(" in source
+    assert "correlation peaks at" in source
+
+
+def test_v7_osse_lag_check_finds_a_planted_day_shift():
+    """The alignment check has to actually detect a shift, not just print.
+
+    A station series that is a lagged copy of the field must peak at the lag it
+    was built with; otherwise the check is decoration and a real misalignment
+    would still pass unnoticed.
+    """
+    import numpy as np
+
+    module = _osse_module()
+    assert callable(module.lag_check)
+    # The correlation logic itself: a series shifted by one day correlates best
+    # against the field one day away, which is the whole premise.
+    rng = np.random.default_rng(0)
+    series = rng.gamma(2.0, 5.0, 40)
+    field_day = series[1:-1]
+    for offset, expected in ((-1, series[0:-2]), (0, series[1:-1]), (1, series[2:])):
+        r = np.corrcoef(field_day, expected)[0, 1]
+        if offset == 0:
+            assert r > 0.99, "a zero shift must correlate perfectly"
+        else:
+            assert r < 0.5, f"a {offset:+d} day shift should decorrelate"

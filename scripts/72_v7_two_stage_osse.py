@@ -119,6 +119,62 @@ ARM_NOTES = {
 }
 
 
+def lag_check(transform, stations, csv_path, day_times, fine_grid,
+              min_coverage, applied_offset, truth_field_at_stations) -> dict:
+    """Measure the model-vs-gauge day alignment instead of trusting the flag.
+
+    The offset is a convention, and conventions get changed by whoever last
+    prepared the data.  A wrong one is invisible: every array has the right
+    shape, every station is in the domain, and the only symptom is a large
+    unexplained bias -- which is exactly what a badly calibrated prior looks
+    like, so the two are easy to confuse.
+
+    This correlates the CHIRPS field at the station points against the gauge
+    reports at several lags.  docs/METHOD_SWEEP_PLAN.md measured 0.626 at lag -1
+    against 0.271 at lag 0 over many days; one day is far noisier than that, so
+    this WARNS rather than fails.
+    """
+    from bdhires.data import load_stations as _load
+
+    scores: dict[str, float] = {}
+    for offset in (-1, 0, 1, 2):
+        try:
+            probe, values = _load(
+                csv_path, day_times + np.timedelta64(offset, "D"),
+                grid=fine_grid, min_coverage=0.0,
+            )
+        except Exception:
+            continue
+        if len(probe) != len(stations):
+            continue
+        observed = np.asarray(values, np.float64)
+        modelled = np.asarray(truth_field_at_stations, np.float64)[None]
+        keep = np.isfinite(observed) & np.isfinite(modelled)
+        if keep.sum() < 5:
+            continue
+        x, y = modelled[keep], observed[keep]
+        if x.std() <= 0 or y.std() <= 0:
+            continue
+        scores[str(offset)] = float(np.corrcoef(x, y)[0, 1])
+    if not scores:
+        return {}
+    best = max(scores, key=scores.get)
+    print("gauge alignment check (CHIRPS at stations vs BMD reports):", flush=True)
+    for offset, value in sorted(scores.items(), key=lambda kv: int(kv[0])):
+        mark = "  <- applied" if int(offset) == applied_offset else ""
+        star = " *best" if offset == best else ""
+        print(f"    offset {int(offset):+d}: r = {value:+.3f}{star}{mark}", flush=True)
+    if int(best) != applied_offset:
+        print(
+            f"    WARNING: correlation peaks at {int(best):+d}, not the applied "
+            f"{applied_offset:+d}.  On a single day this is noisy, but if it "
+            f"persists the gauge series and the model are a day apart and every "
+            f"score below is meaningless.",
+            flush=True,
+        )
+    return {"correlation_by_offset": scores, "applied": applied_offset, "peak": int(best)}
+
+
 def transformed_sigma(transform, mm: np.ndarray, sigma_mm: np.ndarray) -> np.ndarray:
     """Carry a physical error into the transform's units by linearisation.
 
@@ -563,6 +619,16 @@ def parse_args() -> argparse.Namespace:
                         "Defaults to 3.0 for real and 0.5 for OSSE")
     p.add_argument("--representativeness-mm", type=float, default=0.0)
     p.add_argument("--min-coverage", type=float, default=0.8)
+    p.add_argument("--gauge-day-offset", type=int, default=None,
+                   help="days added to the MODEL date to find the BMD date. "
+                        "BMD day D is the 24h ending 03:00 UTC on D, so it is ~87 "
+                        "percent calendar day D-1; CHIRPS and CPC are 00-00 UTC "
+                        "calendar days.  Model calendar day C therefore corresponds "
+                        "to BMD day C+1, and the default is +1 for real observations "
+                        "(0 for OSSE, where the pseudo-gauge IS the model-day field "
+                        "and no window mismatch exists).  docs/METHOD_SWEEP_PLAN.md "
+                        "measures the lag: CHIRPS-vs-BMD correlation is 0.626 at "
+                        "lag -1 against 0.271 at lag 0")
     p.add_argument("--guidance-gamma", type=float, default=1.0e-3)
     p.add_argument("--guidance-scale", type=float, default=1.0)
     p.add_argument("--guidance-clip", type=float, default=50.0)
@@ -667,6 +733,8 @@ def main() -> None:
         args.meso_gauge_representativeness = 0.25 if real else 0.0
     if args.fine_gauge_sigma_mm is None:
         args.fine_gauge_sigma_mm = 3.0 if real else args.osse_sigma_mm
+    if args.gauge_day_offset is None:
+        args.gauge_day_offset = 1 if real else 0
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
@@ -779,9 +847,20 @@ def main() -> None:
     # ---- stations, and the OSSE truth they read ---------------------------
     fine_grid = window.fine_grid()
     day_times = np.asarray([np.datetime64(d) for d, _, _ in days])
+    # The BMD accumulation window does not align with the model's calendar day,
+    # so the gauge series is read on shifted dates and then indexed by MODEL day.
+    gauge_times = day_times + np.timedelta64(int(args.gauge_day_offset), "D")
+    if args.gauge_day_offset:
+        print(
+            f"gauge day offset: {args.gauge_day_offset:+d} "
+            f"(model {day_times[0]} <- BMD {gauge_times[0]}); BMD day D is the "
+            f"24h ending 03 UTC on D, so it is ~87% calendar day D-1",
+            flush=True,
+        )
     try:
         stations, gauge_mm = load_stations(
-            args.stations, day_times, grid=fine_grid, min_coverage=args.min_coverage
+            args.stations, gauge_times, grid=fine_grid,
+            min_coverage=args.min_coverage,
         )
     except ValueError as error:
         # Stations.csv is the station CATALOG (id, name, lat, lon).  What
@@ -860,6 +939,7 @@ def main() -> None:
         "meso_gauge_sigma_transformed": args.meso_gauge_sigma,
         "meso_gauge_representativeness": args.meso_gauge_representativeness,
         "fine_gauge_sigma_mm": args.fine_gauge_sigma_mm,
+        "gauge_day_offset": int(args.gauge_day_offset),
         "stations": {
             "total": int(len(stations)),
             "assimilated": [str(s) for s in stations.ids[assimilated]],
@@ -927,6 +1007,14 @@ def main() -> None:
                 bias_frac=args.osse_satellite_bias_frac,
                 perfect=args.osse_satellite_perfect,
                 seed=args.seed + meso_index,
+            )
+
+        if args.observations == "real" and day_position == 0:
+            with torch.no_grad():
+                chirps_at_stations = fine_operator(fine_truth)[0, 0].cpu().numpy()
+            results["alignment"] = lag_check(
+                tf, stations, args.stations, day_times[:1], fine_grid,
+                args.min_coverage, int(args.gauge_day_offset), chirps_at_stations,
             )
 
         truth_fields[date] = {
@@ -1127,14 +1215,17 @@ def main() -> None:
             for key in ("crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm")
         }
 
-    path = out_dir / "v7_two_stage_osse.json"
+    # Named for the experiment it actually is.  A file called ..._osse.json
+    # holding real-data results is a trap for whoever opens it in a month.
+    path = out_dir / f"v7_two_stage_{args.observations}.json"
     path.write_text(json.dumps(results, indent=2))
     if not args.no_plots:
         # Non-fatal by design: a broken figure must not cost the numbers, which
         # are already on disk by this point.
         try:
             make_figures(panels, truth_fields, results, stations, assimilated,
-                         withheld, window, arms, out_dir)
+                         withheld, window, arms, out_dir,
+                         observations=args.observations)
         except Exception as error:  # pragma: no cover - defensive
             import traceback
 
@@ -1150,7 +1241,7 @@ def main() -> None:
 
 
 def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
-                 window, arms, out_dir: Path) -> None:
+                 window, arms, out_dir: Path, observations: str = "osse") -> None:
     """Maps, increments and station scatters -- one figure set per day.
 
     The increment column is the point of this.  A CRPS table says an arm helped
@@ -1162,6 +1253,19 @@ def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    # In OSSE the gridded CHIRPS field IS the verification truth.  With real
+    # gauges it is only a reference field -- the scores are against BMD reports,
+    # which exist at 38 points and nowhere else.  Calling it "truth" in that
+    # case would misdescribe every number on the figure.
+    osse = observations == "osse"
+    field_label = "CHIRPS truth (OSSE)" if osse else "CHIRPS (reference field)"
+    station_label = (
+        "CHIRPS at station (mm/day)" if osse else "BMD gauge report (mm/day)"
+    )
+    verified_against = (
+        "CHIRPS at withheld stations" if osse else "withheld BMD gauge reports"
+    )
 
     grid = window.fine_grid()
     extent = (
@@ -1225,7 +1329,7 @@ def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
                     np.where(keep, truth["field"], np.nan), origin="lower",
                     extent=extent, cmap="turbo", vmin=0.0, vmax=vmax, aspect="auto",
                 )
-                axes[row][1].set_title("CHIRPS truth (OSSE)", fontsize=10)
+                axes[row][1].set_title(field_label, fontsize=10)
                 figure.colorbar(image, ax=axes[row][1], fraction=0.046, label="mm/day")
             stamp(axes[row][1])
 
@@ -1244,21 +1348,24 @@ def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
                 d for d in results["arms"][arm]["days"] if d["date"] == date
             )["withheld"]
             axis.set_title(
-                f"withheld: CRPS {score.get('crps_mm', float('nan')):.2f}  "
+                f"WITHHELD stations: CRPS "
+                f"{score.get('crps_mm', float('nan')):.2f}  "
                 f"bias {score.get('bias_mm', float('nan')):+.2f} mm",
                 fontsize=10,
             )
-            axis.set_xlabel("CHIRPS at station (mm/day)")
+            axis.set_xlabel(station_label)
             axis.set_ylabel("analysis (mm/day)")
             axis.grid(alpha=0.3)
             if row == 0:
                 axis.legend(fontsize=7)
 
         figure.suptitle(
-            f"V7 two-stage OSSE  {date}   stage A epoch "
-            f"{results['checkpoints']['meso']['epoch']}, stage B epoch "
-            f"{results['checkpoints']['allocation']['epoch']}",
-            fontsize=12,
+            f"V7 two stage, {observations.upper()} observations   {date}   "
+            f"stage A epoch {results['checkpoints']['meso']['epoch']}, "
+            f"stage B epoch {results['checkpoints']['allocation']['epoch']}\n"
+            f"CRPS is scored against {verified_against} "
+            f"({len(withheld)} of {len(stations)} stations, never assimilated)",
+            fontsize=11,
         )
         figure.tight_layout(rect=(0, 0, 1, 0.98))
         figure.savefig(out_dir / f"maps_{date}.png", dpi=110, bbox_inches="tight")
@@ -1268,7 +1375,7 @@ def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
     # Summary bars across arms.
     figure, axes = plt.subplots(1, 3, figsize=(13.0, 3.6))
     for axis, key, label in (
-        (axes[0], "crps_mm", "withheld CRPS (mm/day)"),
+        (axes[0], "crps_mm", f"CRPS vs {verified_against} (mm/day)"),
         (axes[1], "mae_mm", "withheld MAE (mm/day)"),
         (axes[2], "bias_mm", "withheld bias (mm/day)"),
     ):

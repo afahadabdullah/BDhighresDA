@@ -80,10 +80,15 @@ done
 mkdir -p "$OUT"
 DAILY="$OUT/bmd_daily.csv"
 if [[ ! -s "$DAILY" ]]; then
+    # Widened by two days on each side: BMD day D is the 24h ending 03 UTC on
+    # D, so model day C is read from BMD day C+1 and the window must contain it.
+    CONV_START="$(date -u -d "$START -2 days" +%Y-%m-%d 2>/dev/null || date -u -v-2d -j -f %Y-%m-%d "$START" +%Y-%m-%d)"
+    CONV_END="$(date -u -d "$END +2 days" +%Y-%m-%d 2>/dev/null || date -u -v+2d -j -f %Y-%m-%d "$END" +%Y-%m-%d)"
+    echo "converting BMD $CONV_START..$CONV_END (widened for the day offset)"
     "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
         --data-dir "$BMD_DIR" \
         --stations "$CATALOG" \
-        --start "$START" --end "$END" \
+        --start "$CONV_START" --end "$CONV_END" \
         --out "$DAILY" \
         --summary "$OUT/bmd_stations.csv" \
         --report "$OUT/bmd_qc.json"
