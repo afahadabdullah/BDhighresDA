@@ -84,7 +84,9 @@ class V7Window:
         )
 
 
-def bangladesh_window(meso_size: int = 64, fine_size: int = 120) -> V7Window:
+def bangladesh_window(
+    meso_size: int = 64, fine_size: int = 120, align_meso_to_bd: bool = True
+) -> V7Window:
     """Place both stages' windows over Bangladesh, or refuse.
 
     ``fine_size`` is stage B's training crop and ``meso_size`` stage A's, both in
@@ -142,8 +144,39 @@ def bangladesh_window(meso_size: int = 64, fine_size: int = 120) -> V7Window:
         start = coarse_start - (meso_size - coarse_size) // 2
         return max(0, min(start, extent - meso_size))
 
-    meso_row = meso_start(coarse_row, meso_grid.nlat)
-    meso_col = meso_start(coarse_col, meso_grid.nlon)
+    if align_meso_to_bd:
+        # BMD-aligned IMERG at observation_factor 2 has its footprint centres on
+        # exactly BD-at-0.1, so pinning stage A there makes the satellite
+        # observation operator an identity -- one footprint per state cell, no
+        # block averaging, no interpolation, nothing to get subtly wrong.  The
+        # fine window is then nudged east to stay inside it, which still covers
+        # the country; assert that rather than assume it.
+        from ..grids import BD, crop_offsets
+
+        anchor = crop_offsets(meso_grid, at_resolution(BD, 0.1))
+        if at_resolution(BD, 0.1).nlon != meso_size:
+            raise ValueError(
+                f"BD at 0.1 degrees is {at_resolution(BD, 0.1).nlon} cells but "
+                f"stage A crops {meso_size}; they must match to align with IMERG"
+            )
+        meso_row, meso_col = anchor
+        # Pull the fine window inside the anchored meso window, keeping coverage.
+        coarse_row = min(max(coarse_row, meso_row), meso_row + meso_size - coarse_size)
+        coarse_col = min(max(coarse_col, meso_col), meso_col + meso_size - coarse_size)
+        fine_row, fine_col = 2 * coarse_row, 2 * coarse_col
+        edge_lat = WIDE_CPC.lat_min + fine_row * res
+        edge_lon = WIDE_CPC.lon_min + fine_col * res
+        if (edge_lat > BANGLADESH_LAT[0] or edge_lat + span < BANGLADESH_LAT[1]
+                or edge_lon > BANGLADESH_LON[0] or edge_lon + span < BANGLADESH_LON[1]):
+            raise ValueError(
+                f"anchoring stage A to BD leaves a fine window "
+                f"{edge_lon:.2f}-{edge_lon + span:.2f} E, "
+                f"{edge_lat:.2f}-{edge_lat + span:.2f} N that does not cover "
+                f"Bangladesh; pass align_meso_to_bd=False to centre it instead"
+            )
+    else:
+        meso_row = meso_start(coarse_row, meso_grid.nlat)
+        meso_col = meso_start(coarse_col, meso_grid.nlon)
 
     window = V7Window(
         meso_origin=(meso_row, meso_col),

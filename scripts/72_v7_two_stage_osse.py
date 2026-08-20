@@ -56,6 +56,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.bmd import neighbored_holdout  # noqa: E402
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
+    BlockAverageObsOperator,
+    CompositeObsOperator,
     GuidanceConfig,
     SamplerConfig,
     build_R,
@@ -87,20 +89,103 @@ from bdhires.transforms import (  # noqa: E402
     load_climatology,
 )
 
-# (guide at 0.1 deg, guide at 0.05 deg).  Order matters only for the report.
-ARMS: dict[str, tuple[bool, bool]] = {
-    "background": (False, False),
-    "da_meso": (True, False),
-    "da_fine": (False, True),
-    "da_both": (True, True),
+# (what is assimilated at 0.1 deg, whether gauges act at 0.05 deg).
+# The 0.1-degree set is one of: none / gauges / imerg / both.
+ARMS: dict[str, tuple[str, bool]] = {
+    "background": ("none", False),
+    "da_meso": ("gauges", False),
+    "da_fine": ("none", True),
+    "da_both": ("gauges", True),
+    # The three below need --imerg.  BMD-aligned IMERG at observation_factor 2
+    # sits on exactly stage A's 0.1-degree cells, so its operator is an identity
+    # -- one footprint per state cell, nothing averaged or interpolated.
+    "da_imerg": ("imerg", False),
+    "da_sim": ("both", False),
+    "da_sim_fine": ("both", True),
 }
+
+IMERG_ARMS = {name for name, (obs, _) in ARMS.items() if obs in ("imerg", "both")}
+
+DEFAULT_ARMS = ("background", "da_meso", "da_fine", "da_both")
 
 ARM_NOTES = {
     "background": "no observations; the prior both analyses start from",
     "da_meso": "gauges at 0.1 deg only, then an unguided downscale",
     "da_fine": "unguided 0.1 deg, then gauges at 0.05 deg -- the 11 km question",
     "da_both": "gauges at both scales; the V7 product path",
+    "da_imerg": "IMERG at 0.1 deg only -- what the satellite alone buys",
+    "da_sim": "IMERG + gauges SIMULTANEOUSLY at 0.1 deg",
+    "da_sim_fine": "IMERG + gauges at 0.1 deg, then gauges at 0.05 deg",
 }
+
+
+def load_imerg_meso(path: str, days: np.ndarray, window, grid) -> dict:
+    """Read BMD-aligned IMERG onto stage A's own cells, or refuse.
+
+    ``observation_factor`` 2 means footprint centres on BD-at-0.1, which is
+    exactly the grid stage A runs on when the window is anchored there.  This
+    checks that rather than trusting it: a file on a different lattice would
+    still have the right shape and would assimilate rainfall into the wrong
+    places.
+    """
+    import xarray as xr
+
+    with xr.open_dataset(path) as dataset:
+        for name in ("precipitation", "randomError"):
+            if name not in dataset.variables:
+                raise SystemExit(f"{path} lacks the IMERG variable {name!r}")
+            units = str(dataset[name].attrs.get("units", "")).lower().replace(" ", "")
+            if units not in ("mm/day", "mmday-1", "mm day-1", "mm/d"):
+                raise SystemExit(f"{path} {name} units are {units!r}; expected mm/day")
+        factor = dataset.attrs.get("observation_factor")
+        if factor is None or int(factor) != 2:
+            raise SystemExit(
+                f"{path} declares observation_factor {factor!r}; stage A needs 2, "
+                f"which is the 0.1-degree BMD-aligned product"
+            )
+        end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
+        if end_hour is None or int(end_hour) != 3:
+            raise SystemExit(
+                f"{path} is not on the BMD 03:00 UTC accumulation window "
+                f"(declares {end_hour!r}); it would be a different day"
+            )
+        source_days = np.asarray(dataset.time.values).astype("datetime64[D]")
+        lookup = {day: index for index, day in enumerate(source_days)}
+        missing = [str(day) for day in days if day not in lookup]
+        if missing:
+            raise SystemExit(f"{path} lacks requested days {missing}")
+        index = np.asarray([lookup[day] for day in days], int)
+        precipitation = np.asarray(
+            dataset["precipitation"].isel(time=index).transpose("time", "lat", "lon"),
+            np.float32,
+        )
+        error = np.asarray(
+            dataset["randomError"].isel(time=index).transpose("time", "lat", "lon"),
+            np.float32,
+        )
+        lat = np.asarray(dataset.lat.values, np.float64)
+        lon = np.asarray(dataset.lon.values, np.float64)
+
+    if precipitation.shape[1:] != (grid.nlat, grid.nlon):
+        raise SystemExit(
+            f"{path} is {precipitation.shape[1:]} but stage A's window is "
+            f"{(grid.nlat, grid.nlon)}; the IMERG file and the analysis window "
+            f"do not describe the same area"
+        )
+    if not np.allclose(lat, grid.lat, atol=1.0e-5) or not np.allclose(
+        lon, grid.lon, atol=1.0e-5
+    ):
+        raise SystemExit(
+            f"{path} footprint centres do not sit on stage A's 0.1-degree cells "
+            f"(file lat {lat[0]:.3f}..{lat[-1]:.3f}, window {grid.lat[0]:.3f}.."
+            f"{grid.lat[-1]:.3f}); assimilating it would displace rainfall"
+        )
+    print(
+        f"[imerg] {path}: {precipitation.shape[0]} days on stage A's own cells "
+        f"({grid.nlat}x{grid.nlon} @0.1 deg), identity operator",
+        flush=True,
+    )
+    return {"precipitation": precipitation, "error": error}
 
 
 # --------------------------------------------------------------------------
@@ -380,8 +465,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--spread-cells", type=float, default=0.0,
                    help="Gaussian spreading of the 0.1-degree guidance gradient, in cells")
     p.add_argument("--seed", type=int, default=20220503)
-    p.add_argument("--arms", default=",".join(ARMS),
-                   help="comma-separated subset of " + ",".join(ARMS))
+    p.add_argument("--osse-satellite", action="store_true",
+                   help="synthesise the 0.1-degree satellite stream from CHIRPS "
+                        "(perfect AREA-AVERAGE observations) instead of reading a "
+                        "real IMERG file; consistent with the perfect gauges and "
+                        "needs no external data")
+    p.add_argument("--osse-satellite-sigma-mm", type=float, default=1.0,
+                   help="assumed error on the pseudo-satellite footprints")
+    p.add_argument("--imerg", default=None,
+                   help="BMD-aligned IMERG netCDF at observation_factor 2 (0.1 deg); "
+                        "enables the da_imerg / da_sim / da_sim_fine arms")
+    p.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0,
+                   help="floor on IMERG randomError, so a zero error is not infinite weight")
+    p.add_argument("--imerg-representativeness-mm", type=float, default=0.0)
+    p.add_argument("--arms", default=",".join(DEFAULT_ARMS),
+                   help="comma-separated subset of " + ",".join(ARMS)
+                        + " (IMERG arms require --imerg)")
     p.add_argument("--no-plots", action="store_true",
                    help="write the JSON only; figures are on by default")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -396,6 +495,17 @@ def main() -> None:
         raise SystemExit(f"unknown arms {unknown}; choose from {sorted(ARMS)}")
     if not arms:
         raise SystemExit("no arms selected")
+    needs_satellite = sorted(set(arms) & IMERG_ARMS)
+    if needs_satellite and not (args.imerg or args.osse_satellite):
+        # Checked here, before any sampling: discovering it after three arms
+        # have run wastes the whole allocation.
+        raise SystemExit(
+            f"arms {needs_satellite} need a 0.1-degree satellite stream.\n"
+            f"  --osse-satellite   synthesise it from CHIRPS (perfect, no file)\n"
+            f"  --imerg PATH       assimilate a real BMD-aligned IMERG file"
+        )
+    if args.imerg and args.osse_satellite:
+        raise SystemExit("--imerg and --osse-satellite are alternatives, not both")
 
     device = torch.device(args.device)
     out_dir = Path(args.out)
@@ -550,6 +660,14 @@ def main() -> None:
         fine_grid, stations.lat[assimilated], stations.lon[assimilated]
     ).to(device)
 
+    meso_grid = _meso_grid(window)
+    imerg = None
+    if args.imerg:
+        imerg = load_imerg_meso(
+            args.imerg, np.asarray([np.datetime64(d) for d, _, _ in days]),
+            window, meso_grid,
+        )
+
     gcfg = GuidanceConfig(
         gamma=args.guidance_gamma,
         scale=args.guidance_scale,
@@ -582,7 +700,7 @@ def main() -> None:
 
     panels: dict = {}
     truth_fields: dict = {}
-    for date, meso_index, sub_index in days:
+    for day_position, (date, meso_index, sub_index) in enumerate(days):
         item = meso_ds[meso_index]
         cond = item["cond"][None].to(device)
         base = item["base"][None].to(device)
@@ -600,6 +718,20 @@ def main() -> None:
             truth_at_stations = fine_operator(fine_truth)[0, 0].cpu().numpy()
         truth_assim = truth_at_stations[assimilated]
         truth_withheld = truth_at_stations[withheld]
+        # A perfect satellite sees the exact 0.1-degree area mean of the truth.
+        # That is precisely the archive's coarse_mm, so nothing is recomputed.
+        # It covers stage B's window, which is a SUB-window of stage A's state,
+        # so the rest of the field is NaN -- unobserved, not zero.
+        satellite_mm = None
+        if args.osse_satellite:
+            satellite_mm = np.full(
+                (window.meso_size, window.meso_size), np.nan, np.float32
+            )
+            row, column = window.meso_local
+            satellite_mm[
+                row:row + window.coarse_size, column:column + window.coarse_size
+            ] = sub["coarse_mm"][0].numpy()
+
         truth_fields[date] = {
             "field": fine_truth[0, 0].cpu().numpy(),
             "valid": sub["fine_valid"][0].numpy().astype(bool),
@@ -607,33 +739,87 @@ def main() -> None:
         }
 
         for arm in arms:
-            guide_meso, guide_fine = ARMS[arm]
+            meso_obs, guide_fine = ARMS[arm]
+            guide_meso = meso_obs != "none"
             generator = torch.Generator(device=device).manual_seed(
                 args.seed + 1000 * meso_index
             )
-            print(f"  {date}  {arm:<11s} "
-                  f"(meso DA {'on ' if guide_meso else 'off'}, "
-                  f"fine DA {'on ' if guide_fine else 'off'})...", flush=True)
+            print(f"  {date}  {arm:<12s} "
+                  f"(0.1 deg: {meso_obs:<6s}  0.05 deg: "
+                  f"{'gauges' if guide_fine else 'none  '})...", flush=True)
 
             # -- stage A ------------------------------------------------------
             meso_H = meso_y = meso_R = None
             if guide_meso:
-                # The gauge is a POINT measurement of 0.05-degree rainfall, but
-                # at this stage the state is 0.1 degree, so it is read as the
-                # value of the cell containing it.  That is the honest operator
-                # for a 0.1-degree state; the sub-cell placement is stage B's job.
-                meso_grid = _meso_grid(window)
-                meso_H = BilinearObsOperator(
-                    meso_grid, stations.lat[assimilated], stations.lon[assimilated]
-                ).to(device)
-                meso_R = build_R(
-                    len(assimilated), args.osse_sigma_mm, device=device,
-                    representativeness=args.representativeness_mm,
+                # Both streams go through the SAME likelihood; neither is a
+                # conditioning channel.  Stacking them into one operator and one
+                # R is what makes "simultaneous" mean simultaneous rather than
+                # two sequential updates that double-count the prior.
+                operators, values, variances = [], [], []
+
+                if meso_obs in ("gauges", "both"):
+                    # A gauge is a POINT measurement, read here as the value of
+                    # the 0.1-degree cell containing it.  That is the honest
+                    # operator for a 0.1-degree state; sub-cell placement is
+                    # stage B's job.
+                    operators.append(
+                        BilinearObsOperator(
+                            meso_grid, stations.lat[assimilated],
+                            stations.lon[assimilated],
+                        ).to(device)
+                    )
+                    gauge_R = build_R(
+                        len(assimilated), args.osse_sigma_mm, device=device,
+                        representativeness=args.representativeness_mm,
+                    )
+                    variances.append(gauge_R)
+                    values.append(tf.forward(truth_assim.astype(np.float32)))
+
+                if meso_obs in ("imerg", "both"):
+                    # observation_factor 2 puts one footprint on each stage A
+                    # cell, so the forward operator is the identity -- a
+                    # factor-1 block average, reusing the audited operator
+                    # rather than adding a second one that means the same thing.
+                    operators.append(
+                        BlockAverageObsOperator(
+                            1, valid=meso_ds.fixed_valid
+                        ).to(device)
+                    )
+                    if satellite_mm is not None:
+                        field = satellite_mm
+                        sigma = np.full_like(field, args.osse_satellite_sigma_mm)
+                    else:
+                        field = imerg["precipitation"][day_position]
+                        sigma = np.maximum(
+                            imerg["error"][day_position], args.imerg_sigma_floor_mm
+                        )
+                    variances.append(
+                        torch.from_numpy(
+                            (sigma.reshape(-1) ** 2
+                             + args.imerg_representativeness_mm ** 2).astype(np.float32)
+                        ).to(device)
+                    )
+                    print(
+                        f"      satellite: {int(np.isfinite(field).sum())} of "
+                        f"{field.size} 0.1-degree footprints "
+                        f"({'pseudo, from CHIRPS' if satellite_mm is not None else 'IMERG'})",
+                        flush=True,
+                    )
+                    flat = field.reshape(-1)
+                    transformed = tf.forward(flat.astype(np.float32))
+                    transformed[~np.isfinite(flat)] = np.nan
+                    values.append(transformed)
+
+                meso_H = (
+                    operators[0] if len(operators) == 1
+                    else CompositeObsOperator(operators).to(device)
                 )
-                y_transformed = tf.forward(truth_assim.astype(np.float32))
+                meso_R = torch.cat(variances)
+                stacked = np.concatenate(values)
                 draws = perturb_observations(
-                    y_transformed, meso_R, args.members, seed=meso_index
+                    stacked, meso_R, args.members, seed=meso_index
                 )
+                draws[:, ~np.isfinite(stacked)] = np.nan
                 meso_y = torch.from_numpy(
                     draws[:, None].astype(np.float32)
                 ).to(device)

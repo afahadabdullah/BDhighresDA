@@ -2493,8 +2493,9 @@ def test_v7_osse_arms_are_declared_consistently():
     """
     module = _osse_module()
     assert set(module.ARMS) == set(module.ARM_NOTES)
-    assert module.ARMS["background"] == (False, False)
-    assert module.ARMS["da_both"] == (True, True)
+    # (what is assimilated at 0.1 deg, whether gauges act at 0.05 deg)
+    assert module.ARMS["background"] == ("none", False)
+    assert module.ARMS["da_both"] == ("gauges", True)
     # The two single-stage arms are what make a degradation attributable.
     assert module.ARMS["da_meso"] != module.ARMS["da_fine"]
     assert len(set(module.ARMS.values())) == len(module.ARMS)
@@ -2570,3 +2571,86 @@ def test_v7_osse_takes_the_conditioning_contract_from_the_checkpoint(tmp_path):
     # Statistics are part of the weights' meaning; a different file must be
     # refused rather than silently mis-scaling every input.
     assert "they must be the same file" in source
+
+
+def test_v7_osse_imerg_arms_are_gated_and_stacked_correctly():
+    """IMERG is an observation, assimilated simultaneously -- never conditioning.
+
+    BMD-aligned IMERG at observation_factor 2 sits on exactly stage A's
+    0.1-degree cells, so its forward operator is the identity.  Simultaneous
+    means ONE likelihood over a stacked observation vector, not two sequential
+    updates -- the second of which would count the prior twice.
+    """
+    import numpy as np
+
+    from bdhires.da import (
+        BilinearObsOperator,
+        BlockAverageObsOperator,
+        CompositeObsOperator,
+    )
+    from bdhires.grids import Grid
+
+    module = _osse_module()
+    assert module.IMERG_ARMS == {"da_imerg", "da_sim", "da_sim_fine"}
+    # The default set stays gauge-only, so an unchanged command line does not
+    # suddenly require a file it never needed.
+    assert set(module.DEFAULT_ARMS).isdisjoint(module.IMERG_ARMS)
+    assert set(module.ARMS) == set(module.ARM_NOTES)
+    assert module.ARMS["da_sim"] == ("both", False)
+    assert module.ARMS["da_sim_fine"] == ("both", True)
+    assert module.ARMS["background"] == ("none", False)
+
+    # A factor-1 block average IS the identity: one footprint per state cell.
+    grid = Grid(name="t", lon_min=87.6, lat_min=20.3, nlon=16, nlat=16, res=0.1)
+    field = torch.rand(2, 1, 16, 16)
+    identity = BlockAverageObsOperator(1, valid=np.ones((16, 16), bool))
+    assert torch.allclose(identity(field), field.reshape(2, 1, -1))
+
+    # And the composite stacks gauges first, matching how y and R are built.
+    gauge = BilinearObsOperator(grid, np.array([21.0, 21.5]), np.array([88.0, 88.5]))
+    composite = CompositeObsOperator([gauge, identity])
+    stacked = composite(field)
+    assert stacked.shape == (2, 1, 2 + 256)
+    assert torch.allclose(stacked[:, :, :2], gauge(field))
+    assert torch.allclose(stacked[:, :, 2:], identity(field))
+
+
+def test_v7_window_can_anchor_stage_a_to_the_imerg_grid():
+    """Anchoring stage A to BD-at-0.1 is what makes the IMERG operator exact.
+
+    Without it the analysis window and the BMD-aligned IMERG footprints sit on
+    different origins, and assimilating the file would displace rainfall by a
+    couple of cells -- with the right shape throughout, so nothing would catch
+    it but the verification score.
+    """
+    from bdhires.eval.v7_window import (
+        BANGLADESH_LAT,
+        BANGLADESH_LON,
+        bangladesh_window,
+    )
+    from bdhires.grids import BD, WIDE, at_resolution, crop_offsets
+
+    anchored = bangladesh_window(align_meso_to_bd=True)
+    assert anchored.meso_origin == crop_offsets(
+        at_resolution(WIDE, 0.1), at_resolution(BD, 0.1)
+    ), "stage A is not on the IMERG-aligned grid"
+
+    # IMERG factor-2 footprint centres ARE BD-at-0.1 cell centres.
+    assert np.allclose(
+        BD.lat.reshape(-1, 2).mean(axis=1), at_resolution(BD, 0.1).lat
+    )
+
+    # Anchoring must not cost Bangladesh coverage, and stage B must still nest.
+    grid = anchored.fine_grid()
+    assert grid.lon_min <= BANGLADESH_LON[0]
+    assert grid.lon_min + grid.nlon * grid.res >= BANGLADESH_LON[1]
+    assert grid.lat_min <= BANGLADESH_LAT[0]
+    assert grid.lat_min + grid.nlat * grid.res >= BANGLADESH_LAT[1]
+    row, column = anchored.meso_local
+    assert row >= 0 and column >= 0
+    assert row + anchored.coarse_size <= anchored.meso_size
+    assert column + anchored.coarse_size <= anchored.meso_size
+
+    # The unanchored placement remains available and still covers the country.
+    centred = bangladesh_window(align_meso_to_bd=False)
+    assert centred.meso_origin != anchored.meso_origin
