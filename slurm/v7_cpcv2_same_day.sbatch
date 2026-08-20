@@ -55,18 +55,28 @@ ALLOC_CKPT="${V7_OSSE_ALLOC_CKPT:-runs/v7/allocation/best.pt}"
 MESO_ARCHIVE="${V7_MESO_ARCHIVE:-data/processed/bd_wide_cpc_0p1.zarr}"
 MESO_STATS="${V7_MESO_STATS:-data/processed/stats_v7_meso.json}"
 SUBGRID="${V7_PREP_OUT:-data/processed/v7/wide_v7.zarr}"
-# This is the native BMD-windowed IMERG stream on V7 stage A's 0.1-degree grid.
+# Reuse the paired 1--10 May products prepared by
+# submit_v2_ingestion_triplet.sh: native 0.1-degree for V7 and factor-8/S04 for
+# CPCv2.  The default model day (03 May) and its BMD label day (04 May) are both
+# covered.  Overrides remain available for an intentionally different window.
+IMERG_PREP_DIR="${V7_COMPARE_IMERG_DIR:-${V2_INGEST_IMERG_DIR:-data/processed/imerg_prepared_ing2022}}"
 V7_IMERG="${V7_COMPARE_V7_IMERG:-${V7_OSSE_IMERG:-}}"
-[[ -n "$V7_IMERG" ]] || {
-    echo "ERROR: set V7_COMPARE_V7_IMERG (or the existing V7_OSSE_IMERG) to the native 0.1-degree BMD-aligned IMERG file" >&2
-    exit 1
-}
+if [[ "$V7_IMERG" == /path/to/* ]]; then
+    echo "WARNING: ignoring placeholder V7 IMERG path: $V7_IMERG" >&2
+    V7_IMERG=""
+fi
+V7_IMERG="${V7_IMERG:-$IMERG_PREP_DIR/imerg_aligned_20220501_20220510.nc}"
 
 CPCV2_CKPT="${V7_COMPARE_CPCV2_CKPT:-runs/prior_h100_cpc_v2/best.pt}"
 CPCV2_CONFIG="${V7_COMPARE_CPCV2_CONFIG:-configs/da.yaml}"
 # CPCv2's frozen simultaneous winner used S04 (factor 8 = 0.4 degrees), not
 # V7's native 0.1-degree stream.  Keep each model's winning observation setup.
-CPCV2_IMERG="${V7_COMPARE_CPCV2_IMERG:?set V7_COMPARE_CPCV2_IMERG to the frozen CPCv2 S04 IMERG file}"
+CPCV2_IMERG="${V7_COMPARE_CPCV2_IMERG:-}"
+if [[ "$CPCV2_IMERG" == /path/to/* ]]; then
+    echo "WARNING: ignoring placeholder CPCv2 IMERG path: $CPCV2_IMERG" >&2
+    CPCV2_IMERG=""
+fi
+CPCV2_IMERG="${CPCV2_IMERG:-$IMERG_PREP_DIR/imerg_0p4deg_20220501_20220510.nc}"
 
 BMD_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
 CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
