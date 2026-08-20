@@ -48,6 +48,17 @@ END="${V7_OSSE_END:-2022-05-03}"
 MEMBERS="${V7_OSSE_MEMBERS:-16}"
 STEPS="${V7_OSSE_STEPS:-50}"
 ARMS="${V7_OSSE_ARMS:-background,da_meso,da_fine,da_both}"
+# osse: pseudo-gauges read CHIRPS, so station reporting is irrelevant and
+# min-coverage 0 keeps the full network geometry.  real: assimilate and
+# verify the ACTUAL reports, so a station that filed nothing must be
+# dropped rather than carried as NaN -- and the gauge error is a real
+# gauge error, which the script resolves from this same setting.
+OBSERVATIONS="${V7_OSSE_OBSERVATIONS:-osse}"
+if [[ "$OBSERVATIONS" == "real" ]]; then
+    MIN_COVERAGE="${V7_OSSE_MIN_COVERAGE:-0.8}"
+else
+    MIN_COVERAGE="${V7_OSSE_MIN_COVERAGE:-0.0}"
+fi
 OUT="${V7_OSSE_OUT:-data/processed/v7_osse/$(date +%Y%m%d_%H%M)}"
 
 # Both checkpoints must exist.  Mid-training is expected and fine; ABSENT is
@@ -84,6 +95,7 @@ echo "V7 OSSE diagnostic"
 echo "  dates:   $START through $END"
 echo "  arms:    $ARMS"
 echo "  sampling: $MEMBERS members, $STEPS Heun steps"
+echo "  observations: $OBSERVATIONS   (min station coverage $MIN_COVERAGE)"
 echo "  output:  $OUT"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
@@ -96,7 +108,8 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --start "$START" --end "$END" \
     --members "$MEMBERS" --n-steps "$STEPS" \
     --arms "$ARMS" \
-    --min-coverage "${V7_OSSE_MIN_COVERAGE:-0.0}" \
+    --observations "$OBSERVATIONS" \
+    --min-coverage "$MIN_COVERAGE" \
     --out "$OUT" \
     "$@"
 

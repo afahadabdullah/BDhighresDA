@@ -511,7 +511,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--holdout-neighbor-km", type=float, default=75.0)
     p.add_argument("--holdout-max-gap-deg", type=float, default=200.0)
     p.add_argument("--osse-sigma-mm", type=float, default=0.5,
-                   help="assumed observation error; small but nonzero keeps R invertible")
+                   help="assumed gauge error in OSSE mode; small but nonzero keeps "
+                        "R invertible")
+    p.add_argument("--gauge-sigma-mm", type=float, default=None,
+                   help="assumed gauge error in mm/day. Defaults to --osse-sigma-mm "
+                        "under --observations osse and to 3.0 under real, matching "
+                        "the v4 diagnostic. A REAL gauge assimilated at the OSSE "
+                        "sigma is treated as near-perfect and the analysis chases "
+                        "its noise")
     p.add_argument("--representativeness-mm", type=float, default=0.0)
     p.add_argument("--min-coverage", type=float, default=0.8)
     p.add_argument("--guidance-gamma", type=float, default=1.0e-3)
@@ -606,11 +613,19 @@ def main() -> None:
 
     window = bangladesh_window()
     print(window.describe(), flush=True)
+    # One sigma, resolved once and printed: an observation error that silently
+    # differs between modes is the kind of thing that makes two runs look like a
+    # scientific difference when it is a configuration difference.
+    if args.gauge_sigma_mm is None:
+        args.gauge_sigma_mm = (
+            args.osse_sigma_mm if args.observations == "osse" else 3.0
+        )
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
            if args.observations == "osse"
-           else "  (actual BMD reports, assimilated and verified)"),
+           else "  (actual BMD reports, assimilated and verified)")
+        + f"   gauge sigma {args.gauge_sigma_mm:g} mm/day",
         flush=True,
     )
 
@@ -793,7 +808,7 @@ def main() -> None:
             "pseudo (CHIRPS + error model)" if args.osse_satellite
             else (args.imerg if args.imerg else "none")
         ),
-        "osse_sigma_mm": args.osse_sigma_mm,
+        "gauge_sigma_mm": args.gauge_sigma_mm,
         "stations": {
             "total": int(len(stations)),
             "assimilated": [str(s) for s in stations.ids[assimilated]],
@@ -900,7 +915,7 @@ def main() -> None:
                         ).to(device)
                     )
                     gauge_R = build_R(
-                        len(assimilated), args.osse_sigma_mm, device=device,
+                        len(assimilated), args.gauge_sigma_mm, device=device,
                         representativeness=args.representativeness_mm,
                     )
                     variances.append(gauge_R)
@@ -981,7 +996,7 @@ def main() -> None:
             observation = None
             if guide_fine:
                 fine_R = build_R(
-                    len(assimilated), args.osse_sigma_mm, device=device,
+                    len(assimilated), args.gauge_sigma_mm, device=device,
                     representativeness=args.representativeness_mm,
                 )
                 draws = perturb_observations(

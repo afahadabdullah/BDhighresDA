@@ -2748,3 +2748,34 @@ def test_v7_osse_real_mode_verifies_against_actual_gauge_reports():
     assert "the verification set" in source
     # The mode is recorded, so a JSON can never be read as the wrong experiment.
     assert '"observations": args.observations,' in source
+
+
+def test_v7_osse_gauge_sigma_follows_the_observation_mode():
+    """A real gauge is not a perfect gauge, and R must say so.
+
+    The OSSE assimilates pseudo-gauges at 0.5 mm/day because they ARE the truth.
+    Carrying that sigma into a real-data run tells the filter a rain gauge is
+    accurate to half a millimetre, so the analysis chases gauge noise and
+    over-fits the assimilated stations -- which then flatters every arm that
+    uses gauges, in exactly the comparison the real-data run exists to make.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    assert '"--gauge-sigma-mm"' in source
+    # Resolved once from the mode, not sprinkled through the call sites.
+    assert "args.osse_sigma_mm if args.observations == \"osse\" else 3.0" in source
+    # And no build_R call may still reach for the OSSE sigma directly.
+    assert "args.osse_sigma_mm, device=device" not in source, (
+        "a gauge covariance is still built from the OSSE sigma"
+    )
+    assert source.count("args.gauge_sigma_mm, device=device") == 2, (
+        "both the 0.1-degree and 0.05-degree gauge covariances must use it"
+    )
+    # It is printed and recorded, so two runs can never be compared across a
+    # silent change of observation error.
+    assert 'f"   gauge sigma {args.gauge_sigma_mm:g} mm/day"' in source
+    assert '"gauge_sigma_mm": args.gauge_sigma_mm,' in source
