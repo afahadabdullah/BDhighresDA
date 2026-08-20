@@ -131,7 +131,12 @@ def snapshot(path: str, destination: Path, label: str) -> tuple[Path, dict]:
         "source": str(source),
         "frozen": str(frozen),
         "epoch": int(checkpoint.get("epoch", -1)) + 1,
-        "best_val": float(checkpoint.get("best_val", float("nan"))),
+        # The two trainers name this differently -- scripts/train.py writes
+        # best_val_loss, script 57 writes best_val -- and reading only one of
+        # them reports a healthy run as nan.
+        "best_val": float(
+            checkpoint.get("best_val_loss", checkpoint.get("best_val", float("nan")))
+        ),
         "weights": str(checkpoint.get("weights", "unknown")),
     }
     print(
@@ -352,7 +357,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--meso-archive", default="data/processed/bd_wide_cpc_0p1.zarr")
     p.add_argument("--meso-stats", default="data/processed/stats_v7_meso.json")
     p.add_argument("--subgrid-archive", default="data/processed/v7/wide_v7.zarr")
-    p.add_argument("--stations", default="data/stations/data_2020_2025/Stations.csv")
+    p.add_argument("--stations", default="data/processed/bmd_daily.csv",
+                   help="canonical BMD daily CSV from scripts/05_convert_bmd_dir.py "
+                        "-- NOT the Stations.csv catalog")
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
     p.add_argument("--out", required=True)
@@ -496,9 +503,30 @@ def main() -> None:
     # ---- stations, and the OSSE truth they read ---------------------------
     fine_grid = window.fine_grid()
     day_times = np.asarray([np.datetime64(d) for d, _, _ in days])
-    stations, _ = load_stations(
-        args.stations, day_times, grid=fine_grid, min_coverage=args.min_coverage
-    )
+    try:
+        stations, _ = load_stations(
+            args.stations, day_times, grid=fine_grid, min_coverage=args.min_coverage
+        )
+    except ValueError as error:
+        # Stations.csv is the station CATALOG (id, name, lat, lon).  What
+        # load_stations wants is the canonical DAILY file, which
+        # scripts/05_convert_bmd_dir.py builds from the per-station directory
+        # plus that catalog.  Handing over the catalog is the easy mistake, so
+        # name the fix instead of re-raising a column list.
+        if "missing columns" not in str(error):
+            raise
+        raise SystemExit(
+            f"{args.stations} is not the canonical BMD daily CSV.\n"
+            f"  {error}\n"
+            f"That file looks like the station CATALOG.  Build the daily file "
+            f"first:\n"
+            f"    python scripts/05_convert_bmd_dir.py \\\n"
+            f"      --data-dir data/stations/data_2020_2025 \\\n"
+            f"      --stations {args.stations} \\\n"
+            f"      --start {args.start} --end {args.end} \\\n"
+            f"      --out <out>/bmd_daily.csv\n"
+            f"then pass --stations <out>/bmd_daily.csv"
+        ) from error
     if len(stations) < 5:
         raise SystemExit(f"only {len(stations)} stations fall inside {fine_grid.name}")
     n_withheld = max(1, min(len(stations) - 1,

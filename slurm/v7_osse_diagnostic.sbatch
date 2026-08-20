@@ -36,7 +36,13 @@ ALLOC_CKPT="${V7_OSSE_ALLOC_CKPT:-runs/v7/allocation/best.pt}"
 MESO_ARCHIVE="${V7_MESO_ARCHIVE:-data/processed/bd_wide_cpc_0p1.zarr}"
 MESO_STATS="${V7_MESO_STATS:-data/processed/stats_v7_meso.json}"
 SUBGRID="${V7_PREP_OUT:-data/processed/v7/wide_v7.zarr}"
-STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
+# Two DISTINCT files.  Stations.csv is the station CATALOG (metadata); the
+# observation loader reads the canonical DAILY long-form CSV, which
+# scripts/05_convert_bmd_dir.py builds from the per-station directory plus
+# that catalog.  The v4 diagnostic already does exactly this -- reuse its
+# converter rather than inventing a second route to the same file.
+BMD_DIR="${BMD_DATA_DIR:-data/stations/data_2020_2025}"
+CATALOG="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
 START="${V7_OSSE_START:-2022-05-03}"
 END="${V7_OSSE_END:-2022-05-03}"
 MEMBERS="${V7_OSSE_MEMBERS:-16}"
@@ -55,10 +61,24 @@ for pair in "stage A:$MESO_CKPT" "stage B:$ALLOC_CKPT"; do
         exit 1
     }
 done
-for required in "$MESO_ARCHIVE" "$MESO_STATS" "$SUBGRID" "$STATIONS" \
-                scripts/72_v7_two_stage_osse.py; do
+for required in "$MESO_ARCHIVE" "$MESO_STATS" "$SUBGRID" "$CATALOG" "$BMD_DIR" \
+                scripts/05_convert_bmd_dir.py scripts/72_v7_two_stage_osse.py; do
     [[ -e "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
+
+mkdir -p "$OUT"
+DAILY="$OUT/bmd_daily.csv"
+if [[ ! -s "$DAILY" ]]; then
+    "$PYTHON_BIN" -u scripts/05_convert_bmd_dir.py \
+        --data-dir "$BMD_DIR" \
+        --stations "$CATALOG" \
+        --start "$START" --end "$END" \
+        --out "$DAILY" \
+        --summary "$OUT/bmd_stations.csv" \
+        --report "$OUT/bmd_qc.json"
+else
+    echo "Reusing canonical BMD daily file: $DAILY"
+fi
 
 echo "V7 OSSE diagnostic"
 echo "  dates:   $START through $END"
@@ -72,7 +92,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --meso-archive "$MESO_ARCHIVE" \
     --meso-stats "$MESO_STATS" \
     --subgrid-archive "$SUBGRID" \
-    --stations "$STATIONS" \
+    --stations "$DAILY" \
     --start "$START" --end "$END" \
     --members "$MEMBERS" --n-steps "$STEPS" \
     --arms "$ARMS" \
