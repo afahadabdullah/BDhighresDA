@@ -557,6 +557,27 @@ def crps(ensemble: np.ndarray, truth: np.ndarray) -> float:
     return float(skill - spread)
 
 
+def field_pattern_r(analysis: np.ndarray, reference: np.ndarray,
+                    valid: np.ndarray) -> float:
+    """Spatial pattern correlation of two fields over the valid mask.
+
+    Eleven withheld stations say almost nothing about a 14,400-cell field.  This
+    asks the complementary question -- does the analysis LOOK like the
+    independent gridded products -- and it is the number that catches an
+    analysis fitting its gauges by putting rain in the wrong places.  It is
+    scale-free, so it separates "the pattern is right but the amounts are not"
+    from "the pattern is wrong", which bias alone cannot do.
+    """
+    keep = valid & np.isfinite(analysis) & np.isfinite(reference)
+    if keep.sum() < 10:
+        return float("nan")
+    x = analysis[keep].astype(np.float64)
+    y = reference[keep].astype(np.float64)
+    if x.std() <= 0.0 or y.std() <= 0.0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
 def score_stations(ensemble_mm: np.ndarray, truth_mm: np.ndarray) -> dict:
     """Score an (M, S) ensemble of station values against (S,) truth."""
     finite = np.isfinite(truth_mm) & np.isfinite(ensemble_mm).all(axis=0)
@@ -1227,8 +1248,36 @@ def main() -> None:
                 np.abs(block_mean[:, 0].numpy() - coarse_mm[:, 0].cpu().numpy()).max()
             )
 
+            # Field-level agreement with each INDEPENDENT gridded product, at
+            # that product's own resolution.  The 0.05-degree comparison is
+            # against CHIRPS (the training target); the 0.1-degree ones are
+            # against the CPC field the model was conditioned on and, when
+            # supplied, the satellite.  None is a conditioning input to the DA,
+            # so all are external checks on the analysis.
+            meso_mean = meso_mm[:, 0].mean(dim=0).cpu().numpy()
+            fine_mean = fine_mm[:, 0].mean(dim=0).cpu().numpy()
+            meso_valid = np.asarray(meso_ds.fixed_valid).astype(bool)
+            fine_keep = sub["fine_valid"][0].numpy().astype(bool)
+            pattern = {
+                "chirps_0p05": field_pattern_r(
+                    fine_mean, fine_truth[0, 0].cpu().numpy(), fine_keep
+                ),
+                "cpc_0p1": field_pattern_r(
+                    meso_mean, item["base_mm"][0].numpy(), meso_valid
+                ),
+            }
+            if imerg is not None:
+                pattern["imerg_0p1"] = field_pattern_r(
+                    meso_mean, imerg["precipitation"][day_position], meso_valid
+                )
+            if satellite_mm is not None:
+                pattern["pseudo_sat_0p1"] = field_pattern_r(
+                    meso_mean, satellite_mm, meso_valid
+                )
+
             entry = {
                 "date": date,
+                "pattern_r": pattern,
                 "withheld": score_stations(at_stations[:, withheld], truth_withheld),
                 "assimilated": score_stations(
                     at_stations[:, assimilated], truth_assim
@@ -1262,6 +1311,11 @@ def main() -> None:
             key: float(np.nanmean([e["withheld"].get(key, np.nan) for e in entries]))
             for key in ("crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm",
                     "spread_skill")
+        }
+        keys = sorted({k for e in entries for k in e.get("pattern_r", {})})
+        results["arms"][arm]["pattern_r"] = {
+            key: float(np.nanmean([e["pattern_r"].get(key, np.nan) for e in entries]))
+            for key in keys
         }
 
     # Named for the experiment it actually is.  A file called ..._osse.json
@@ -1421,6 +1475,61 @@ def make_figures(panels, truth_fields, results, stations, assimilated, withheld,
         plt.close(figure)
         print(f"[plots] wrote {out_dir / f'maps_{date}.png'}", flush=True)
 
+    # The matrix, as a heatmap: one row per arm, CRPS beside the pattern
+    # correlations.  Each column is normalised on its own scale because a CRPS
+    # in mm and a correlation share no units; the colour says rank within the
+    # column, and the printed number says the value.
+    references = sorted({
+        key for arm in arms for key in results["arms"][arm].get("pattern_r", {})
+    })
+    if references:
+        columns = ["withheld CRPS\n(mm, lower better)"] + [
+            f"pattern r\nvs {reference}" for reference in references
+        ]
+        table = np.full((len(arms), len(columns)), np.nan)
+        for row, arm in enumerate(arms):
+            table[row, 0] = results["arms"][arm]["mean"]["crps_mm"]
+            for column, reference in enumerate(references, start=1):
+                table[row, column] = results["arms"][arm].get(
+                    "pattern_r", {}
+                ).get(reference, np.nan)
+        figure, axis = plt.subplots(
+            figsize=(2.6 + 2.0 * len(columns), 1.0 + 0.55 * len(arms))
+        )
+        shown = np.empty_like(table)
+        for column in range(table.shape[1]):
+            values = table[:, column]
+            finite = np.isfinite(values)
+            if finite.sum() < 2 or np.nanmax(values) == np.nanmin(values):
+                shown[:, column] = 0.5
+                continue
+            scaled = (values - np.nanmin(values)) / (
+                np.nanmax(values) - np.nanmin(values)
+            )
+            # Lower CRPS is better; higher correlation is better.
+            shown[:, column] = 1.0 - scaled if column == 0 else scaled
+        axis.imshow(shown, cmap="RdYlGn", vmin=0.0, vmax=1.0, aspect="auto")
+        axis.set_xticks(range(len(columns)))
+        axis.set_xticklabels(columns, fontsize=8)
+        axis.set_yticks(range(len(arms)))
+        axis.set_yticklabels(arms, fontsize=9)
+        for row in range(table.shape[0]):
+            for column in range(table.shape[1]):
+                value = table[row, column]
+                if np.isfinite(value):
+                    axis.text(column, row, f"{value:.3f}", ha="center",
+                              va="center", fontsize=9)
+        axis.set_title(
+            f"V7 {observations.upper()} observations   "
+            f"CRPS at {len(withheld)} withheld gauges vs field-wide pattern "
+            f"correlation\ncolour ranks within each column; green is better",
+            fontsize=10,
+        )
+        figure.tight_layout()
+        figure.savefig(out_dir / "matrix.png", dpi=110, bbox_inches="tight")
+        plt.close(figure)
+        print(f"[plots] wrote {out_dir / 'matrix.png'}", flush=True)
+
     # Summary bars across arms.
     figure, axes = plt.subplots(1, 3, figsize=(13.0, 3.6))
     for axis, key, label in (
@@ -1477,6 +1586,32 @@ def report(results: dict, arms: list[str]) -> None:
               f"{m['bias_mm']:+8.3f} {m['rmse_mm']:8.3f} {m['spread_mm']:8.3f} "
               f"{ratio:10.2f}{flag}")
     print("  spread/rmse ~1 is calibrated; >1 over-dispersed, <1 over-confident.")
+
+    # The matrix: point verification beside field verification.  Eleven withheld
+    # stations cannot tell you whether the analysis put rain in the right places;
+    # the pattern correlations against the independent gridded products can, and
+    # an arm that wins on CRPS while losing pattern correlation is fitting its
+    # gauges by distorting the field.
+    references = sorted({
+        key for arm in arms for key in results["arms"][arm].get("pattern_r", {})
+    })
+    if references:
+        print("\n" + "=" * 78)
+        print("MATRIX: withheld-gauge CRPS beside spatial pattern correlation")
+        print("=" * 78)
+        header = f"{'arm':<16} {'CRPS':>8}"
+        for reference in references:
+            header += f" {reference:>14}"
+        print(header)
+        for arm in arms:
+            row = f"{arm:<16} {results['arms'][arm]['mean']['crps_mm']:8.3f}"
+            for reference in references:
+                row += (
+                    f" {results['arms'][arm].get('pattern_r', {}).get(reference, float('nan')):14.3f}"
+                )
+            print(row)
+        print("  CRPS is verified at 11 withheld gauge points; the correlations")
+        print("  cover the whole field against products the DA never saw.")
 
     if "background" not in arms:
         return

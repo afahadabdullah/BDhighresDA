@@ -2948,3 +2948,46 @@ def test_v7_osse_reports_spread_skill_so_sharpness_is_not_mistaken_for_skill():
     assert "best by " in source
     assert "prefer bias and RMSE" in source
     assert "over-dispersed" in source
+
+
+def test_v7_osse_matrix_pairs_point_and_field_verification():
+    """Eleven withheld gauges cannot say whether the field is right.
+
+    An analysis can fit the gauges it sees by moving rain to the wrong places;
+    withheld-point CRPS is weakly sensitive to that, and spatial pattern
+    correlation against products the DA never ingested is what catches it.  The
+    two belong side by side, because an arm that wins one while losing the other
+    is the interesting case.
+    """
+    import numpy as np
+
+    module = _osse_module()
+
+    valid = np.ones((32, 32), bool)
+    rng = np.random.default_rng(0)
+    reference = rng.gamma(2.0, 5.0, (32, 32))
+
+    assert module.field_pattern_r(reference, reference, valid) == pytest.approx(1.0)
+    # A scaled field keeps its pattern even though its amounts are wrong: that
+    # separation is exactly why pattern correlation is reported next to bias.
+    assert module.field_pattern_r(3.0 * reference, reference, valid) == pytest.approx(1.0)
+    shuffled = rng.permutation(reference.ravel()).reshape(32, 32)
+    assert abs(module.field_pattern_r(shuffled, reference, valid)) < 0.3
+
+    # Masked-out cells must not contribute, and too few valid cells is NaN
+    # rather than a confident number from five points.
+    empty = np.zeros((32, 32), bool)
+    assert np.isnan(module.field_pattern_r(reference, reference, empty))
+
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+    # CPC and CHIRPS are always available; IMERG only when supplied.
+    assert '"chirps_0p05": field_pattern_r(' in source
+    assert '"cpc_0p1": field_pattern_r(' in source
+    assert '"imerg_0p1"] = field_pattern_r(' in source
+    # The matrix is printed and drawn.
+    assert "MATRIX: withheld-gauge CRPS beside spatial pattern correlation" in source
+    assert 'out_dir / "matrix.png"' in source

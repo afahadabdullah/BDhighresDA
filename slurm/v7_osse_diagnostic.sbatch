@@ -48,6 +48,16 @@ END="${V7_OSSE_END:-2022-05-03}"
 MEMBERS="${V7_OSSE_MEMBERS:-16}"
 STEPS="${V7_OSSE_STEPS:-50}"
 ARMS="${V7_OSSE_ARMS:-background,da_meso,da_fine,da_both}"
+# A BMD-aligned IMERG netCDF at observation_factor 2 (0.1 degree, 03 UTC
+# window).  Setting it enables the da_imerg / da_sim / da_sim_fine arms;
+# the script refuses any file that is not on that grid or that window.
+IMERG="${V7_OSSE_IMERG:-}"
+imerg_args=()
+if [[ -n "$IMERG" ]]; then
+    [[ -f "$IMERG" ]] || { echo "ERROR: missing IMERG file $IMERG" >&2; exit 1; }
+    imerg_args=(--imerg "$IMERG")
+    echo "  imerg:   $IMERG"
+fi
 # osse: pseudo-gauges read CHIRPS, so station reporting is irrelevant and
 # min-coverage 0 keeps the full network geometry.  real: assimilate and
 # verify the ACTUAL reports, so a station that filed nothing must be
@@ -113,6 +123,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --start "$START" --end "$END" \
     --members "$MEMBERS" --n-steps "$STEPS" \
     --arms "$ARMS" \
+    "${imerg_args[@]}" \
     --observations "$OBSERVATIONS" \
     --min-coverage "$MIN_COVERAGE" \
     --out "$OUT" \
