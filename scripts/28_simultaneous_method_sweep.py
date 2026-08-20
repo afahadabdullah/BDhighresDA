@@ -442,6 +442,21 @@ V2_CONFIRMATORY = [
             note="secondary frozen candidate: robust joint likelihood"),
 ]
 
+# The one-day V7/CPCv2 comparison must not silently choose a different spatial
+# split for the two model families.  These are the frozen winners from the two
+# CPCv2 tournaments: the selected gauges-only method, and the primary frozen
+# simultaneous S04 candidate.  ``background`` is inserted by
+# ``resolve_variants`` so each increment diagnostic still has its own control.
+V2_COMPARISON = [
+    Variant("guided_s6_g010_t100", streams="gauges", prior_temperature=1.0,
+            guidance_spread_cells=6.0, guidance_gamma=1.0e-2,
+            note="frozen gauges-only winner for the V7/CPCv2 comparison"),
+    Variant("v2_simul_s04_ig010", streams="both", prior_temperature=1.0,
+            imerg_stride=1, gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-2,
+            note="primary frozen simultaneous S04 winner for the V7/CPCv2 comparison"),
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -467,11 +482,12 @@ GROUPS = {
     "v2_ingestion_s04": V2_INGESTION_S04,
     "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
     "v2_confirmatory": V2_CONFIRMATORY,
+    "v2_comparison": V2_COMPARISON,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
-        + V2_CONFIRMATORY
+        + V2_CONFIRMATORY + V2_COMPARISON
     ),
 }
 
@@ -524,6 +540,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--withhold", type=float, default=0.2)
     parser.add_argument("--holdout-folds", type=int, default=5)
     parser.add_argument("--holdout-fold", type=int, default=0)
+    parser.add_argument(
+        "--holdout-station-ids-file",
+        default=None,
+        help=(
+            "newline-delimited station IDs to withhold. Supersedes --withhold "
+            "and --holdout-folds; use this when matching another model's "
+            "already selected spatial split."
+        ),
+    )
     parser.add_argument(
         "--assimilate-all-stations", action="store_true",
         help=(
@@ -799,15 +824,46 @@ def main() -> None:
     )
     if len(stations) < 5:
         raise ValueError(f"only {len(stations)} stations survive coverage filtering")
+    if args.assimilate_all_stations and args.holdout_station_ids_file:
+        raise ValueError(
+            "--assimilate-all-stations and --holdout-station-ids-file are exclusive"
+        )
     if args.assimilate_all_stations:
         eval_idx = np.asarray([], dtype=np.int64)
+        holdout_source = "all_stations"
+    elif args.holdout_station_ids_file:
+        holdout_path = Path(args.holdout_station_ids_file)
+        if not holdout_path.is_file():
+            raise FileNotFoundError(holdout_path)
+        requested = [line.strip() for line in holdout_path.read_text().splitlines()
+                     if line.strip()]
+        if not requested:
+            raise ValueError(f"{holdout_path}: no station IDs were supplied")
+        if len(requested) != len(set(requested)):
+            raise ValueError(f"{holdout_path}: station IDs are not unique")
+        station_ids = np.asarray(stations.ids, dtype=str)
+        requested_set = set(requested)
+        missing = sorted(requested_set - set(station_ids.tolist()))
+        if missing:
+            raise ValueError(
+                f"{holdout_path}: station IDs are absent after coverage filtering: "
+                f"{missing}"
+            )
+        eval_idx = np.flatnonzero(np.isin(station_ids, requested)).astype(np.int64)
+        if not len(eval_idx) or len(eval_idx) >= len(stations):
+            raise ValueError(
+                f"{holdout_path}: need between 1 and {len(stations) - 1} withheld stations"
+            )
+        holdout_source = str(holdout_path)
     elif args.holdout_folds > 1:
         eval_idx = spread_folds(stations.lat, stations.lon, args.holdout_folds)[
             args.holdout_fold
         ]
+        holdout_source = f"spread_fold_{args.holdout_fold}_of_{args.holdout_folds}"
     else:
         n_withheld = max(1, min(len(stations) - 1, int(round(args.withhold * len(stations)))))
         eval_idx = spread_holdout(stations.lat, stations.lon, n_withheld)
+        holdout_source = f"spread_fraction_{args.withhold:g}"
     assim_idx = np.setdiff1d(np.arange(len(stations)), eval_idx)
 
     print(
@@ -1359,6 +1415,8 @@ def main() -> None:
         "assimilate_all_stations": bool(args.assimilate_all_stations),
         "holdout_fold": args.holdout_fold,
         "holdout_folds": args.holdout_folds,
+        "holdout_source": holdout_source,
+        "withheld_station_ids": [str(value) for value in stations.ids[eval_idx]],
         "n_assimilated_stations": int(len(assim_idx)),
         "n_withheld_stations": int(len(eval_idx)),
         "withheld_station_days": int(np.isfinite(withheld_observed).sum()),
@@ -1415,6 +1473,7 @@ def main() -> None:
     np.savez_compressed(
         out_path,
         times=selected_times.astype("datetime64[D]").astype(str),
+        model_times=background_times.astype("datetime64[D]").astype(str),
         station_ids=np.asarray(stations.ids, dtype=str),
         station_lat=stations.lat,
         station_lon=stations.lon,

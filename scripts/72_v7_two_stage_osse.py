@@ -657,6 +657,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--station-dump",
+        default=None,
+        help=(
+            "optional compressed NPZ of station-space ensembles, observations, "
+            "and the exact holdout split. Use it to compare this run against a "
+            "different model without reselecting stations."
+        ),
+    )
     p.add_argument("--members", type=int, default=8)
     p.add_argument("--n-steps", type=int, default=50)
     p.add_argument("--withhold", type=float, default=0.30,
@@ -1102,6 +1111,8 @@ def main() -> None:
         "meso_gauge_representativeness": args.meso_gauge_representativeness,
         "fine_gauge_sigma_mm": args.fine_gauge_sigma_mm,
         "gauge_day_offset": int(args.gauge_day_offset),
+        "model_dates": [str(value) for value in day_times.astype("datetime64[D]")],
+        "gauge_dates": [str(value) for value in gauge_times.astype("datetime64[D]")],
         "stations": {
             "total": int(len(stations)),
             "assimilated": [str(s) for s in stations.ids[assimilated]],
@@ -1110,6 +1121,22 @@ def main() -> None:
         },
         "arms": {name: {"note": ARM_NOTES[name], "days": []} for name in arms},
     }
+
+    # Keep the raw station ensembles only when explicitly requested.  A scalar
+    # summary cannot prove that a CPCv2 comparison used the same BMD values and
+    # withheld IDs; this compact dump can, while avoiding large gridded output.
+    station_ensembles = (
+        {
+            arm: np.full((len(days), args.members, len(stations)), np.nan,
+                         dtype=np.float32)
+            for arm in arms
+        }
+        if args.station_dump else None
+    )
+    observed_at_stations = (
+        np.full((len(days), len(stations)), np.nan, dtype=np.float32)
+        if args.station_dump else None
+    )
 
     panels: dict = {}
     truth_fields: dict = {}
@@ -1143,6 +1170,8 @@ def main() -> None:
                       flush=True)
         truth_assim = truth_at_stations[assimilated]
         truth_withheld = truth_at_stations[withheld]
+        if observed_at_stations is not None:
+            observed_at_stations[day_position] = truth_at_stations
         if not np.isfinite(truth_withheld).any():
             raise SystemExit(
                 f"no withheld station reported on {date}; the verification set "
@@ -1407,6 +1436,8 @@ def main() -> None:
             conservation = float(
                 np.abs(block_mean[:, 0].numpy() - coarse_mm[:, 0].cpu().numpy()).max()
             )
+            if station_ensembles is not None:
+                station_ensembles[arm][day_position] = at_stations
 
             # Field-level agreement with each INDEPENDENT gridded product, at
             # that product's own resolution.  The 0.05-degree comparison is
@@ -1492,6 +1523,30 @@ def main() -> None:
             key: float(np.nanmean([e["pattern_r"].get(key, np.nan) for e in entries]))
             for key in keys
         }
+
+    # The locked split is always written.  It is both a short audit trail and
+    # the hand-off contract for a matched CPCv2 run.
+    holdout_path = out_dir / "v7_withheld_station_ids.txt"
+    holdout_path.write_text("\n".join(str(value) for value in stations.ids[withheld]) + "\n")
+    results["stations"]["withheld_ids_file"] = str(holdout_path)
+
+    if args.station_dump:
+        dump_path = Path(args.station_dump)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            dump_path,
+            times=gauge_times.astype("datetime64[D]").astype(str),
+            model_times=day_times.astype("datetime64[D]").astype(str),
+            station_ids=np.asarray(stations.ids, dtype=str),
+            station_lat=stations.lat,
+            station_lon=stations.lon,
+            eval_idx=withheld,
+            assim_idx=assimilated,
+            observed_mm=observed_at_stations,
+            arm_names=np.asarray(arms, dtype=str),
+            **{f"station_{arm}": values for arm, values in station_ensembles.items()},
+        )
+        results["station_dump"] = str(dump_path)
 
     # Named for the experiment it actually is.  A file called ..._osse.json
     # holding real-data results is a trap for whoever opens it in a month.
