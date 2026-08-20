@@ -2802,7 +2802,9 @@ def test_v7_osse_observation_error_uses_the_right_units_per_stage():
     assert "args.meso_gauge_sigma = 0.10 if real else 0.05" in source
     assert "args.meso_gauge_representativeness = 0.25 if real else 0.0" in source
     # Each build_R call gets the sigma belonging to its own space.
-    assert "len(assimilated), args.meso_gauge_sigma, device=device" in source
+    # The stage-A sigma may be overridden per arm by the sweep, but it is still
+    # the stage-A sigma that reaches build_R -- never the physical one.
+    assert "arm_sigma.get(arm, args.meso_gauge_sigma), device=device" in source
     assert "len(assimilated), args.fine_gauge_sigma_mm, device=device" in source
 
 

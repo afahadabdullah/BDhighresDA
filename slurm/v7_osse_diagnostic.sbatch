@@ -118,4 +118,5 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --out "$OUT" \
     "$@"
 
-echo "V7 OSSE diagnostic complete: $OUT/v7_two_stage_osse.json"
+# The script names its output for the experiment it ran, not always _osse.
+echo "V7 diagnostic complete: $OUT/v7_two_stage_${OBSERVATIONS}.json"

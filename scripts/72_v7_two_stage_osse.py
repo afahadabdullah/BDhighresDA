@@ -608,6 +608,13 @@ def parse_args() -> argparse.Namespace:
                    help="stage A gauge error in TRANSFORMED units (build_R's own "
                         "space). Defaults to configs/da.yaml's tuned 0.10 for real "
                         "observations and 0.05 for OSSE")
+    p.add_argument("--meso-sigma-sweep", default=None,
+                   help="comma-separated stage-A gauge sigmas (transformed units). "
+                        "Adds one da_meso arm per value so the weighting can be "
+                        "TUNED on withheld stations instead of asserted. CPCv2's "
+                        "0.10+0.25 was tuned against 0.05-degree cells; stage A "
+                        "assimilates onto 0.1-degree cells, four times the area, so "
+                        "the representativeness term is not obviously transferable")
     p.add_argument("--meso-gauge-representativeness", type=float, default=None,
                    help="stage A point-vs-cell mismatch, TRANSFORMED units. Defaults "
                         "to 0.25 for real (usually the DOMINANT term) and 0.0 for "
@@ -717,6 +724,27 @@ def main() -> None:
                 "--observations real needs --min-coverage > 0 so that stations "
                 "which did not report are dropped rather than carried as NaN"
             )
+
+    # Each sweep value becomes its own da_meso arm with its own sigma; the rest
+    # of the configuration is identical, so a difference between them is the
+    # weighting and nothing else.
+    arm_sigma: dict[str, float] = {}
+    if args.meso_sigma_sweep:
+        for token in args.meso_sigma_sweep.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            value = float(token)
+            if value <= 0.0:
+                raise SystemExit(f"sweep sigma {value} must be positive")
+            name = f"da_meso_s{token}"
+            ARMS[name] = ("gauges", False)
+            ARM_NOTES[name] = f"gauges at 0.1 deg, sigma {value:g} (transformed)"
+            arm_sigma[name] = value
+            if name not in arms:
+                arms.append(name)
+        if "background" not in arms:
+            arms.insert(0, "background")
 
     device = torch.device(args.device)
     out_dir = Path(args.out)
@@ -927,6 +955,7 @@ def main() -> None:
 
     results = {
         "window": window.describe(),
+        "arm_sigma": arm_sigma,
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
         "members": args.members,
         "n_steps": args.n_steps,
@@ -1055,7 +1084,8 @@ def main() -> None:
                     )
                     # Transformed units: this likelihood sees tf.forward(mm).
                     gauge_R = build_R(
-                        len(assimilated), args.meso_gauge_sigma, device=device,
+                        len(assimilated),
+                        arm_sigma.get(arm, args.meso_gauge_sigma), device=device,
                         representativeness=args.meso_gauge_representativeness,
                     )
                     variances.append(gauge_R)
@@ -1411,7 +1441,12 @@ def _meso_grid(window):
 
 def report(results: dict, arms: list[str]) -> None:
     print("\n" + "=" * 78)
-    print("WITHHELD-GAUGE SCORES (OSSE, perfect observations)")
+    print(
+        "WITHHELD-GAUGE SCORES  "
+        + ("(OSSE: pseudo-gauges read CHIRPS)"
+           if results.get("osse", True)
+           else "(REAL: actual BMD reports, assimilated and verified)")
+    )
     print("=" * 78)
     print(f"{'arm':<12} {'CRPS':>8} {'MAE':>8} {'bias':>8} {'RMSE':>8} {'spread':>8}")
     for arm in arms:
@@ -1429,6 +1464,24 @@ def report(results: dict, arms: list[str]) -> None:
         delta = results["arms"][arm]["mean"]["crps_mm"] - reference
         percent = 100.0 * delta / reference if reference else float("nan")
         print(f"  {arm:<11} {delta:+.3f} mm ({percent:+.1f}%)   {ARM_NOTES[arm]}")
+
+    sweep = {a: results["arms"][a]["mean"]["crps_mm"]
+             for a in arms if a in results.get("arm_sigma", {})}
+    if sweep:
+        print("\nStage-A gauge sigma sweep (withheld CRPS; lower is better):")
+        for arm in sorted(sweep, key=lambda a: results["arm_sigma"][a]):
+            sigma = results["arm_sigma"][arm]
+            print(f"  sigma {sigma:5.3f}  CRPS {sweep[arm]:7.3f} mm"
+                  f"{'   <- best' if sweep[arm] == min(sweep.values()) else ''}")
+        best = min(sweep, key=sweep.get)
+        edge = results["arm_sigma"][best] in (
+            min(results["arm_sigma"].values()), max(results["arm_sigma"].values())
+        )
+        if edge:
+            print("  The optimum sits at the EDGE of the swept range, so the true "
+                  "minimum is outside it -- widen the sweep before concluding.")
+        print("  One day of 11 withheld stations is a noisy objective; treat a "
+              "difference under ~5% as unresolved.")
 
     if "da_fine" not in arms:
         return
