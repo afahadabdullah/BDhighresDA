@@ -111,7 +111,7 @@ def aligned_station_data(v7_path: Path, cpc_path: Path) -> tuple[np.ndarray, dic
         comparisons = dict(COMPARISONS)
         if "arm_names" in v7:
             for arm in np.asarray(v7["arm_names"], dtype=str):
-                if arm.startswith("da_sim_r") and f"station_{arm}" in v7:
+                if arm.startswith("da_sim_") and f"station_{arm}" in v7:
                     comparisons[f"simultaneous_{arm.removeprefix('da_sim_')}"] = (
                         arm, "v2_simul_s04_ig010"
                     )
@@ -171,6 +171,13 @@ def map_data(v7_map_path: Path, cpc_path: Path, times: np.ndarray) -> tuple[dict
             "gauges_only": np.asarray(v7["meanfield_da_meso"], float),
             "simultaneous": np.asarray(v7["meanfield_da_sim"], float),
         }
+        for arm in (
+            "da_sim_r27", "da_sim_r27_g010_l2",
+            "da_sim_s04_corr_g001_h3", "da_sim_s04_corr_g010_l2",
+        ):
+            key = f"meanfield_{arm}"
+            if key in v7:
+                v7_maps[arm] = np.asarray(v7[key], float)
         cpc_valid = np.asarray(cpc["valid"], bool)
         cpc_native = {
             "background": np.asarray(cpc["meanfield_background"], float),
@@ -186,9 +193,13 @@ def map_data(v7_map_path: Path, cpc_path: Path, times: np.ndarray) -> tuple[dict
             )
             cpc_maps[name] = cropped
             cpc_valid_crop = valid
-        for name, field in v7_maps.items():
+        for name in COMPARISONS:
+            field = v7_maps[name]
             if field.shape != cpc_maps[name].shape:
                 raise ValueError(f"{name}: V7/CPCv2 map shapes differ after crop")
+        for name, field in v7_maps.items():
+            if field.shape != v7_maps["background"].shape:
+                raise ValueError(f"{name}: V7 map shape differs from its background")
         keep = v7_valid & cpc_valid_crop
     return ({"lat": target_lat, "lon": target_lon, "valid": keep, "fields": v7_maps},
             {"lat": target_lat, "lon": target_lon, "valid": keep, "fields": cpc_maps})
@@ -333,6 +344,60 @@ def plot_day_maps(times: np.ndarray, v7: dict, cpc: dict, stations: dict, out_di
         plt.close(figure)
 
 
+def plot_ingestion_scale_maps(times: np.ndarray, v7: dict, out_dir: Path) -> None:
+    """Compare native/S04 and robust/ig010 V7 analyses on shared scales."""
+    configurations = (
+        ("da_sim_r27", "native 0.1° — R×27, γ=.001, Huber-3"),
+        ("da_sim_r27_g010_l2", "native 0.1° — R×27, γ=.01, L2"),
+        ("da_sim_s04_corr_g001_h3", "S04 0.4° — corr-R, γ=.001, Huber-3"),
+        ("da_sim_s04_corr_g010_l2", "S04 0.4° — corr-R, γ=.01, L2"),
+    )
+    if any(name not in v7["fields"] for name, _ in configurations):
+        return
+    extent = (v7["lon"].min() - 0.025, v7["lon"].max() + 0.025,
+              v7["lat"].min() - 0.025, v7["lat"].max() + 0.025)
+    for day, date in enumerate(times):
+        valid = v7["valid"][day]
+        background = v7["fields"]["background"][day]
+        fields = [v7["fields"][name][day] for name, _ in configurations]
+        increments = [field - background for field in fields]
+        textures = [subgrid_sd(field, valid) for field in fields]
+        rain_max = finite_span(*fields, percentile=99.5)
+        increment_max = finite_span(*increments)
+        texture_max = finite_span(*textures)
+        figure, axes = plt.subplots(3, 4, figsize=(16, 11), squeeze=False)
+        for column, ((_, title), field, increment, texture) in enumerate(
+            zip(configurations, fields, increments, textures)
+        ):
+            rows = (
+                (field, "turbo", 0.0, rain_max, "analysis mean"),
+                (increment, "RdBu_r", -increment_max, increment_max,
+                 "increment vs background"),
+                (texture, "magma", 0.0, texture_max, "within-0.1° SD"),
+            )
+            for row, (values, cmap, low, high, label) in enumerate(rows):
+                axis = axes[row, column]
+                image = axis.imshow(
+                    np.where(valid, values, np.nan), origin="lower", extent=extent,
+                    cmap=cmap, vmin=low, vmax=high, aspect="auto",
+                )
+                figure.colorbar(image, ax=axis, fraction=0.046, pad=0.03,
+                                label="mm/day")
+                if row == 0:
+                    axis.set_title(title, fontsize=9)
+                if column == 0:
+                    axis.set_ylabel(label)
+                axis.tick_params(labelsize=7)
+        figure.suptitle(
+            f"V7 IMERG ingestion-scale factorial — BMD day {date}\n"
+            "rows: posterior mean, increment, retained 0.05° texture",
+            fontsize=12,
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.95))
+        figure.savefig(out_dir / f"v7_ingestion_scale_{str(date)}.png", dpi=140)
+        plt.close(figure)
+
+
 def json_ready(value):
     if isinstance(value, dict):
         return {key: json_ready(item) for key, item in value.items()}
@@ -354,6 +419,7 @@ def main() -> None:
     plot_skill(times, scores, out_dir / "da_skill_timeseries.png")
     texture = plot_subgrid_timeseries(times, v7, cpc, out_dir / "subgrid_variability_timeseries.png")
     plot_day_maps(times, v7, cpc, stations, out_dir)
+    plot_ingestion_scale_maps(times, v7, out_dir)
     summary = {
         "bmd_observation_dates": times.astype(str).tolist(),
         "daily_withheld_scores": scores,

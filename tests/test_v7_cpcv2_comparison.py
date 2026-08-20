@@ -38,7 +38,8 @@ def write_matched_dumps(
         assim_idx=np.asarray([0, 2]),
         observed_mm=observations,
         arm_names=np.asarray([
-            "da_meso", "da_sim", "da_sim_r27", "da_sim_r27_g010_l2", "da_sim_r81"
+            "da_meso", "da_sim", "da_sim_r27", "da_sim_r27_g010_l2",
+            "da_sim_s04_corr_g010_l2", "da_sim_r81"
         ] if extra_v7_simultaneous else ["da_meso", "da_sim"]),
         station_da_meso=v7_base,
         station_da_sim=v7_base + 0.05,
@@ -46,6 +47,7 @@ def write_matched_dumps(
             {
                 "station_da_sim_r27": v7_base + 0.10,
                 "station_da_sim_r27_g010_l2": v7_base + 0.12,
+                "station_da_sim_s04_corr_g010_l2": v7_base + 0.13,
                 "station_da_sim_r81": v7_base + 0.15,
             }
             if extra_v7_simultaneous else {}
@@ -95,7 +97,8 @@ def test_comparison_scores_optional_v7_r_sweep_against_same_cpc_arm(tmp_path):
 
     assert list(report["comparisons"]) == [
         "gauges_only", "simultaneous", "simultaneous_r27",
-        "simultaneous_r27_g010_l2", "simultaneous_r81"
+        "simultaneous_r27_g010_l2", "simultaneous_s04_corr_g010_l2",
+        "simultaneous_r81"
     ]
     assert report["comparisons"]["simultaneous_r27"]["v7_arm"] == "da_sim_r27"
     assert report["comparisons"]["simultaneous_r27"]["cpcv2_arm"] == (

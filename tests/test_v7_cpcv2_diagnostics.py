@@ -33,9 +33,13 @@ def test_diagnostics_aligns_reordered_stations_and_crops_cpc_grid(tmp_path):
         assim_idx=np.array([0, 1]), observed_mm=observed,
         station_lat=np.array([0.2, 0.3, 0.4, 0.5]),
         station_lon=np.array([0.2, 0.3, 0.4, 0.5]),
-        arm_names=np.array(["da_meso", "da_sim", "da_sim_r27_g010_l2"]),
+        arm_names=np.array([
+            "da_meso", "da_sim", "da_sim_r27_g010_l2",
+            "da_sim_s04_corr_g010_l2"
+        ]),
         station_da_meso=members, station_da_sim=members + 1.0,
         station_da_sim_r27_g010_l2=members + 1.5,
+        station_da_sim_s04_corr_g010_l2=members + 1.75,
     )
     grid = np.arange(2 * 6 * 6, dtype=np.float32).reshape(2, 6, 6) + 1.0
     np.savez_compressed(
@@ -54,6 +58,10 @@ def test_diagnostics_aligns_reordered_stations_and_crops_cpc_grid(tmp_path):
         valid=np.ones((2, 4, 4), bool), meanfield_background=grid[:, 1:5, 1:5],
         meanfield_da_meso=grid[:, 1:5, 1:5] + 1.0,
         meanfield_da_sim=grid[:, 1:5, 1:5] + 2.0,
+        meanfield_da_sim_r27=grid[:, 1:5, 1:5] + 2.5,
+        meanfield_da_sim_r27_g010_l2=grid[:, 1:5, 1:5] + 2.7,
+        meanfield_da_sim_s04_corr_g001_h3=grid[:, 1:5, 1:5] + 2.9,
+        meanfield_da_sim_s04_corr_g010_l2=grid[:, 1:5, 1:5] + 3.1,
     )
 
     got_times, scores, stations = diagnostics.aligned_station_data(v7_path, cpc_path)
@@ -61,11 +69,14 @@ def test_diagnostics_aligns_reordered_stations_and_crops_cpc_grid(tmp_path):
     assert got_times.astype(str).tolist() == ["2022-05-02", "2022-05-03"]
     assert scores["gauges_only"]["v7"]["n"] == [2, 2]
     assert scores["simultaneous_r27_g010_l2"]["v7"]["n"] == [2, 2]
+    assert scores["simultaneous_s04_corr_g010_l2"]["v7"]["n"] == [2, 2]
     assert cpc["fields"]["simultaneous"].shape == (2, 4, 4)
     out_dir = tmp_path / "diagnostics"
     out_dir.mkdir()
     diagnostics.plot_skill(got_times, scores, out_dir / "skill.png")
     diagnostics.plot_subgrid_timeseries(got_times, v7, cpc, out_dir / "texture.png")
     diagnostics.plot_day_maps(got_times, v7, cpc, stations, out_dir)
+    diagnostics.plot_ingestion_scale_maps(got_times, v7, out_dir)
     assert (out_dir / "skill.png").is_file()
     assert (out_dir / "subgrid_maps_2022-05-02.png").is_file()
+    assert (out_dir / "v7_ingestion_scale_2022-05-02.png").is_file()

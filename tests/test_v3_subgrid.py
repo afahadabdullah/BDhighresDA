@@ -3027,15 +3027,16 @@ def test_v7_osse_shifts_imerg_onto_the_same_window_as_the_gauges():
     assert "suspiciously low; check the day alignment" in source
 
 
-def test_v7_osse_accepts_a_native_imerg_file_and_refuses_a_coarsened_one():
-    """``observation_factor`` marks a file as COARSENED, not as valid.
+def test_v7_osse_accepts_native_and_nested_s04_imerg_files():
+    """``observation_factor`` selects the matching stage-A footprint operator.
 
     ``08_prepare_imerg_observations.py`` writes native 0.1-degree footprints
     nested over BD and does NOT write observation_factor; only
     ``44_coarsen_imerg_observations.py`` adds it, when coarsening further.  An
     earlier version of this loader demanded the attribute and so rejected
     exactly the right file -- the prepared 0.1-degree product -- while a
-    coarsened 0.4-degree one would have carried it happily.
+    coarsened 0.4-degree file must declare its rescaled correlation length and
+    sit on the exact nested 4x4 stage-A footprint grid.
     """
     import tempfile
     from pathlib import Path
@@ -3057,23 +3058,29 @@ def test_v7_osse_accepts_a_native_imerg_file_and_refuses_a_coarsened_one():
         attrs = {"bmd_accumulation_end_hour_utc": end_hour}
         if factor is not None:
             attrs["observation_factor"] = factor
+        state_factor = (factor or 2) // 2
+        if state_factor > 1:
+            attrs["required_error_corr_cells"] = 3.0 / state_factor
+        shape = (3, grid.nlat // state_factor, grid.nlon // state_factor)
+        expected_lat = grid.lat.reshape(-1, state_factor).mean(axis=1)
+        expected_lon = grid.lon.reshape(-1, state_factor).mean(axis=1)
         dataset = xr.Dataset(
             {
                 "precipitation": (
                     ("time", "lat", "lon"),
-                    rng.gamma(2.0, 4.0, (3, grid.nlat, grid.nlon)).astype("f4"),
+                    rng.gamma(2.0, 4.0, shape).astype("f4"),
                     {"units": "mm/day"},
                 ),
                 "randomError": (
                     ("time", "lat", "lon"),
-                    rng.gamma(1.0, 1.0, (3, grid.nlat, grid.nlon)).astype("f4"),
+                    rng.gamma(1.0, 1.0, shape).astype("f4"),
                     {"units": "mm/day"},
                 ),
             },
             coords={
                 "time": days.astype("datetime64[ns]"),
-                "lat": grid.lat if lat is None else lat,
-                "lon": grid.lon,
+                "lat": expected_lat if lat is None else lat,
+                "lon": expected_lon,
             },
             attrs=attrs,
         )
@@ -3087,15 +3094,16 @@ def test_v7_osse_accepts_a_native_imerg_file_and_refuses_a_coarsened_one():
     assert module.load_imerg_meso(build(3), model, 1, window, grid)["day_offset"] == 1
     # Native + calendar window -> the model's own days, no shift.
     assert module.load_imerg_meso(build(0), model, 1, window, grid)["day_offset"] == 0
-    # Explicit factor 2 is fine; anything else was coarsened past what stage A wants.
+    # Explicit factor 2 is native. Factor 8 maps to a 4x4 stage-A footprint.
     assert module.load_imerg_meso(build(3, 2), model, 1, window, grid)["day_offset"] == 1
-    with pytest.raises(SystemExit, match="coarsened to observation_factor 8"):
-        module.load_imerg_meso(build(3, 8), model, 1, window, grid)
+    s04 = module.load_imerg_meso(build(3, 8), model, 1, window, grid)
+    assert s04["state_factor"] == 4
+    assert s04["error_corr_cells"] == pytest.approx(0.75)
     # An unknown window has no defined shift, so it must not be guessed.
     with pytest.raises(SystemExit, match="neither the BMD window"):
         module.load_imerg_meso(build(12), model, 1, window, grid)
     # The coordinates remain the authoritative check: right attributes, wrong grid.
-    with pytest.raises(SystemExit, match="do not sit on stage A"):
+    with pytest.raises(SystemExit, match="do not sit on the expected nested"):
         module.load_imerg_meso(
             build(3, lat=grid.lat + 0.3), model, 1, window, grid
         )

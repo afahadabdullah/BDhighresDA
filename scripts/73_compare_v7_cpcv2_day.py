@@ -43,12 +43,12 @@ def _available_comparisons(v7: np.lib.npyio.NpzFile) -> dict[str, tuple[str, str
         ordered = np.asarray(v7["arm_names"], dtype=str).tolist()
         arms = [
             arm for arm in ordered
-            if arm.startswith("da_sim_r") and f"station_{arm}" in v7
+            if arm.startswith("da_sim_") and f"station_{arm}" in v7
         ]
     else:
         arms = sorted(
             key[len("station_"):] for key in v7.files
-            if key.startswith("station_da_sim_r")
+            if key.startswith("station_da_sim_")
         )
     for arm in arms:
         suffix = arm.removeprefix("da_sim_")

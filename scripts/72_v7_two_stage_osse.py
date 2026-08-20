@@ -57,9 +57,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.bmd import neighbored_holdout  # noqa: E402
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
-    BlockAverageObsOperator,
     CompositeObsOperator,
     GuidanceConfig,
+    PhysicalBlockAverageObsOperator,
     SamplerConfig,
     build_R,
     perturb_observations,
@@ -262,8 +262,8 @@ def corrupt_satellite(
 
 
 def load_imerg_meso(path: str, model_times: np.ndarray, gauge_offset: int,
-                    window, grid) -> dict:
-    """Read IMERG onto stage A's own cells, choosing the day shift from the file.
+                    window, grid, native_corr_cells: float = 3.0) -> dict:
+    """Read nested IMERG footprints, choosing the day shift from the file.
 
     Two attributes decide everything, and both are written by
     ``08_prepare_imerg_observations.py``:
@@ -276,9 +276,8 @@ def load_imerg_meso(path: str, model_times: np.ndarray, gauge_offset: int,
       day, and vice versa.
     * ``observation_factor`` -- written only by ``44_coarsen_imerg_observations``
       when a prepared file is coarsened FURTHER.  Its absence therefore means
-      native 0.1-degree footprints, which is precisely what stage A wants; an
-      earlier version of this function required it and rejected exactly the
-      right file.
+      native 0.1-degree footprints. Factor 8 is S04 (0.4 degrees) and maps to a
+      4x4 physical block-average operator on stage A's 0.1-degree state.
 
     Neither attribute is authoritative on its own.  The coordinates are: a file
     on a different lattice would have the right shape and the right attributes
@@ -294,15 +293,25 @@ def load_imerg_meso(path: str, model_times: np.ndarray, gauge_offset: int,
             units = str(dataset[name].attrs.get("units", "")).lower().replace(" ", "")
             if units not in ("mm/day", "mmday-1", "mm day-1", "mm/d"):
                 raise SystemExit(f"{path} {name} units are {units!r}; expected mm/day")
-        factor = dataset.attrs.get("observation_factor")
-        if factor is not None and int(factor) != 2:
+        observation_factor = int(dataset.attrs.get("observation_factor", 2))
+        if observation_factor < 2 or observation_factor % 2:
             raise SystemExit(
-                f"{path} was coarsened to observation_factor {int(factor)}; stage A "
-                f"needs 0.1-degree footprints (factor 2 relative to BD's 0.05 "
-                f"degrees, or an uncoarsened file from "
-                f"08_prepare_imerg_observations.py)"
+                f"{path} has observation_factor {observation_factor}; V7 stage A "
+                "needs footprints nested in an integer number of its 0.1-degree cells"
             )
-        native = factor is None
+        state_factor = observation_factor // 2
+        native = state_factor == 1
+        if native:
+            error_corr_cells = float(native_corr_cells)
+        else:
+            required = dataset.attrs.get("required_error_corr_cells")
+            if required is None:
+                raise SystemExit(
+                    f"{path} is coarsened but lacks required_error_corr_cells; "
+                    "rebuild it with scripts/44_coarsen_imerg_observations.py so "
+                    "the physical error correlation length is preserved"
+                )
+            error_corr_cells = float(required)
 
         end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
         if end_hour is None:
@@ -343,30 +352,48 @@ def load_imerg_meso(path: str, model_times: np.ndarray, gauge_offset: int,
         lat = np.asarray(dataset.lat.values, np.float64)
         lon = np.asarray(dataset.lon.values, np.float64)
 
-    if precipitation.shape[1:] != (grid.nlat, grid.nlon):
+    if grid.nlat % state_factor or grid.nlon % state_factor:
+        raise SystemExit(
+            f"stage A grid {(grid.nlat, grid.nlon)} is not divisible by IMERG "
+            f"state factor {state_factor}"
+        )
+    expected_shape = (grid.nlat // state_factor, grid.nlon // state_factor)
+    if precipitation.shape[1:] != expected_shape:
         raise SystemExit(
             f"{path} is {precipitation.shape[1:]} but stage A's window is "
-            f"{(grid.nlat, grid.nlon)}; the IMERG file and the analysis window "
-            f"do not describe the same area"
+            f"{(grid.nlat, grid.nlon)} and factor {state_factor} requires "
+            f"{expected_shape}; the IMERG file and analysis window differ"
         )
-    if not np.allclose(lat, grid.lat, atol=1.0e-5) or not np.allclose(
-        lon, grid.lon, atol=1.0e-5
+    expected_lat = grid.lat.reshape(-1, state_factor).mean(axis=1)
+    expected_lon = grid.lon.reshape(-1, state_factor).mean(axis=1)
+    if not np.allclose(lat, expected_lat, atol=1.0e-5) or not np.allclose(
+        lon, expected_lon, atol=1.0e-5
     ):
         raise SystemExit(
-            f"{path} footprint centres do not sit on stage A's 0.1-degree cells "
+            f"{path} footprint centres do not sit on the expected nested stage-A grid "
             f"(file lat {lat[0]:.3f}..{lat[-1]:.3f}, window {grid.lat[0]:.3f}.."
             f"{grid.lat[-1]:.3f}); assimilating it would displace rainfall"
         )
     print(
         f"[imerg] {path}\n"
-        f"        {precipitation.shape[0]} day(s) on stage A's own cells "
-        f"({grid.nlat}x{grid.nlon} @0.1 deg), identity operator\n"
+        f"        {precipitation.shape[0]} day(s), {precipitation.shape[1]}x"
+        f"{precipitation.shape[2]} @ {0.1 * state_factor:.1f} deg; "
+        f"{state_factor}x{state_factor} physical block operator\n"
         f"        {window_note}; day offset {offset:+d} "
         f"(model {model_times[0]} <- IMERG {days[0]})\n"
-        f"        footprints: {'native 0.1 deg' if native else 'coarsened, factor 2'}",
+        f"        footprints: {'native 0.1 deg' if native else f'coarsened factor {observation_factor}'}; "
+        f"error correlation {error_corr_cells:g} footprint cells",
         flush=True,
     )
-    return {"precipitation": precipitation, "error": error, "day_offset": offset}
+    return {
+        "precipitation": precipitation,
+        "error": error,
+        "day_offset": offset,
+        "state_factor": state_factor,
+        "observation_factor": observation_factor,
+        "error_corr_cells": error_corr_cells,
+        "path": path,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -764,6 +791,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--imerg", default=None,
                    help="BMD-aligned IMERG netCDF at observation_factor 2 (0.1 deg); "
                         "enables the da_imerg / da_sim / da_sim_fine arms")
+    p.add_argument("--imerg-s04", default=None,
+                   help="the same BMD-windowed IMERG coarsened to factor 8 (0.4 "
+                        "degrees). Adds controlled S04 simultaneous arms with a "
+                        "4x4 physical footprint operator")
     p.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0,
                    help="floor on IMERG randomError, so a zero error is not infinite weight")
     p.add_argument("--imerg-error-corr-cells", type=float, default=3.0,
@@ -789,17 +820,15 @@ def parse_args() -> argparse.Namespace:
                         "broad-scale guidance only")
     p.add_argument("--imerg-refine-r", type=float, default=None,
                    help="add CPCv2-derived simultaneous refinements at this R "
-                        "multiplier: stronger early guidance (gamma 0.0003), "
-                        "the CPCv2 ig010 schedule with Huber-3, and ig010 with "
-                        "its original L2 loss. The ordinary da_sim_rN arm remains "
-                        "the gamma-0.001/Huber-3 control")
+                        "multiplier: ig010 (gamma 0.01) with its original L2 loss. "
+                        "The ordinary da_sim_rN arm is the gamma-0.001/Huber-3 control")
     p.add_argument("--imerg-representativeness", type=float, default=0.10,
                    help="footprint-vs-block-mean mismatch in TRANSFORMED units, "
                         "matching configs/da.yaml; the retrieval error itself is "
                         "read from the file in mm and converted")
     p.add_argument("--arms", default=",".join(DEFAULT_ARMS),
                    help="comma-separated subset of " + ",".join(ARMS)
-                        + " (IMERG arms require --imerg)")
+                        + " (IMERG arms require --imerg; --imerg-s04 adds its own arms)")
     p.add_argument("--no-plots", action="store_true",
                    help="write the JSON only; figures are on by default")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -825,6 +854,8 @@ def main() -> None:
         )
     if args.imerg and args.osse_satellite:
         raise SystemExit("--imerg and --osse-satellite are alternatives, not both")
+    if args.imerg_s04 and not args.imerg:
+        raise SystemExit("--imerg-s04 is a scale comparison and also needs native --imerg")
     if args.observations == "real":
         if args.osse_satellite:
             raise SystemExit(
@@ -845,6 +876,7 @@ def main() -> None:
     # weighting and nothing else.
     arm_sigma: dict[str, float] = {}
     arm_imerg_r: dict[str, float] = {}
+    arm_imerg_stream: dict[str, str] = {}
     arm_guidance_gamma: dict[str, float] = {}
     arm_huber_delta: dict[str, float | None] = {}
     if args.imerg_r_sweep:
@@ -885,14 +917,8 @@ def main() -> None:
         arm_imerg_r[control] = r_value
         if control not in arms:
             arms.append(control)
-        refinements = (
-            ("g0003_h3", 3.0e-4, 3.0,
-             "stronger early-time guidance than the V7 gamma-0.001 control"),
-            ("g010_h3", 1.0e-2, 3.0,
-             "CPCv2 ig010 early-time softness combined with robust Huber-3"),
-            ("g010_l2", 1.0e-2, None,
-             "CPCv2 primary ig010 mechanism: gamma 0.01 with the original L2 cost"),
-        )
+        refinements = (("g010_l2", 1.0e-2, None,
+                        "CPCv2 primary ig010 mechanism: gamma 0.01 with L2"),)
         for suffix, gamma, huber, note in refinements:
             name = f"da_sim_r{r_token}_{suffix}"
             ARMS[name] = ("both", False)
@@ -907,6 +933,27 @@ def main() -> None:
         for anchor in ("da_meso", "background"):
             if anchor not in arms:
                 arms.insert(0, anchor)
+    if args.imerg_s04:
+        if args.osse_satellite:
+            raise SystemExit("--imerg-s04 cannot be combined with --osse-satellite")
+        s04_arms = (
+            ("da_sim_s04_r1_g001_h3", 1.0, 1.0e-3, 3.0,
+             "S04 strong-likelihood check"),
+            ("da_sim_s04_corr_g001_h3", None, 1.0e-3, 3.0,
+             "S04 correlation-adjusted V7 robust configuration"),
+            ("da_sim_s04_corr_g010_l2", None, 1.0e-2, None,
+             "S04 correlation-adjusted CPCv2 ig010 configuration"),
+        )
+        for name, multiplier, gamma, huber, note in s04_arms:
+            ARMS[name] = ("both", False)
+            ARM_NOTES[name] = f"IMERG 0.4-degree S04 + gauges; {note}"
+            if multiplier is not None:
+                arm_imerg_r[name] = multiplier
+            arm_imerg_stream[name] = "s04"
+            arm_guidance_gamma[name] = gamma
+            arm_huber_delta[name] = huber
+            if name not in arms:
+                arms.append(name)
     if args.meso_sigma_sweep:
         for token in args.meso_sigma_sweep.split(","):
             token = token.strip()
@@ -954,6 +1001,7 @@ def main() -> None:
     if args.imerg_r_sweep and "da_sim" in arms:
         arm_imerg_r["da_sim"] = float(args.imerg_r_multiplier)
     for arm in arms:
+        arm_imerg_stream.setdefault(arm, "native")
         arm_guidance_gamma.setdefault(arm, float(args.guidance_gamma))
         arm_huber_delta.setdefault(arm, args.huber_delta)
     print(
@@ -1126,6 +1174,7 @@ def main() -> None:
 
     meso_grid = _meso_grid(window)
     imerg = None
+    imerg_streams: dict[str, dict] = {}
     if args.imerg:
         # SAME shift as the gauges, and for the same reason.  load_imerg_meso
         # refuses any file that is not on the BMD 03:00 UTC window, so the file
@@ -1140,8 +1189,29 @@ def main() -> None:
         # says IMERG and the gauges already share a window, which is precisely
         # why they take the same offset relative to a calendar-day model.
         imerg = load_imerg_meso(
-            args.imerg, day_times, int(args.gauge_day_offset), window, meso_grid
+            args.imerg, day_times, int(args.gauge_day_offset), window, meso_grid,
+            native_corr_cells=float(args.imerg_error_corr_cells),
         )
+        imerg_streams["native"] = imerg
+    if args.imerg_s04:
+        s04 = load_imerg_meso(
+            args.imerg_s04, day_times, int(args.gauge_day_offset), window, meso_grid,
+            native_corr_cells=float(args.imerg_error_corr_cells),
+        )
+        if s04["observation_factor"] != 8 or s04["state_factor"] != 4:
+            raise SystemExit(
+                f"--imerg-s04 must be factor 8 / 0.4 degrees, got factor "
+                f"{s04['observation_factor']}"
+            )
+        imerg_streams["s04"] = s04
+        correlation_inflation = max(
+            1.0, 2.0 * np.pi * float(s04["error_corr_cells"]) ** 2
+        )
+        for arm in (
+            "da_sim_s04_corr_g001_h3", "da_sim_s04_corr_g010_l2"
+        ):
+            arm_imerg_r[arm] = correlation_inflation
+            ARM_NOTES[arm] += f" (R x{correlation_inflation:.3f})"
 
     gcfg = GuidanceConfig(
         gamma=args.guidance_gamma,
@@ -1161,6 +1231,7 @@ def main() -> None:
         "window": window.describe(),
         "arm_sigma": arm_sigma,
         "arm_imerg_r": arm_imerg_r,
+        "arm_imerg_stream": arm_imerg_stream,
         "arm_guidance_gamma": arm_guidance_gamma,
         "arm_huber_delta": arm_huber_delta,
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
@@ -1169,11 +1240,14 @@ def main() -> None:
         "observations": args.observations,
         "osse": args.observations == "osse",
         "imerg_day_offset": (imerg or {}).get("day_offset"),
-        "imerg_error_corr_cells": args.imerg_error_corr_cells,
+        "imerg_error_corr_cells": {
+            name: stream["error_corr_cells"] for name, stream in imerg_streams.items()
+        },
         "imerg_r_multiplier": args.imerg_r_multiplier,
         "satellite": (
             "pseudo (CHIRPS + error model)" if args.osse_satellite
-            else (args.imerg if args.imerg else "none")
+            else ({name: stream["path"] for name, stream in imerg_streams.items()}
+                  if imerg_streams else "none")
         ),
         "meso_gauge_sigma_transformed": args.meso_gauge_sigma,
         "meso_gauge_representativeness": args.meso_gauge_representativeness,
@@ -1371,22 +1445,29 @@ def main() -> None:
                     values.append(transformed)
 
                 if meso_obs in ("imerg", "both"):
-                    # observation_factor 2 puts one footprint on each stage A
-                    # cell, so the forward operator is the identity -- a
-                    # factor-1 block average, reusing the audited operator
-                    # rather than adding a second one that means the same thing.
-                    operators.append(
-                        BlockAverageObsOperator(
-                            1, valid=meso_ds.fixed_valid
-                        ).to(device)
-                    )
                     if satellite_mm is not None:
                         field, sigma = satellite_mm, satellite_sigma
+                        state_factor = 1
+                        satellite_corr_cells = float(args.imerg_error_corr_cells)
                     else:
-                        field = imerg["precipitation"][day_position]
+                        stream_name = arm_imerg_stream[arm]
+                        stream = imerg_streams[stream_name]
+                        field = stream["precipitation"][day_position]
                         sigma = np.maximum(
-                            imerg["error"][day_position], args.imerg_sigma_floor_mm
+                            stream["error"][day_position], args.imerg_sigma_floor_mm
                         )
+                        state_factor = int(stream["state_factor"])
+                        satellite_corr_cells = float(stream["error_corr_cells"])
+                    # Average in physical mm/day and transform afterwards. This
+                    # is an identity for native 0.1-degree footprints and an
+                    # exact 4x4 physical footprint operator for S04.
+                    satellite_operator = PhysicalBlockAverageObsOperator(
+                        state_factor, tf, valid=meso_ds.fixed_valid
+                    ).to(device)
+                    operators.append(satellite_operator)
+                    satellite_keep = (
+                        satellite_operator.valid_mask().detach().cpu().numpy().astype(bool)
+                    )
                     # sigma is mm/day; this likelihood is in transformed units.
                     sigma_t = transformed_sigma(tf, field, sigma)
                     satellite_offset = sum(v.numel() for v in variances)
@@ -1404,21 +1485,21 @@ def main() -> None:
                         torch.from_numpy(true_variance).to(device)
                     )
                     effective = field.size / max(
-                        1.0, float(args.imerg_error_corr_cells) ** 2
+                        1.0, satellite_corr_cells ** 2
                     )
                     print(
-                        f"      satellite: {int(np.isfinite(field).sum())} of "
-                        f"{field.size} 0.1-degree footprints "
+                        f"      satellite: {int((np.isfinite(field.reshape(-1)) & satellite_keep).sum())} of "
+                        f"{field.size} footprints "
                         f"({'pseudo, from CHIRPS' if satellite_mm is not None else 'IMERG'})"
-                        f"; error correlated over "
-                        f"{args.imerg_error_corr_cells:g} cells -> ~{effective:.0f} "
+                        f"; {0.1 * state_factor:.1f}-degree support; error correlated over "
+                        f"{satellite_corr_cells:g} footprint cells -> ~{effective:.0f} "
                         f"independent, R inflated x"
                         f"{arm_imerg_r.get(arm, args.imerg_r_multiplier):g}",
                         flush=True,
                     )
                     flat = field.reshape(-1)
                     transformed = tf.forward(flat.astype(np.float32))
-                    transformed[~np.isfinite(flat)] = np.nan
+                    transformed[~np.isfinite(flat) | ~satellite_keep] = np.nan
                     values.append(transformed)
 
                 meso_H = (
@@ -1432,10 +1513,10 @@ def main() -> None:
                 # neighbourhood, so every member ends up seeing effectively the
                 # same satellite and the analysis loses its spread.
                 corr_blocks = []
-                if meso_obs in ("imerg", "both") and args.imerg_error_corr_cells > 0:
+                if meso_obs in ("imerg", "both") and satellite_corr_cells > 0:
                     corr_blocks.append((
                         satellite_offset, satellite_shape[0], satellite_shape[1],
-                        float(args.imerg_error_corr_cells),
+                        satellite_corr_cells,
                     ))
                 # Draw from the TRUE error, weight by the inflated one.
                 draws = perturb_observations(
@@ -2002,7 +2083,7 @@ def report(results: dict, arms: list[str]) -> None:
 
     sweep_table(
         "arm_imerg_r",
-        "Satellite weight sweep -- R multiplier on IMERG (higher = trust it less)",
+        "Satellite configurations -- R multiplier within each footprint scale",
         "x", reference=results.get("imerg_r_multiplier"),
     )
 
