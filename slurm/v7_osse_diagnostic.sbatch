@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=logs/%x-%j.out
 
 # The V7 chain end to end, as an OSSE, against whatever both stages have learned
@@ -37,9 +37,9 @@ MESO_ARCHIVE="${V7_MESO_ARCHIVE:-data/processed/bd_wide_cpc_0p1.zarr}"
 MESO_STATS="${V7_MESO_STATS:-data/processed/stats_v7_meso.json}"
 SUBGRID="${V7_PREP_OUT:-data/processed/v7/wide_v7.zarr}"
 STATIONS="${BMD_STATIONS:-data/stations/data_2020_2025/Stations.csv}"
-START="${V7_OSSE_START:-2022-05-01}"
+START="${V7_OSSE_START:-2022-05-03}"
 END="${V7_OSSE_END:-2022-05-03}"
-MEMBERS="${V7_OSSE_MEMBERS:-8}"
+MEMBERS="${V7_OSSE_MEMBERS:-16}"
 STEPS="${V7_OSSE_STEPS:-50}"
 ARMS="${V7_OSSE_ARMS:-background,da_meso,da_fine,da_both}"
 OUT="${V7_OSSE_OUT:-data/processed/v7_osse/$(date +%Y%m%d_%H%M)}"
@@ -76,6 +76,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --start "$START" --end "$END" \
     --members "$MEMBERS" --n-steps "$STEPS" \
     --arms "$ARMS" \
+    --min-coverage "${V7_OSSE_MIN_COVERAGE:-0.0}" \
     --out "$OUT" \
     "$@"
 
