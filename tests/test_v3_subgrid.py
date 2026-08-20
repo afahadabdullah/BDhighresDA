@@ -2654,3 +2654,97 @@ def test_v7_window_can_anchor_stage_a_to_the_imerg_grid():
     # The unanchored placement remains available and still covers the country.
     centred = bangladesh_window(align_meso_to_bd=False)
     assert centred.meso_origin != anchored.meso_origin
+
+
+def test_v7_osse_pseudo_satellite_is_an_observation_not_the_answer():
+    """A perfect satellite leaks the verification truth; this must not be default.
+
+    The pseudo-satellite reports every 0.1-degree cell, INCLUDING the cells the
+    withheld gauges sit in.  Without error it therefore hands the analysis the
+    thing the analysis is scored against: withheld CRPS collapses, gauges look
+    redundant on top of it, and simultaneous assimilation appears WORSE than
+    satellite-only because gauges can only perturb an already-correct field.
+    That is a property of the experiment, not of the observing systems, and it
+    is exactly what real-data CPCv2 did NOT show.
+    """
+    import numpy as np
+
+    module = _osse_module()
+    rng = np.random.default_rng(0)
+    truth = np.abs(rng.gamma(2.0, 6.0, (48, 48))).astype(np.float32)
+    truth[:4] = np.nan                     # unobserved cells stay unobserved
+
+    observed, sigma = module.corrupt_satellite(
+        truth, sigma_mm=2.0, sigma_frac=0.35, corr_cells=2.0,
+        bias_frac=0.10, perfect=False, seed=1,
+    )
+    keep = np.isfinite(truth)
+    assert np.isnan(observed[:4]).all(), "masked cells must stay masked"
+    assert (observed[keep] >= 0.0).all(), "a satellite cannot retrieve negative rain"
+
+    # It must differ from truth by roughly the sigma it declares -- an error
+    # model whose R does not match how the field was made is mis-specified.
+    error = np.abs(observed - truth)[keep]
+    assert error.mean() > 0.5, "the pseudo-satellite is essentially perfect"
+    assert 0.3 < error.mean() / sigma[keep].mean() < 1.5, (
+        "declared sigma and realised error disagree"
+    )
+
+    # The systematic part survives averaging -- this is why gauges still carry
+    # independent information once a satellite is assimilated.
+    assert observed[keep].mean() > truth[keep].mean(), "the wet bias vanished"
+
+    # And the error is spatially correlated, not white: white noise is averaged
+    # away by the analysis almost for free, which flatters the satellite.
+    residual = np.where(keep, observed - truth, 0.0)
+    lag1 = np.corrcoef(residual[4:-1].ravel(), residual[5:].ravel())[0, 1]
+    assert lag1 > 0.3, f"satellite error is nearly white (lag-1 {lag1:.2f})"
+
+    # The perfect mode still exists, but only behind an explicit flag.
+    exact, exact_sigma = module.corrupt_satellite(
+        truth, sigma_mm=2.0, sigma_frac=0.35, corr_cells=2.0,
+        bias_frac=0.10, perfect=True, seed=1,
+    )
+    assert np.allclose(exact[keep], truth[keep])
+    assert (exact_sigma > 0).all(), "a zero R is a singular likelihood"
+
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+    assert '"--osse-satellite-perfect", action="store_true"' in source, (
+        "the truth-leaking mode must be opt-in, never the default"
+    )
+    assert "DIAGNOSTIC ONLY" in source
+
+
+def test_v7_osse_real_mode_verifies_against_actual_gauge_reports():
+    """OSSE and real data answer different questions; the script must do both.
+
+    In OSSE the pseudo-gauges ARE CHIRPS, so gauge error and representativeness
+    drop out and the experiment isolates how an increment propagates.  With real
+    reports all three are in play, and that is the test CPCv2 was judged on --
+    where gauges beat the satellite and simultaneous assimilation won.  A script
+    that can only do the first cannot reproduce that comparison.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    assert 'choices=("osse", "real")' in source
+    # Real mode uses the values load_stations returns, not CHIRPS.
+    assert "stations, gauge_mm = load_stations(" in source
+    assert "truth_at_stations = np.asarray(gauge_mm[day_position]" in source
+    # A pseudo-satellite is not a real observation and must be refused there.
+    assert "not a real observation" in source
+    # Missing reports become NaN, never an assimilated zero -- a gauge that did
+    # not report is not a gauge that measured no rain.
+    assert "transformed[~np.isfinite(truth_assim)] = np.nan" in source
+    assert "draws[:, ~np.isfinite(truth_assim)] = np.nan" in source
+    # And an empty verification set must stop the run, not produce a score.
+    assert "the verification set" in source
+    # The mode is recorded, so a JSON can never be read as the wrong experiment.
+    assert '"observations": args.observations,' in source

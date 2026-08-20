@@ -119,6 +119,62 @@ ARM_NOTES = {
 }
 
 
+def corrupt_satellite(
+    truth_mm: np.ndarray,
+    *,
+    sigma_mm: float,
+    sigma_frac: float,
+    corr_cells: float,
+    bias_frac: float,
+    perfect: bool,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Turn an exact area mean into something a satellite could plausibly report.
+
+    THIS IS THE DIFFERENCE BETWEEN AN OSSE AND A LEAK.  A perfect satellite
+    observes every 0.1-degree cell -- including the cells the withheld gauges
+    sit in -- so assimilating it hands the analysis the verification truth.
+    Every arm that uses it then scores near-perfectly at "withheld" stations,
+    gauges appear to add nothing on top, and simultaneous assimilation looks
+    slightly WORSE than the satellite alone because the gauges can only perturb
+    a field that is already correct.  None of that is a statement about
+    observing systems; it is a statement about the experiment.
+
+    The error has three parts, because IMERG's does:
+
+    * an intensity-dependent random term -- retrieval error grows with rain
+      rate, so a flat sigma over-trusts heavy scenes and wastes light ones;
+    * a SPATIALLY CORRELATED component -- passive-microwave and IR retrieval
+      errors travel with the storm, and white noise would be averaged away by
+      the analysis almost for free, which flatters the satellite;
+    * a multiplicative bias -- the systematic part no amount of data assimilation
+      can average out, and the reason gauges carry independent information.
+
+    Returns ``(observed_mm, sigma_mm)`` where sigma is the error standard
+    deviation actually used, so R is consistent with how the field was made.
+    """
+    finite = np.isfinite(truth_mm)
+    clean = np.where(finite, truth_mm, 0.0).astype(np.float32)
+    sigma = (sigma_mm + sigma_frac * clean).astype(np.float32)
+    if perfect:
+        # Still report a nonzero sigma: an exactly zero R is a singular
+        # likelihood, and the caller is told loudly what this mode means.
+        return truth_mm, np.maximum(sigma, 1.0e-3)
+
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(clean.shape).astype(np.float32)
+    if corr_cells > 0:
+        from bdhires.da.observation import _smooth2d
+
+        smoothed = _smooth2d(noise[None], float(corr_cells))[0]
+        # Smoothing destroys variance; rescale so sigma still means sigma.
+        deviation = float(smoothed.std())
+        noise = smoothed / deviation if deviation > 0 else smoothed
+    observed = clean * (1.0 + bias_frac) + sigma * noise
+    observed = np.maximum(observed, 0.0)          # a satellite cannot see < 0
+    return np.where(finite, observed, np.nan).astype(np.float32), sigma
+
+
 def load_imerg_meso(path: str, days: np.ndarray, window, grid) -> dict:
     """Read BMD-aligned IMERG onto stage A's own cells, or refuse.
 
@@ -465,13 +521,36 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--spread-cells", type=float, default=0.0,
                    help="Gaussian spreading of the 0.1-degree guidance gradient, in cells")
     p.add_argument("--seed", type=int, default=20220503)
+    p.add_argument("--observations", choices=("osse", "real"), default="osse",
+                   help="osse: pseudo-gauges read CHIRPS at the station coordinates, "
+                        "so gauge error and representativeness drop out. "
+                        "real: assimilate and verify against the ACTUAL BMD reports, "
+                        "which is the test CPCv2 was judged on")
     p.add_argument("--osse-satellite", action="store_true",
                    help="synthesise the 0.1-degree satellite stream from CHIRPS "
                         "(perfect AREA-AVERAGE observations) instead of reading a "
                         "real IMERG file; consistent with the perfect gauges and "
                         "needs no external data")
-    p.add_argument("--osse-satellite-sigma-mm", type=float, default=1.0,
-                   help="assumed error on the pseudo-satellite footprints")
+    # A pseudo-satellite MUST carry error.  A perfect one observes every cell,
+    # including the cells the withheld gauges sit in, so it hands the analysis
+    # the verification truth and every arm that uses it scores near-perfectly
+    # for no scientific reason.  Defaults are IMERG-like: a floor plus an
+    # intensity-dependent term, a spatially correlated component because
+    # retrieval error is not white, and a multiplicative bias.
+    p.add_argument("--osse-satellite-sigma-mm", type=float, default=2.0,
+                   help="random error floor on the pseudo-satellite (mm/day)")
+    p.add_argument("--osse-satellite-sigma-frac", type=float, default=0.35,
+                   help="additional random error as a fraction of the rain rate")
+    p.add_argument("--osse-satellite-corr-cells", type=float, default=2.0,
+                   help="spatial correlation length of the satellite error, in "
+                        "0.1-degree cells; 0 makes it white, which is unrealistic")
+    p.add_argument("--osse-satellite-bias-frac", type=float, default=0.10,
+                   help="systematic multiplicative bias, e.g. 0.10 = 10 percent wet")
+    p.add_argument("--osse-satellite-perfect", action="store_true",
+                   help="DIAGNOSTIC ONLY: no satellite error at all. This leaks the "
+                        "verification truth into the analysis and its scores are "
+                        "meaningless as skill -- use it to bound what is achievable, "
+                        "never to compare observing systems")
     p.add_argument("--imerg", default=None,
                    help="BMD-aligned IMERG netCDF at observation_factor 2 (0.1 deg); "
                         "enables the da_imerg / da_sim / da_sim_fine arms")
@@ -506,6 +585,20 @@ def main() -> None:
         )
     if args.imerg and args.osse_satellite:
         raise SystemExit("--imerg and --osse-satellite are alternatives, not both")
+    if args.observations == "real":
+        if args.osse_satellite:
+            raise SystemExit(
+                "--osse-satellite synthesises the satellite from CHIRPS, which is "
+                "not a real observation; pass --imerg with real observations"
+            )
+        if args.min_coverage <= 0.0:
+            # With real gauges a station that filed no report contributes
+            # nothing but a NaN, and a network silently full of them would make
+            # the withheld score rest on two or three stations.
+            raise SystemExit(
+                "--observations real needs --min-coverage > 0 so that stations "
+                "which did not report are dropped rather than carried as NaN"
+            )
 
     device = torch.device(args.device)
     out_dir = Path(args.out)
@@ -513,6 +606,13 @@ def main() -> None:
 
     window = bangladesh_window()
     print(window.describe(), flush=True)
+    print(
+        f"observations: {args.observations.upper()}"
+        + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
+           if args.observations == "osse"
+           else "  (actual BMD reports, assimilated and verified)"),
+        flush=True,
+    )
 
     # ---- frozen checkpoints, before anything is sampled -------------------
     meso_frozen, meso_info = snapshot(
@@ -616,7 +716,7 @@ def main() -> None:
     fine_grid = window.fine_grid()
     day_times = np.asarray([np.datetime64(d) for d, _, _ in days])
     try:
-        stations, _ = load_stations(
+        stations, gauge_mm = load_stations(
             args.stations, day_times, grid=fine_grid, min_coverage=args.min_coverage
         )
     except ValueError as error:
@@ -687,7 +787,12 @@ def main() -> None:
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
         "members": args.members,
         "n_steps": args.n_steps,
-        "osse": True,
+        "observations": args.observations,
+        "osse": args.observations == "osse",
+        "satellite": (
+            "pseudo (CHIRPS + error model)" if args.osse_satellite
+            else (args.imerg if args.imerg else "none")
+        ),
         "osse_sigma_mm": args.osse_sigma_mm,
         "stations": {
             "total": int(len(stations)),
@@ -710,19 +815,36 @@ def main() -> None:
         area = sub["cell_area"][None].to(device)
         fine_cond = sub["fine_cond"][None].to(device)
 
-        # Perfect observations: CHIRPS read at the station coordinates through
-        # the same operator the analysis uses, so a pseudo-gauge and the
-        # analysis see the identical quantity and no interpolation mismatch can
-        # confound the result.
-        with torch.no_grad():
-            truth_at_stations = fine_operator(fine_truth)[0, 0].cpu().numpy()
+        if args.observations == "osse":
+            # Perfect observations: CHIRPS read at the station coordinates
+            # through the SAME operator the analysis uses, so a pseudo-gauge and
+            # the analysis see the identical quantity and no interpolation
+            # mismatch can confound the result.
+            with torch.no_grad():
+                truth_at_stations = fine_operator(fine_truth)[0, 0].cpu().numpy()
+        else:
+            # Real BMD reports, assimilated AND verified.  Now gauge error,
+            # representativeness and the CHIRPS-vs-gauge difference are all in
+            # play -- which is the point: it is the test CPCv2 was judged on,
+            # and the only one whose numbers describe the actual product.
+            truth_at_stations = np.asarray(gauge_mm[day_position], np.float32)
+            reporting = int(np.isfinite(truth_at_stations).sum())
+            if reporting < len(stations):
+                print(f"      {len(stations) - reporting} station(s) did not report "
+                      f"on {date}; they are scored as missing, not as zero",
+                      flush=True)
         truth_assim = truth_at_stations[assimilated]
         truth_withheld = truth_at_stations[withheld]
+        if not np.isfinite(truth_withheld).any():
+            raise SystemExit(
+                f"no withheld station reported on {date}; the verification set "
+                f"is empty and every score would be vacuous"
+            )
         # A perfect satellite sees the exact 0.1-degree area mean of the truth.
         # That is precisely the archive's coarse_mm, so nothing is recomputed.
         # It covers stage B's window, which is a SUB-window of stage A's state,
         # so the rest of the field is NaN -- unobserved, not zero.
-        satellite_mm = None
+        satellite_mm = satellite_sigma = None
         if args.osse_satellite:
             satellite_mm = np.full(
                 (window.meso_size, window.meso_size), np.nan, np.float32
@@ -731,6 +853,15 @@ def main() -> None:
             satellite_mm[
                 row:row + window.coarse_size, column:column + window.coarse_size
             ] = sub["coarse_mm"][0].numpy()
+            satellite_mm, satellite_sigma = corrupt_satellite(
+                satellite_mm,
+                sigma_mm=args.osse_satellite_sigma_mm,
+                sigma_frac=args.osse_satellite_sigma_frac,
+                corr_cells=args.osse_satellite_corr_cells,
+                bias_frac=args.osse_satellite_bias_frac,
+                perfect=args.osse_satellite_perfect,
+                seed=args.seed + meso_index,
+            )
 
         truth_fields[date] = {
             "field": fine_truth[0, 0].cpu().numpy(),
@@ -773,7 +904,13 @@ def main() -> None:
                         representativeness=args.representativeness_mm,
                     )
                     variances.append(gauge_R)
-                    values.append(tf.forward(truth_assim.astype(np.float32)))
+                    # A station that did not report enters as NaN and the
+                    # likelihood skips it, rather than assimilating a zero.
+                    transformed = tf.forward(
+                        np.nan_to_num(truth_assim, nan=0.0).astype(np.float32)
+                    )
+                    transformed[~np.isfinite(truth_assim)] = np.nan
+                    values.append(transformed)
 
                 if meso_obs in ("imerg", "both"):
                     # observation_factor 2 puts one footprint on each stage A
@@ -786,8 +923,7 @@ def main() -> None:
                         ).to(device)
                     )
                     if satellite_mm is not None:
-                        field = satellite_mm
-                        sigma = np.full_like(field, args.osse_satellite_sigma_mm)
+                        field, sigma = satellite_mm, satellite_sigma
                     else:
                         field = imerg["precipitation"][day_position]
                         sigma = np.maximum(
@@ -849,9 +985,10 @@ def main() -> None:
                     representativeness=args.representativeness_mm,
                 )
                 draws = perturb_observations(
-                    truth_assim.astype(np.float32), fine_R, args.members,
-                    seed=meso_index + 7,
+                    np.nan_to_num(truth_assim, nan=0.0).astype(np.float32),
+                    fine_R, args.members, seed=meso_index + 7,
                 )
+                draws[:, ~np.isfinite(truth_assim)] = np.nan
                 observation = {
                     "H": assim_operator,
                     # Physical millimetres: reconstruct_from_amount returns mm,
