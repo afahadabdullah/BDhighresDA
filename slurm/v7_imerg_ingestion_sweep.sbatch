@@ -52,7 +52,8 @@ for required in "$MESO_CKPT" "$ALLOC_CKPT" "$MESO_ARCHIVE" "$MESO_STATS" \
                 "$SUBGRID" "$CATALOG" scripts/05_convert_bmd_dir.py \
                 scripts/43_subset_prepared_imerg.py \
                 scripts/44_coarsen_imerg_observations.py \
-                scripts/72_v7_two_stage_osse.py scripts/76_rank_v7_imerg_ingestion.py; do
+                scripts/72_v7_two_stage_osse.py scripts/76_rank_v7_imerg_ingestion.py \
+                scripts/77_evaluate_v7_subgrid_resolution.py; do
     [[ -f "$required" || -d "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
 [[ -d "$BMD_DIR" ]] || { echo "ERROR: missing BMD directory $BMD_DIR" >&2; exit 1; }
@@ -126,4 +127,13 @@ RESULT="$OUT/v7_two_stage_real.json"
     --out-markdown "$OUT/v7_imerg_ingestion_ranking.md" \
     --out-plot "$OUT/v7_imerg_ingestion_ranking.png"
 
+# Texture by itself is not resolution.  Strip each field's exact 0.1-degree
+# block mean, test the remaining 2x2 placement against CHIRPS and a randomized
+# within-cell null, and use withheld BMD anomalies as an independent point check.
+"$PYTHON_BIN" -u scripts/77_evaluate_v7_subgrid_resolution.py \
+    --map-dump "$V7_MAP_DUMP" --station-dump "$V7_DUMP" \
+    --subgrid-archive "$SUBGRID" --arm da_sim_r81 \
+    --out-dir "$OUT/subgrid_resolution"
+
 echo "Winner report: $OUT/v7_imerg_ingestion_ranking.md"
+echo "Subgrid evidence: $OUT/subgrid_resolution/v7_r81_subgrid_evidence.md"
