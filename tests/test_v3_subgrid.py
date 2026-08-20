@@ -3099,3 +3099,62 @@ def test_v7_osse_accepts_a_native_imerg_file_and_refuses_a_coarsened_one():
         module.load_imerg_meso(
             build(3, lat=grid.lat + 0.3), model, 1, window, grid
         )
+
+
+def test_v7_osse_satellite_error_is_correlated_and_r_reflects_independence():
+    """4096 footprints are not 4096 independent constraints.
+
+    The real-data run showed both failure modes at once: assimilating IMERG
+    with a diagonal R and white perturbations collapsed spread/RMSE from 1.06
+    to 0.35 and wet the domain from 12.7 to 20.0 mm/day, while withheld CRPS
+    did not improve at all.  configs/da.yaml names the cause -- error_corr_cells
+    3.0, "satellite errors correlate over ~30 km; white perturbations would
+    average away and add no spread".
+
+    Two things follow, and both are needed: the PERTURBATIONS must be spatially
+    correlated so members stay apart under any averaging, and R must be
+    inflated so the likelihood does not claim more information than the data
+    carry.
+    """
+    import numpy as np
+    import torch
+
+    from bdhires.da import perturb_observations
+
+    members, side = 16, 32
+    variance = torch.full((side * side,), 0.25)
+    zeros = np.zeros(side * side, np.float32)
+
+    def neighbourhood_retention(corr):
+        blocks = [(0, side, side, corr)] if corr > 0 else None
+        draws = perturb_observations(
+            zeros, variance, members, seed=0, corr_blocks=blocks
+        ).reshape(members, side, side)
+        pointwise = draws.std(axis=0).mean()
+        smoothed = draws.reshape(members, side // 2, 2, side // 2, 2).mean(axis=(2, 4))
+        return smoothed.std(axis=0).mean() / pointwise
+
+    white = neighbourhood_retention(0.0)
+    correlated = neighbourhood_retention(3.0)
+    assert white < 0.65, "white noise should lose spread under averaging"
+    assert correlated > 0.9, (
+        "correlated perturbations must survive averaging, or members see the "
+        "same satellite and the analysis has no spread left"
+    )
+
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+    assert '"--imerg-error-corr-cells", type=float, default=3.0' in source, (
+        "the correlation length no longer matches configs/da.yaml"
+    )
+    # The satellite block, and only it, gets correlated perturbations: gauges
+    # are genuinely independent point measurements.
+    assert "corr_blocks.append((" in source
+    assert "satellite_offset, satellite_shape[0], satellite_shape[1]," in source
+    assert "corr_blocks=corr_blocks or None," in source
+    # And R is inflated by the number of cells per independent datum.
+    assert "float(args.imerg_error_corr_cells) ** 2" in source
+    assert "args.imerg_r_multiplier" in source

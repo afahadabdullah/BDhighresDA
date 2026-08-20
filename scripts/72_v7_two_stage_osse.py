@@ -747,6 +747,20 @@ def parse_args() -> argparse.Namespace:
                         "enables the da_imerg / da_sim / da_sim_fine arms")
     p.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0,
                    help="floor on IMERG randomError, so a zero error is not infinite weight")
+    p.add_argument("--imerg-error-corr-cells", type=float, default=3.0,
+                   help="spatial correlation length of the satellite error, in "
+                        "0.1-degree cells, matching configs/da.yaml. Satellite "
+                        "retrieval error is correlated over tens of kilometres; "
+                        "WHITE perturbations average out over any neighbourhood and "
+                        "add almost no ensemble spread, which is how a 4096-footprint "
+                        "field collapses the analysis")
+    p.add_argument("--imerg-r-multiplier", type=float, default=None,
+                   help="inflate the satellite variance to reflect how many of its "
+                        "footprints are actually INDEPENDENT. With a correlation "
+                        "length of L cells a patch of about L^2 cells carries one "
+                        "datum, so the default is L^2: without it a diagonal R "
+                        "asserts 4096 independent constraints where there are a few "
+                        "hundred, and the ensemble is crushed")
     p.add_argument("--imerg-representativeness", type=float, default=0.10,
                    help="footprint-vs-block-mean mismatch in TRANSFORMED units, "
                         "matching configs/da.yaml; the retrieval error itself is "
@@ -834,6 +848,10 @@ def main() -> None:
         args.fine_gauge_sigma_mm = 3.0 if real else args.osse_sigma_mm
     if args.gauge_day_offset is None:
         args.gauge_day_offset = 1 if real else 0
+    if args.imerg_r_multiplier is None:
+        # L^2 cells per independent datum, floored at 1 (no inflation when the
+        # error really is white).
+        args.imerg_r_multiplier = max(1.0, float(args.imerg_error_corr_cells) ** 2)
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
@@ -1044,6 +1062,8 @@ def main() -> None:
         "observations": args.observations,
         "osse": args.observations == "osse",
         "imerg_day_offset": (imerg or {}).get("day_offset"),
+        "imerg_error_corr_cells": args.imerg_error_corr_cells,
+        "imerg_r_multiplier": args.imerg_r_multiplier,
         "satellite": (
             "pseudo (CHIRPS + error model)" if args.osse_satellite
             else (args.imerg if args.imerg else "none")
@@ -1206,16 +1226,25 @@ def main() -> None:
                         )
                     # sigma is mm/day; this likelihood is in transformed units.
                     sigma_t = transformed_sigma(tf, field, sigma)
+                    satellite_offset = sum(v.numel() for v in variances)
+                    satellite_shape = field.shape
                     variances.append(
                         torch.from_numpy(
-                            (sigma_t.reshape(-1) ** 2
-                             + args.imerg_representativeness ** 2).astype(np.float32)
+                            (args.imerg_r_multiplier
+                             * (sigma_t.reshape(-1) ** 2
+                                + args.imerg_representativeness ** 2)).astype(np.float32)
                         ).to(device)
+                    )
+                    effective = field.size / max(
+                        1.0, float(args.imerg_error_corr_cells) ** 2
                     )
                     print(
                         f"      satellite: {int(np.isfinite(field).sum())} of "
                         f"{field.size} 0.1-degree footprints "
-                        f"({'pseudo, from CHIRPS' if satellite_mm is not None else 'IMERG'})",
+                        f"({'pseudo, from CHIRPS' if satellite_mm is not None else 'IMERG'})"
+                        f"; error correlated over "
+                        f"{args.imerg_error_corr_cells:g} cells -> ~{effective:.0f} "
+                        f"independent, R inflated x{args.imerg_r_multiplier:g}",
                         flush=True,
                     )
                     flat = field.reshape(-1)
@@ -1229,8 +1258,19 @@ def main() -> None:
                 )
                 meso_R = torch.cat(variances)
                 stacked = np.concatenate(values)
+                # Correlated perturbations over the satellite footprints only.
+                # White noise on a 0.1-degree field averages out over any
+                # neighbourhood, so every member ends up seeing effectively the
+                # same satellite and the analysis loses its spread.
+                corr_blocks = []
+                if meso_obs in ("imerg", "both") and args.imerg_error_corr_cells > 0:
+                    corr_blocks.append((
+                        satellite_offset, satellite_shape[0], satellite_shape[1],
+                        float(args.imerg_error_corr_cells),
+                    ))
                 draws = perturb_observations(
-                    stacked, meso_R, args.members, seed=meso_index
+                    stacked, meso_R, args.members, seed=meso_index,
+                    corr_blocks=corr_blocks or None,
                 )
                 draws[:, ~np.isfinite(stacked)] = np.nan
                 meso_y = torch.from_numpy(
