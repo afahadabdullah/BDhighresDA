@@ -142,12 +142,36 @@ def snapshot(path: str, destination: Path, label: str) -> tuple[Path, dict]:
     return frozen, info
 
 
-def load_meso(frozen: Path, cond_channels: int, size: int, device):
-    """Stage A: the CPCv2 UNet, rebuilt from the checkpoint's own config."""
+def meso_config(frozen: Path) -> dict:
+    """The resolved training config stage A was built with.
+
+    The conditioning stack is a CONTRACT, not something to re-derive: the
+    channel subset in ``data.cond_channels`` and the seasonal encoding flag both
+    change how many channels the network's first convolution expects.  Rebuild
+    the dataset from anything other than this and the weights will not load --
+    or worse, would load and mean something else.
+    """
     checkpoint = torch.load(frozen, map_location="cpu", weights_only=False)
     cfg = checkpoint.get("cfg") or checkpoint.get("config")
     if cfg is None:
         raise SystemExit("stage A checkpoint carries no config; cannot rebuild the model")
+    return cfg
+
+
+def meso_expected_cond_channels(frozen: Path, in_channels: int = 1) -> int:
+    """How many conditioning channels the checkpoint's own weights expect.
+
+    Read from ``in_conv.weight`` rather than counted from the config, so a
+    mismatch is reported here, in its own terms, instead of surfacing as a
+    torch size-mismatch traceback that names two numbers and no cause.
+    """
+    state = select_weights(torch.load(frozen, map_location="cpu", weights_only=False))
+    return int(state["in_conv.weight"].shape[1]) - int(in_channels)
+
+
+def load_meso(frozen: Path, cond_channels: int, size: int, cfg: dict, device):
+    """Stage A: the CPCv2 UNet, rebuilt from the checkpoint's own config."""
+    checkpoint = torch.load(frozen, map_location="cpu", weights_only=False)
     model = UNet(
         in_channels=1, cond_channels=cond_channels, out_channels=1,
         image_size=size, **cfg["model"],
@@ -379,15 +403,31 @@ def main() -> None:
         args.allocation_checkpoint, out_dir / "checkpoints", "allocation"
     )
 
-    # ---- stage A dataset --------------------------------------------------
+    # ---- stage A dataset, built from the checkpoint's own data contract ----
+    meso_cfg = meso_config(meso_frozen)
+    trained_stats = meso_cfg["data"].get("stats")
+    if trained_stats and Path(trained_stats) != Path(args.meso_stats):
+        # Normalisation moments are part of the weights' meaning.  Different
+        # statistics would load cleanly and silently mis-scale every input.
+        raise SystemExit(
+            f"stage A was trained with stats {trained_stats!r} but this run was "
+            f"given {args.meso_stats!r}; they must be the same file"
+        )
     stats = json.loads(Path(args.meso_stats).read_text())
     tf = PrecipTransform.from_dict(stats["precip_transform"])
+    selected = meso_cfg["data"].get("cond_channels")
     meso_ds = PrecipDataset(
         DatasetConfig(
             root=args.meso_archive,
             crop=window.meso_size,
             random_crop=False,
             crop_origin=window.meso_origin,
+            # Straight from the training config: the channel subset and the
+            # seasonal encoding each change the conditioning width, and the
+            # first convolution was sized for exactly one combination.
+            seasonal_encoding=meso_cfg["data"].get("seasonal_encoding", True),
+            cond_channels=tuple(selected) if selected else None,
+            era5_member=meso_cfg["data"].get("era5_member"),
         ),
         tf,
         cond_mean=np.asarray(stats["cond_mean"], np.float32),
@@ -396,8 +436,24 @@ def main() -> None:
         residual=ResidualSpec.from_stats(stats),
         climatology=load_climatology(args.meso_stats, stats),
     )
+    expected = meso_expected_cond_channels(meso_frozen)
+    if meso_ds.total_cond_channels != expected:
+        raise SystemExit(
+            f"stage A expects {expected} conditioning channels but this dataset "
+            f"builds {meso_ds.total_cond_channels}.\n"
+            f"  cond_channels    : {selected}\n"
+            f"  seasonal_encoding: {meso_cfg['data'].get('seasonal_encoding', True)}\n"
+            f"  archive          : {args.meso_archive}\n"
+            f"The checkpoint and the archive disagree about the conditioning "
+            f"stack; they must come from the same run."
+        )
+    print(
+        f"stage A conditioning: {meso_ds.total_cond_channels} channels "
+        f"({len(selected) if selected else 'all'} selected + seasonal)",
+        flush=True,
+    )
     meso_model, _ = load_meso(
-        meso_frozen, meso_ds.total_cond_channels, window.meso_size, device
+        meso_frozen, meso_ds.total_cond_channels, window.meso_size, meso_cfg, device
     )
 
     # ---- stage B dataset --------------------------------------------------

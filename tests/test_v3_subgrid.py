@@ -2533,3 +2533,40 @@ def test_v7_osse_slurm_job_never_writes_into_a_live_run_directory():
     for forbidden in ('"runs/v7/meso/last', "runs/v7/allocation/last", "best.pt.part"):
         assert forbidden not in source
     assert 'out_dir.mkdir' in source
+
+
+def test_v7_osse_takes_the_conditioning_contract_from_the_checkpoint(tmp_path):
+    """The conditioning stack is read, never re-derived.
+
+    ``data.cond_channels`` selects a SUBSET of the archive's channels and
+    ``seasonal_encoding`` adds two more, so the width of the network's first
+    convolution is a joint property of both.  Building the inference dataset
+    without them produced 17 channels against the trained 16, and the only
+    symptom was a torch size mismatch naming two numbers and no cause.  The
+    expected width is therefore read from the weights themselves.
+    """
+    from pathlib import Path
+
+    module = _osse_module()
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+
+    # The dataset is built from the checkpoint's config, not from CLI defaults.
+    assert 'meso_cfg["data"].get("cond_channels")' in source
+    assert 'meso_cfg["data"].get("seasonal_encoding", True)' in source
+    assert "cond_channels=tuple(selected) if selected else None" in source
+    # ...and the result is checked against the weights before anything loads.
+    assert "meso_expected_cond_channels" in source
+    assert 'state["in_conv.weight"].shape[1]' in source
+
+    # The width really does come from the first convolution.
+    state = {"in_conv.weight": torch.zeros(96, 17, 3, 3)}
+    checkpoint = {"model": state, "weights": "model"}
+    frozen = tmp_path / "meso.pt"
+    torch.save(checkpoint, frozen)
+    assert module.meso_expected_cond_channels(frozen, in_channels=1) == 16
+
+    # Statistics are part of the weights' meaning; a different file must be
+    # refused rather than silently mis-scaling every input.
+    assert "they must be the same file" in source
