@@ -3158,3 +3158,56 @@ def test_v7_osse_satellite_error_is_correlated_and_r_reflects_independence():
     # And R is inflated by the number of cells per independent datum.
     assert "float(args.imerg_error_corr_cells) ** 2" in source
     assert "args.imerg_r_multiplier" in source
+
+
+def test_v7_osse_perturbs_with_true_error_and_weights_with_inflated_r():
+    """R inflation and observation perturbation are different quantities.
+
+    Inflating R is a statement about how much INFORMATION correlated footprints
+    carry, and belongs in the likelihood.  The perturbation is a draw of a
+    plausible OBSERVATION ERROR, and must use the real error.  Using the
+    inflated value for both triples the draw amplitude in transformed space --
+    where sqrt is convex, so symmetric noise rectifies into a wet bias in mm
+    (Jensen).  That is what turned the satellite arm's bias from +0.4 to
+    +15.0 mm and its spread from 7.6 to 49.8.
+    """
+    import numpy as np
+    import torch
+
+    from bdhires.da import perturb_observations
+    from bdhires.transforms import PrecipTransform
+
+    transform = PrecipTransform.from_dict(
+        {"kind": "sqrt", "mu": 1.5, "sd": 1.2, "eps": 0.02}
+    )
+    side, members = 32, 16
+    raw = np.full(side * side, 15.0, np.float32)
+    y = np.asarray(transform.forward(raw), np.float32)
+    true_variance = torch.full((side * side,), 0.09)
+
+    def observed_mean(variance):
+        draws = perturb_observations(
+            y, variance, members, seed=0, corr_blocks=[(0, side, side, 3.0)]
+        )
+        return float(np.asarray(transform.inverse(draws.astype(np.float32))).mean())
+
+    honest = observed_mean(true_variance) - 15.0
+    inflated = observed_mean(true_variance * 9.0) - 15.0
+    assert inflated > honest > 0.0, "the convexity should bias both, inflated more"
+    assert inflated > 4.0 * honest, (
+        "drawing from an inflated R must be visibly worse, or this test proves nothing"
+    )
+    assert honest < 0.5, "the honest draw should barely bias the mean"
+
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts/72_v7_two_stage_osse.py"
+    ).read_text()
+    # Two vectors, and the draws use the uninflated one.
+    assert "operators, values, variances, perturb_variances = [], [], [], []" in source
+    assert "stacked, torch.cat(perturb_variances), args.members," in source
+    # The inflation still reaches the likelihood.
+    assert "args.imerg_r_multiplier * true_variance" in source
+    # And a Jensen check that reports the residual in mm.
+    assert "Jensen {drawn - raw:+.2f} mm" in source

@@ -1172,7 +1172,19 @@ def main() -> None:
                 # conditioning channel.  Stacking them into one operator and one
                 # R is what makes "simultaneous" mean simultaneous rather than
                 # two sequential updates that double-count the prior.
-                operators, values, variances = [], [], []
+                # TWO variance vectors, because they answer different questions.
+                #   variances       -> the LIKELIHOOD weight. Inflated for
+                #                      correlated satellite footprints, because
+                #                      4096 of them carry far less information
+                #                      than 4096 independent data.
+                #   perturb_variance -> the actual OBSERVATION ERROR, used to
+                #                      draw one plausible realisation per member.
+                # Inflating both double-counts, and worse: the draws live in
+                # transformed space where sqrt is convex, so tripling their
+                # amplitude rectifies into a large WET bias in mm (Jensen; see
+                # scripts/31_jensen_bias_audit.py). That is what turned bias
+                # +0.4 into +15.0 and spread 7.6 into 49.8.
+                operators, values, variances, perturb_variances = [], [], [], []
 
                 if meso_obs in ("gauges", "both"):
                     # A gauge is a POINT measurement, read here as the value of
@@ -1199,6 +1211,7 @@ def main() -> None:
                         ),
                     )
                     variances.append(gauge_R)
+                    perturb_variances.append(gauge_R)   # points: no inflation
                     # A station that did not report enters as NaN and the
                     # likelihood skips it, rather than assimilating a zero.
                     transformed = tf.forward(
@@ -1228,12 +1241,16 @@ def main() -> None:
                     sigma_t = transformed_sigma(tf, field, sigma)
                     satellite_offset = sum(v.numel() for v in variances)
                     satellite_shape = field.shape
+                    true_variance = (
+                        sigma_t.reshape(-1) ** 2 + args.imerg_representativeness ** 2
+                    ).astype(np.float32)
                     variances.append(
                         torch.from_numpy(
-                            (args.imerg_r_multiplier
-                             * (sigma_t.reshape(-1) ** 2
-                                + args.imerg_representativeness ** 2)).astype(np.float32)
+                            (args.imerg_r_multiplier * true_variance).astype(np.float32)
                         ).to(device)
+                    )
+                    perturb_variances.append(
+                        torch.from_numpy(true_variance).to(device)
                     )
                     effective = field.size / max(
                         1.0, float(args.imerg_error_corr_cells) ** 2
@@ -1268,10 +1285,30 @@ def main() -> None:
                         satellite_offset, satellite_shape[0], satellite_shape[1],
                         float(args.imerg_error_corr_cells),
                     ))
+                # Draw from the TRUE error, weight by the inflated one.
                 draws = perturb_observations(
-                    stacked, meso_R, args.members, seed=meso_index,
-                    corr_blocks=corr_blocks or None,
+                    stacked, torch.cat(perturb_variances), args.members,
+                    seed=meso_index, corr_blocks=corr_blocks or None,
                 )
+                if meso_obs in ("imerg", "both") and arm.endswith(("imerg", "sim")):
+                    # Jensen check, in mm: symmetric noise in transformed space
+                    # is asymmetric in rainfall, so the perturbed observations
+                    # can be systematically wetter than the field they came from.
+                    block = slice(satellite_offset,
+                                  satellite_offset + int(np.prod(satellite_shape)))
+                    finite_obs = np.isfinite(stacked[block])
+                    if finite_obs.any():
+                        raw = float(np.nanmean(
+                            tf.inverse(stacked[block][finite_obs].astype(np.float32))
+                        ))
+                        drawn = float(np.nanmean(
+                            tf.inverse(draws[:, block][:, finite_obs].astype(np.float32))
+                        ))
+                        print(f"      perturbed obs mean {drawn:6.2f} mm vs "
+                              f"{raw:6.2f} mm as read  (Jensen {drawn - raw:+.2f} mm)"
+                              + ("   <- large; the draws are too wide"
+                                 if abs(drawn - raw) > 0.1 * max(raw, 1.0) else ""),
+                              flush=True)
                 draws[:, ~np.isfinite(stacked)] = np.nan
                 meso_y = torch.from_numpy(
                     draws[:, None].astype(np.float32)
