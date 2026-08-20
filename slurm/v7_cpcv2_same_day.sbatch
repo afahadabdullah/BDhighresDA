@@ -14,7 +14,8 @@
 # V7:
 #   da_meso  gauges-only stage-A DA (current selected V7 defaults)
 #   da_sim   simultaneous stage-A gauge + native 0.1-degree IMERG DA, R x9
-#   da_sim_r27 / da_sim_r81  weaker-satellite calibration checks
+#   da_sim_r3 / da_sim_r27 / da_sim_r81  stronger/weaker R checks
+#   R x27 refinements  stronger early guidance and CPCv2 ig010 loss variants
 #
 # CPCv2:
 #   guided_s6_g010_t100  frozen gauges-only winner
@@ -142,7 +143,7 @@ WITHHELD_IDS="$OUT/v7_withheld_station_ids.txt"
 
 echo "Matched V7 vs CPCv2 comparison"
 echo "  model days: $START through $END; BMD observation days: $CPCV2_START through $CPCV2_END"
-echo "  V7 arms: background (diagnostic), da_meso, simultaneous IMERG R x9, x27, x81"
+echo "  V7 arms: background, da_meso, simultaneous R x3/x9/x27/x81 plus R x27 gamma/loss refinements"
 echo "  V7 frozen reference: $V7_REFERENCE_ROOT"
 echo "  CPCv2 arms: guided_s6_g010_t100, v2_simul_s04_ig010"
 echo "  sampling: $MEMBERS members, $STEPS Heun steps, seed $SEED"
@@ -160,7 +161,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/72_v7_two_stage_osse.py \
     --members "$MEMBERS" --n-steps "$STEPS" --seed "$SEED" \
     --observations real --min-coverage 0.8 \
     --arms background,da_meso,da_sim --imerg-r-multiplier 9 \
-    --imerg-r-sweep 27,81 \
+    --imerg-r-sweep 3,27,81 --imerg-refine-r 27 \
     --station-dump "$V7_DUMP" --map-dump "$V7_MAP_DUMP" \
     --out "$OUT"
 

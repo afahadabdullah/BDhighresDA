@@ -108,8 +108,15 @@ def aligned_station_data(v7_path: Path, cpc_path: Path) -> tuple[np.ndarray, dic
         if not same.all() or not np.allclose(observed[finite], cpc_observed[finite], atol=1e-5):
             raise ValueError("BMD values differ between V7 and CPCv2")
 
+        comparisons = dict(COMPARISONS)
+        if "arm_names" in v7:
+            for arm in np.asarray(v7["arm_names"], dtype=str):
+                if arm.startswith("da_sim_r") and f"station_{arm}" in v7:
+                    comparisons[f"simultaneous_{arm.removeprefix('da_sim_')}"] = (
+                        arm, "v2_simul_s04_ig010"
+                    )
         scores: dict[str, dict] = {}
-        for label, (v7_arm, cpc_arm) in COMPARISONS.items():
+        for label, (v7_arm, cpc_arm) in comparisons.items():
             v7_key, cpc_key = f"station_{v7_arm}", f"station_{cpc_arm}"
             required(v7, v7_path, v7_key)
             required(cpc, cpc_path, cpc_key)
@@ -207,8 +214,11 @@ def finite_span(*arrays: np.ndarray, percentile: float = 99.0) -> float:
 
 
 def plot_skill(times: np.ndarray, scores: dict, out_path: Path) -> None:
-    figure, axes = plt.subplots(2, 2, figsize=(13, 7), sharex=True)
-    for row, label in enumerate(COMPARISONS):
+    figure, axes = plt.subplots(
+        len(scores), 2, figsize=(13, max(7, 2.8 * len(scores))), sharex=True,
+        squeeze=False,
+    )
+    for row, label in enumerate(scores):
         for column, metric in enumerate(("crps_mm", "mae_mm")):
             axis = axes[row, column]
             for model, colour in (("v7", "tab:blue"), ("cpcv2", "tab:orange")):

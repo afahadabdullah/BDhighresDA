@@ -33,7 +33,9 @@ def test_diagnostics_aligns_reordered_stations_and_crops_cpc_grid(tmp_path):
         assim_idx=np.array([0, 1]), observed_mm=observed,
         station_lat=np.array([0.2, 0.3, 0.4, 0.5]),
         station_lon=np.array([0.2, 0.3, 0.4, 0.5]),
+        arm_names=np.array(["da_meso", "da_sim", "da_sim_r27_g010_l2"]),
         station_da_meso=members, station_da_sim=members + 1.0,
+        station_da_sim_r27_g010_l2=members + 1.5,
     )
     grid = np.arange(2 * 6 * 6, dtype=np.float32).reshape(2, 6, 6) + 1.0
     np.savez_compressed(
@@ -58,6 +60,7 @@ def test_diagnostics_aligns_reordered_stations_and_crops_cpc_grid(tmp_path):
     v7, cpc = diagnostics.map_data(map_path, cpc_path, got_times)
     assert got_times.astype(str).tolist() == ["2022-05-02", "2022-05-03"]
     assert scores["gauges_only"]["v7"]["n"] == [2, 2]
+    assert scores["simultaneous_r27_g010_l2"]["v7"]["n"] == [2, 2]
     assert cpc["fields"]["simultaneous"].shape == (2, 4, 4)
     out_dir = tmp_path / "diagnostics"
     out_dir.mkdir()

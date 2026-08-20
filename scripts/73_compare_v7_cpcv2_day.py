@@ -39,11 +39,17 @@ COMPARISONS = {
 def _available_comparisons(v7: np.lib.npyio.NpzFile) -> dict[str, tuple[str, str]]:
     """Base winners plus any optional V7 simultaneous R-calibration arms."""
     comparisons = dict(COMPARISONS)
-    prefix = "station_da_sim_r"
-    arms = sorted(
-        (key[len("station_"):] for key in v7.files if key.startswith(prefix)),
-        key=lambda arm: float(arm.removeprefix("da_sim_r")),
-    )
+    if "arm_names" in v7:
+        ordered = np.asarray(v7["arm_names"], dtype=str).tolist()
+        arms = [
+            arm for arm in ordered
+            if arm.startswith("da_sim_r") and f"station_{arm}" in v7
+        ]
+    else:
+        arms = sorted(
+            key[len("station_"):] for key in v7.files
+            if key.startswith("station_da_sim_r")
+        )
     for arm in arms:
         suffix = arm.removeprefix("da_sim_")
         comparisons[f"simultaneous_{suffix}"] = (arm, "v2_simul_s04_ig010")

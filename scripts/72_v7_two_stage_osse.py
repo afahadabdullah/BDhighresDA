@@ -46,6 +46,7 @@ import argparse
 import json
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -786,6 +787,12 @@ def parse_args() -> argparse.Namespace:
                         "independent datum; L^2 = 9 assumes one datum per "
                         "correlation patch; larger still treats the satellite as "
                         "broad-scale guidance only")
+    p.add_argument("--imerg-refine-r", type=float, default=None,
+                   help="add CPCv2-derived simultaneous refinements at this R "
+                        "multiplier: stronger early guidance (gamma 0.0003), "
+                        "the CPCv2 ig010 schedule with Huber-3, and ig010 with "
+                        "its original L2 loss. The ordinary da_sim_rN arm remains "
+                        "the gamma-0.001/Huber-3 control")
     p.add_argument("--imerg-representativeness", type=float, default=0.10,
                    help="footprint-vs-block-mean mismatch in TRANSFORMED units, "
                         "matching configs/da.yaml; the retrieval error itself is "
@@ -838,6 +845,8 @@ def main() -> None:
     # weighting and nothing else.
     arm_sigma: dict[str, float] = {}
     arm_imerg_r: dict[str, float] = {}
+    arm_guidance_gamma: dict[str, float] = {}
+    arm_huber_delta: dict[str, float | None] = {}
     if args.imerg_r_sweep:
         if not (args.imerg or args.osse_satellite):
             raise SystemExit("--imerg-r-sweep needs --imerg or --osse-satellite")
@@ -854,6 +863,45 @@ def main() -> None:
                 f"IMERG + gauges simultaneously, satellite R x{value:g}"
             )
             arm_imerg_r[name] = value
+            if name not in arms:
+                arms.append(name)
+        for anchor in ("da_meso", "background"):
+            if anchor not in arms:
+                arms.insert(0, anchor)
+    if args.imerg_refine_r is not None:
+        if not (args.imerg or args.osse_satellite):
+            raise SystemExit("--imerg-refine-r needs --imerg or --osse-satellite")
+        if args.imerg_refine_r <= 0.0:
+            raise SystemExit("--imerg-refine-r must be positive")
+        r_value = float(args.imerg_refine_r)
+        r_token = f"{r_value:g}".replace(".", "p")
+        control = f"da_sim_r{r_token}"
+        if control not in ARMS:
+            ARMS[control] = ("both", False)
+            ARM_NOTES[control] = (
+                f"IMERG + gauges simultaneously, satellite R x{r_value:g}; "
+                "gamma 0.001 with Huber-3 refinement control"
+            )
+        arm_imerg_r[control] = r_value
+        if control not in arms:
+            arms.append(control)
+        refinements = (
+            ("g0003_h3", 3.0e-4, 3.0,
+             "stronger early-time guidance than the V7 gamma-0.001 control"),
+            ("g010_h3", 1.0e-2, 3.0,
+             "CPCv2 ig010 early-time softness combined with robust Huber-3"),
+            ("g010_l2", 1.0e-2, None,
+             "CPCv2 primary ig010 mechanism: gamma 0.01 with the original L2 cost"),
+        )
+        for suffix, gamma, huber, note in refinements:
+            name = f"da_sim_r{r_token}_{suffix}"
+            ARMS[name] = ("both", False)
+            ARM_NOTES[name] = (
+                f"IMERG + gauges simultaneously, satellite R x{r_value:g}; {note}"
+            )
+            arm_imerg_r[name] = r_value
+            arm_guidance_gamma[name] = gamma
+            arm_huber_delta[name] = huber
             if name not in arms:
                 arms.append(name)
         for anchor in ("da_meso", "background"):
@@ -905,6 +953,9 @@ def main() -> None:
     # prints only 27 and 81 in the sweep table and hides its control.
     if args.imerg_r_sweep and "da_sim" in arms:
         arm_imerg_r["da_sim"] = float(args.imerg_r_multiplier)
+    for arm in arms:
+        arm_guidance_gamma.setdefault(arm, float(args.guidance_gamma))
+        arm_huber_delta.setdefault(arm, args.huber_delta)
     print(
         f"observations: {args.observations.upper()}"
         + ("  (pseudo-gauges and pseudo-satellite read CHIRPS)"
@@ -1110,6 +1161,8 @@ def main() -> None:
         "window": window.describe(),
         "arm_sigma": arm_sigma,
         "arm_imerg_r": arm_imerg_r,
+        "arm_guidance_gamma": arm_guidance_gamma,
+        "arm_huber_delta": arm_huber_delta,
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
         "members": args.members,
         "n_steps": args.n_steps,
@@ -1247,12 +1300,20 @@ def main() -> None:
         for arm in arms:
             meso_obs, guide_fine = ARMS[arm]
             guide_meso = meso_obs != "none"
+            arm_gcfg = replace(
+                gcfg,
+                gamma=arm_guidance_gamma[arm],
+                huber_delta=arm_huber_delta[arm],
+            )
             generator = torch.Generator(device=device).manual_seed(
                 args.seed + 1000 * meso_index
             )
             print(f"  {date}  {arm:<12s} "
                   f"(0.1 deg: {meso_obs:<6s}  0.05 deg: "
-                  f"{'gauges' if guide_fine else 'none  '})...", flush=True)
+                  f"{'gauges' if guide_fine else 'none  '}; "
+                  f"gamma {arm_gcfg.gamma:g}; "
+                  f"loss {'L2' if arm_gcfg.huber_delta is None else f'Huber-{arm_gcfg.huber_delta:g}'})...",
+                  flush=True)
 
             # -- stage A ------------------------------------------------------
             meso_H = meso_y = meso_R = None
@@ -1408,7 +1469,7 @@ def main() -> None:
             raw = meso_assimilate(
                 meso_model, cond,
                 (args.members, 1, window.meso_size, window.meso_size),
-                device, H=meso_H, y=meso_y, R=meso_R, cfg=scfg, gcfg=gcfg,
+                device, H=meso_H, y=meso_y, R=meso_R, cfg=scfg, gcfg=arm_gcfg,
                 flow=flow, mask=mask,
                 to_precip=lambda x, b=base: meso_ds.residual.decode(x, b),
             )
@@ -1454,7 +1515,7 @@ def main() -> None:
                 args.n_steps,
                 generator,
                 observation=observation,
-                gcfg=gcfg,
+                gcfg=arm_gcfg,
                 flow=flow,
             )
 
@@ -1910,7 +1971,7 @@ def report(results: dict, arms: list[str]) -> None:
         if not members:
             return
         print(f"\n{title} (withheld scores):")
-        print(f"  {'value':>8} {'CRPS':>8} {'MAE':>8} {'RMSE':>8} {'bias':>8} "
+        print(f"  {'arm':<26} {'value':>8} {'CRPS':>8} {'MAE':>8} {'RMSE':>8} {'bias':>8} "
               f"{'sp/rm':>7}")
         floor = min(results["arms"][a]["mean"]["crps_mm"] for a in members)
         for arm in sorted(members, key=lambda a: axis[a]):
@@ -1918,7 +1979,7 @@ def report(results: dict, arms: list[str]) -> None:
             mark = "   <- best CRPS" if m["crps_mm"] == floor else ""
             if reference is not None and abs(axis[arm] - reference) < 1e-9:
                 mark += "   (current default)"
-            print(f"  {axis[arm]:8.3g} {m['crps_mm']:8.3f} {m['mae_mm']:8.3f} "
+            print(f"  {arm:<26} {axis[arm]:8.3g} {m['crps_mm']:8.3f} {m['mae_mm']:8.3f} "
                   f"{m['rmse_mm']:8.3f} {m['bias_mm']:+8.3f} "
                   f"{m['spread_skill']:7.2f}{mark}")
         for label, key in (("CRPS", "crps_mm"), ("RMSE", "rmse_mm"),
@@ -1930,7 +1991,7 @@ def report(results: dict, arms: list[str]) -> None:
                            key=lambda a: abs(results["arms"][a]["mean"][key] - 1.0))
             else:
                 pick = min(members, key=lambda a: results["arms"][a]["mean"][key])
-            print(f"    best by {label:<12} {axis[pick]:g} {unit}")
+            print(f"    best by {label:<12} {pick} ({axis[pick]:g} {unit})")
         values = [axis[a] for a in members]
         best = min(members, key=lambda a: results["arms"][a]["mean"]["crps_mm"])
         if axis[best] in (min(values), max(values)):
