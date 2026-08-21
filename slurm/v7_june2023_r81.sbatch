@@ -135,4 +135,6 @@ else
 fi
 
 echo "complete: $DESTINATION"
-[[ "$MODE" == "production" ]] && echo "physical ensemble: $FIELD_STORE"
+if [[ "$MODE" == "production" ]]; then
+    echo "physical ensemble: $FIELD_STORE"
+fi
