@@ -1413,6 +1413,8 @@ def main() -> None:
         for arm in (
             "da_sim_s04_corr_g001_h3", "da_sim_s04_corr_g010_l2"
         ):
+            if arm not in arms:
+                continue
             arm_imerg_r[arm] = correlation_inflation
             ARM_NOTES[arm] += f" (R x{correlation_inflation:.3f})"
 

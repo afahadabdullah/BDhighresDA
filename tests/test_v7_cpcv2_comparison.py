@@ -191,6 +191,14 @@ def test_three_arm_launcher_uses_original_frozen_pair_and_exact_arm_set():
     assert "--imerg-r-set-only 81,27" in batch
     assert "--imerg-s04-select da_sim_s04_corr_g001_h3" in batch
     assert "--imerg-s04 \"$S04_IMERG\"" in batch
+    runner = (ROOT / "scripts" / "72_v7_two_stage_osse.py").read_text()
+    assert (
+        '"da_sim_s04_corr_g001_h3", "da_sim_s04_corr_g010_l2"\n'
+        "        ):\n"
+        "            if arm not in arms:\n"
+        "                continue\n"
+        "            arm_imerg_r[arm] = correlation_inflation"
+    ) in runner
 
 
 def test_cpcv2_comparison_group_contains_only_the_two_selected_winners():
