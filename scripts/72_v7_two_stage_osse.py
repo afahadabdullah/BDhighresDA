@@ -828,6 +828,14 @@ def parse_args() -> argparse.Namespace:
                    help="the same BMD-windowed IMERG coarsened to factor 8 (0.4 "
                         "degrees). Adds controlled S04 simultaneous arms with a "
                         "4x4 physical footprint operator")
+    p.add_argument(
+        "--imerg-s04-select",
+        default=None,
+        help=(
+            "comma-separated S04 arm names to add instead of all three S04 "
+            "diagnostics; requires --imerg-s04"
+        ),
+    )
     p.add_argument("--imerg-sigma-floor-mm", type=float, default=1.0,
                    help="floor on IMERG randomError, so a zero error is not infinite weight")
     p.add_argument("--imerg-error-corr-cells", type=float, default=3.0,
@@ -856,6 +864,15 @@ def parse_args() -> argparse.Namespace:
                         "multiplier, without automatically adding background or "
                         "gauges-only anchors; intended for fixed-config checkpoint "
                         "comparisons after the R sweep is already complete")
+    p.add_argument(
+        "--imerg-r-set-only",
+        default=None,
+        help=(
+            "comma-separated native IMERG R multipliers to run as the complete "
+            "arm set, without background/gauge anchors; unlike --imerg-r-sweep "
+            "this is for frozen multi-arm production archives"
+        ),
+    )
     p.add_argument("--imerg-refine-r", type=float, default=None,
                    help="add CPCv2-derived simultaneous refinements at this R "
                         "multiplier: ig010 (gamma 0.01) with its original L2 loss. "
@@ -894,6 +911,8 @@ def main() -> None:
         raise SystemExit("--imerg and --osse-satellite are alternatives, not both")
     if args.imerg_s04 and not args.imerg:
         raise SystemExit("--imerg-s04 is a scale comparison and also needs native --imerg")
+    if args.imerg_s04_select and not args.imerg_s04:
+        raise SystemExit("--imerg-s04-select requires --imerg-s04")
     if args.observations == "real":
         if args.osse_satellite:
             raise SystemExit(
@@ -942,6 +961,34 @@ def main() -> None:
     arm_imerg_stream: dict[str, str] = {}
     arm_guidance_gamma: dict[str, float] = {}
     arm_huber_delta: dict[str, float | None] = {}
+    if args.imerg_r_set_only:
+        if args.imerg_r_only is not None or args.imerg_r_sweep:
+            raise SystemExit(
+                "--imerg-r-set-only is exclusive with --imerg-r-only and "
+                "--imerg-r-sweep"
+            )
+        if not args.imerg:
+            raise SystemExit("--imerg-r-set-only requires real --imerg")
+        arms = []
+        for token in args.imerg_r_set_only.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            value = float(token)
+            if value <= 0.0:
+                raise SystemExit(f"production R multiplier {value} must be positive")
+            canonical = f"{value:g}".replace(".", "p")
+            name = f"da_sim_r{canonical}"
+            if name in arms:
+                raise SystemExit(f"duplicate production arm {name}")
+            ARMS[name] = ("both", False)
+            ARM_NOTES[name] = (
+                f"IMERG + gauges simultaneously, satellite R x{value:g}"
+            )
+            arm_imerg_r[name] = value
+            arms.append(name)
+        if not arms:
+            raise SystemExit("--imerg-r-set-only contains no R multipliers")
     if args.imerg_r_only is not None:
         if args.imerg_r_sweep:
             raise SystemExit("--imerg-r-only and --imerg-r-sweep are alternatives")
@@ -1025,7 +1072,22 @@ def main() -> None:
             ("da_sim_s04_corr_g010_l2", None, 1.0e-2, None,
              "S04 correlation-adjusted CPCv2 ig010 configuration"),
         )
+        selected_s04 = None
+        if args.imerg_s04_select:
+            selected_s04 = {
+                value.strip() for value in args.imerg_s04_select.split(",")
+                if value.strip()
+            }
+            available_s04 = {spec[0] for spec in s04_arms}
+            unknown_s04 = sorted(selected_s04 - available_s04)
+            if unknown_s04:
+                raise SystemExit(
+                    f"unknown selected S04 arms {unknown_s04}; choose from "
+                    f"{sorted(available_s04)}"
+                )
         for name, multiplier, gamma, huber, note in s04_arms:
+            if selected_s04 is not None and name not in selected_s04:
+                continue
             ARMS[name] = ("both", False)
             ARM_NOTES[name] = f"IMERG 0.4-degree S04 + gauges; {note}"
             if multiplier is not None:
@@ -1966,6 +2028,7 @@ def main() -> None:
             method_specs={
                 arm: {
                     "note": ARM_NOTES[arm],
+                    "imerg_stream": arm_imerg_stream[arm],
                     "imerg_r_multiplier": arm_imerg_r.get(
                         arm, args.imerg_r_multiplier
                     ),

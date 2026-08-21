@@ -182,6 +182,17 @@ def test_june_launcher_locks_latest_latest_r81_and_production_contract():
     assert "OBS_END=\"2023-06-30\"" in batch
 
 
+def test_three_arm_launcher_uses_original_frozen_pair_and_exact_arm_set():
+    launcher = (ROOT / "slurm" / "submit_v7_june2023_three_arm_frozen.sh").read_text()
+    batch = (ROOT / "slurm" / "v7_june2023_r81.sbatch").read_text()
+    assert "data/processed/v7_osse/20260820_1356/checkpoints/meso_frozen.pt" in launcher
+    assert "data/processed/v7_osse/20260820_1356/checkpoints/allocation_frozen.pt" in launcher
+    assert 'V7_JUNE_ARM_SET="three_arm"' in launcher
+    assert "--imerg-r-set-only 81,27" in batch
+    assert "--imerg-s04-select da_sim_s04_corr_g001_h3" in batch
+    assert "--imerg-s04 \"$S04_IMERG\"" in batch
+
+
 def test_cpcv2_comparison_group_contains_only_the_two_selected_winners():
     source = (ROOT / "scripts" / "28_simultaneous_method_sweep.py").read_text()
     assert '"v2_comparison": V2_COMPARISON' in source

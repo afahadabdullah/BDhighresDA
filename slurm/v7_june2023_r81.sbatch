@@ -42,6 +42,7 @@ OBS_END="2023-06-30"
 MEMBERS="${V7_JUNE_MEMBERS:-30}"
 STEPS="${V7_JUNE_STEPS:-50}"
 SEED="${V7_JUNE_SEED:-201805}"
+ARM_SET="${V7_JUNE_ARM_SET:-r81}"
 
 # These are the immutable files captured by the May-3 tournament, not the live
 # best.pt symlinks/checkpoints that training may replace later.
@@ -53,6 +54,7 @@ MESO_STATS="${V7_MESO_STATS:-data/processed/stats_v7_meso.json}"
 SUBGRID="${V7_PREP_OUT:-data/processed/v7/wide_v7.zarr}"
 DAILY="$ROOT/inputs/bmd_daily_202306.csv"
 IMERG="$ROOT/inputs/imerg_native_20230601_20230630.nc"
+S04_IMERG="$ROOT/inputs/imerg_s04_20230601_20230630.nc"
 STATION_POOL="$ROOT/comparison_contract/cpcv2_2023_station_ids.txt"
 
 for required in "$MESO_CKPT" "$ALLOC_CKPT" "$MESO_ARCHIVE" "$MESO_STATS" \
@@ -60,6 +62,26 @@ for required in "$MESO_CKPT" "$ALLOC_CKPT" "$MESO_ARCHIVE" "$MESO_STATS" \
                 scripts/51_check_sqrt_da_gradient.py scripts/72_v7_two_stage_osse.py; do
     [[ -f "$required" || -d "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
+case "$ARM_SET" in
+    r81)
+        ARM_ARGS=(--arms background --imerg-r-only 81)
+        ARM_DESCRIPTION="da_sim_r81"
+        ;;
+    three_arm)
+        [[ -s "$S04_IMERG" ]] || { echo "ERROR: missing $S04_IMERG" >&2; exit 1; }
+        ARM_ARGS=(
+            --arms background
+            --imerg-r-set-only 81,27
+            --imerg-s04 "$S04_IMERG"
+            --imerg-s04-select da_sim_s04_corr_g001_h3
+        )
+        ARM_DESCRIPTION="da_sim_r81, da_sim_r27, da_sim_s04_corr_g001_h3"
+        ;;
+    *)
+        echo "ERROR: unknown V7_JUNE_ARM_SET=$ARM_SET" >&2
+        exit 1
+        ;;
+esac
 
 "$PYTHON_BIN" -u scripts/51_check_sqrt_da_gradient.py
 
@@ -100,14 +122,14 @@ else
 fi
 
 mkdir -p "$DESTINATION"
-echo "V7 June 2023 R81 task $TASK_ID/5"
+echo "V7 June 2023 task $TASK_ID/5"
 echo "  mode: $MODE; fold: $FOLD"
 echo "  model/CHIRPS dates: $MODEL_START through $MODEL_END"
 echo "  BMD/IMERG/archive dates: $OBS_START through $OBS_END"
 echo "  members: $MEMBERS; steps: $STEPS; seed: $SEED"
 echo "  meso checkpoint: $MESO_CKPT"
 echo "  allocation checkpoint: $ALLOC_CKPT"
-echo "  only arm: da_sim_r81"
+echo "  arms: $ARM_DESCRIPTION"
 
 COMMON_ARGS=(
     --meso-checkpoint "$MESO_CKPT"
@@ -121,7 +143,7 @@ COMMON_ARGS=(
     --start "$MODEL_START" --end "$MODEL_END"
     --members "$MEMBERS" --n-steps "$STEPS" --seed "$SEED"
     --observations real --min-coverage 0.8
-    --arms background --imerg-r-only 81
+    "${ARM_ARGS[@]}"
     --station-dump "$STATION_DUMP"
     --out "$DESTINATION" --no-plots
 )

@@ -186,7 +186,7 @@ def compare_folds(v7_paths: list[Path], cpc_paths: list[Path],
 
 def markdown(report: dict) -> str:
     lines = [
-        "# June 2023 V7 R81 versus CPCv2",
+        "# June 2023 V7 simultaneous arms versus CPCv2",
         "",
         report["scope"]["audit"] + ".",
         "",

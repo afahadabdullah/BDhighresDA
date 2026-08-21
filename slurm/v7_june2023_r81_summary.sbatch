@@ -23,6 +23,7 @@ export PYTHONPATH="$PWD/src"
 
 ROOT="${V7_JUNE_ROOT:-data/processed/v7_june2023_r81_latest_latest}"
 CPC_ROOT="${V7_JUNE_CPC_ROOT:-data/processed/v2_confirmatory_2021_2024}"
+COMPARISON_LABEL="${V7_JUNE_COMPARISON_LABEL:-june2023_v7_r81_vs_cpcv2}"
 V7_DUMPS=()
 CPC_DUMPS=()
 for fold in 0 1 2 3 4; do
@@ -43,7 +44,7 @@ done
     --cpcv2-dumps "${CPC_DUMPS[@]}" \
     --bootstrap-resamples "${V7_JUNE_BOOTSTRAPS:-10000}" \
     --seed "${V7_JUNE_SEED:-201805}" \
-    --out-json "$ROOT/comparison/june2023_v7_r81_vs_cpcv2.json" \
-    --out-markdown "$ROOT/comparison/june2023_v7_r81_vs_cpcv2.md"
+    --out-json "$ROOT/comparison/${COMPARISON_LABEL}.json" \
+    --out-markdown "$ROOT/comparison/${COMPARISON_LABEL}.md"
 
-echo "comparison complete: $ROOT/comparison/june2023_v7_r81_vs_cpcv2.md"
+echo "comparison complete: $ROOT/comparison/${COMPARISON_LABEL}.md"
