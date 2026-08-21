@@ -94,7 +94,10 @@ def load_run(root: Path, label: str) -> dict:
         observed = np.asarray(archive["observed_mm"], float)
         if ensemble.shape[0] != 1 or observed.shape[0] != 1:
             raise ValueError(f"{label} is not a one-day experiment")
-        station_crps = fair_crps_per_station(ensemble[0, :, held], observed[0, held])
+        # Slice the day first.  ``ensemble[0, :, held]`` invokes NumPy advanced
+        # indexing and moves the station axis in front, producing
+        # (station, member) rather than the required (member, station).
+        station_crps = fair_crps_per_station(ensemble[0][:, held], observed[0, held])
         arrays = {
             name: np.asarray(archive[name])
             for name in ("times", "model_times", "station_ids", "eval_idx", "assim_idx")

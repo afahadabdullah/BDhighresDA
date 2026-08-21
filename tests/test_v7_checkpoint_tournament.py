@@ -27,6 +27,13 @@ def test_fair_station_crps_rewards_perfect_ensemble():
     assert np.all(module.fair_crps_per_station(displaced, truth) > 0.0)
 
 
+def test_station_subset_preserves_member_first_axis():
+    members = np.arange(1 * 16 * 38).reshape(1, 16, 38)
+    held = np.arange(27, 38)
+    selected = members[0][:, held]
+    assert selected.shape == (16, 11)
+
+
 def test_paired_bootstrap_uses_candidate_minus_reference_sign():
     module = _module()
     result = module.paired_bootstrap(
