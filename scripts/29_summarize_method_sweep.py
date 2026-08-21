@@ -118,6 +118,80 @@ def circular_block_bootstrap(
     return observed_mean, float(low), float(high)
 
 
+def safe_correlation(first: np.ndarray, second: np.ndarray) -> float:
+    """Correlation over finite paired values, or NaN for a degenerate sample."""
+    first = np.asarray(first, dtype=float)
+    second = np.asarray(second, dtype=float)
+    keep = np.isfinite(first) & np.isfinite(second)
+    if keep.sum() < 2 or first[keep].std() == 0 or second[keep].std() == 0:
+        return float("nan")
+    return float(np.corrcoef(first[keep], second[keep])[0, 1])
+
+
+def station_daily_sd_metrics(predicted: np.ndarray, observed: np.ndarray) -> dict:
+    """Compare within-window daily SD at the exact same gauge locations.
+
+    Each station uses only days on which both series are finite.  The amplitude
+    ratio follows the BRISHTI-05 evaluator: sqrt(mean(model SD^2) /
+    mean(observed SD^2)).  Ten days is a screening diagnostic, not a stable
+    climatological estimate, so the report keeps it beside (not above) CRPS.
+    """
+    predicted = np.asarray(predicted, dtype=float)
+    observed = np.asarray(observed, dtype=float)
+    predicted_sd, observed_sd = [], []
+    for station in range(observed.shape[1]):
+        keep = np.isfinite(predicted[:, station]) & np.isfinite(observed[:, station])
+        if keep.sum() < 2:
+            continue
+        predicted_sd.append(float(np.std(predicted[keep, station])))
+        observed_sd.append(float(np.std(observed[keep, station])))
+    predicted_sd = np.asarray(predicted_sd)
+    observed_sd = np.asarray(observed_sd)
+    if not len(observed_sd):
+        return {
+            "n_stations": 0, "correlation": float("nan"),
+            "bias_mm": float("nan"), "rmse_mm": float("nan"),
+            "amplitude_ratio": float("nan"),
+        }
+    difference = predicted_sd - observed_sd
+    denominator = float(np.mean(observed_sd**2))
+    return {
+        "n_stations": int(len(observed_sd)),
+        "correlation": safe_correlation(predicted_sd, observed_sd),
+        "bias_mm": float(np.mean(difference)),
+        "rmse_mm": float(np.sqrt(np.mean(difference**2))),
+        "amplitude_ratio": (
+            float(np.sqrt(np.mean(predicted_sd**2) / denominator))
+            if denominator > 0 else float("nan")
+        ),
+    }
+
+
+def spatial_pattern_metrics(
+    analysis: np.ndarray, reference: np.ndarray, valid: np.ndarray
+) -> dict:
+    """Daily and period-mean spatial correlation on the matched model grid."""
+    daily = [safe_correlation(a[valid], b[valid]) for a, b in zip(analysis, reference)]
+    return {
+        "daily_correlation": float(np.nanmean(daily)),
+        "period_mean_correlation": safe_correlation(
+            np.nanmean(analysis, axis=0)[valid],
+            np.nanmean(reference, axis=0)[valid],
+        ),
+    }
+
+
+def expand_imerg_to_model_grid(imerg: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Nearest-footprint expansion used only for scale-matched descriptive maps."""
+    imerg = np.asarray(imerg, dtype=float)
+    if shape[0] % imerg.shape[1] or shape[1] % imerg.shape[2]:
+        raise ValueError(f"IMERG shape {imerg.shape[1:]} does not tile model grid {shape}")
+    return np.repeat(
+        np.repeat(imerg, shape[0] // imerg.shape[1], axis=1),
+        shape[1] // imerg.shape[2], axis=2,
+    )
+
+
 def main() -> None:
     args = parse_args()
     dump = np.load(args.dump, allow_pickle=False)
@@ -126,7 +200,18 @@ def main() -> None:
     variants = [str(name) for name in dump["variant_names"]]
     eval_idx = dump["eval_idx"]
     observed = dump["gauge_mm"][:, eval_idx]
+    assim_idx = dump["assim_idx"]
+    assimilated_observed = dump["gauge_mm"][:, assim_idx]
     n_days = observed.shape[0]
+    valid = np.asarray(dump["valid"], dtype=bool)
+    references = {
+        "cpc": np.asarray(dump["condition"], dtype=float),
+        "chirps": np.asarray(dump["chirps"], dtype=float),
+    }
+    if "raw_imerg_mm" in dump:
+        references["imerg_s04"] = expand_imerg_to_model_grid(
+            dump["raw_imerg_mm"], valid.shape
+        )
 
     if args.baseline not in variants:
         raise ValueError(f"baseline {args.baseline!r} not in {variants}")
@@ -140,6 +225,19 @@ def main() -> None:
     rows = []
     for name in variants:
         entry = report["variants"][name]
+        station_members = np.asarray(dump[f"station_{name}"], dtype=float)
+        station_mean = np.nanmean(station_members, axis=1)
+        withheld_daily_sd = station_daily_sd_metrics(
+            station_mean[:, eval_idx], observed
+        )
+        assimilated_daily_sd = station_daily_sd_metrics(
+            station_mean[:, assim_idx], assimilated_observed
+        )
+        field = np.asarray(dump[f"meanfield_{name}"], dtype=float)
+        spatial = {
+            reference_name: spatial_pattern_metrics(field, reference, valid)
+            for reference_name, reference in references.items()
+        }
         difference = baseline - per_sample[name]      # positive = variant is better
         mean, low, high = circular_block_bootstrap(
             difference, args.block_days, args.n_resamples, args.seed
@@ -162,6 +260,10 @@ def main() -> None:
                 "spread_skill": entry.get("spread_skill", float("nan")),
                 "wet_day_fraction": entry.get("wet_day_fraction", float("nan")),
                 "locality_ratio": locality.get("locality_ratio"),
+                "withheld_daily_sd": withheld_daily_sd,
+                "assimilated_daily_sd": assimilated_daily_sd,
+                "assimilated_fit": entry.get("assimilated_fit", {}),
+                "spatial_patterns": spatial,
                 "note": entry.get("spec", {}).get("note", ""),
             }
         )
@@ -169,7 +271,7 @@ def main() -> None:
     ordered = sorted(rows, key=lambda row: row["crps_mm"])
 
     lines = [
-        f"# Simultaneous-DA method sweep — {scope['start']} to {scope['end']}",
+        f"# CPC-v2 DA method sweep — {scope['start']} to {scope['end']}",
         "",
         f"- Days: **{scope['n_days']}**, members: **{scope['members']}**, "
         f"withheld station-days: **{scope['withheld_station_days']}**",
@@ -192,8 +294,8 @@ def main() -> None:
         ]
 
     lines += [
-        "| Variant | CRPS | ΔCRPS vs baseline (95% CI) | Bias (mean) | Bias (median) "
-        "| Jensen gap | MAE | Corr | Cov90 | Wet frac | Locality |",
+        "| Variant | CRPS | ΔCRPS vs baseline (95% CI) | MAE | Bias | RMSE | "
+        "Gauge r | Spread/RMSE | Cov90 | station-SD r | station-SD amp |",
         "|:--|--:|:--|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for row in ordered:
@@ -204,11 +306,59 @@ def main() -> None:
             f"| `{row['variant']}` | {row['crps_mm']:.3f} | "
             f"{row['delta_crps_vs_baseline_mm']:+.3f} "
             f"[{low:+.3f}, {high:+.3f}] {verdict} | "
-            f"{row['mean_bias_mm']:+.2f} | {row['median_bias_mm']:+.2f} | "
-            f"{row['jensen_gap_mm']:+.2f} | {row['mean_mae_mm']:.2f} | "
-            f"{row['mean_correlation']:.3f} | {row['coverage_90']:.2f} | "
-            f"{row['wet_day_fraction']:.2f} | "
+            f"{row['mean_mae_mm']:.2f} | {row['mean_bias_mm']:+.2f} | "
+            f"{report['variants'][row['variant']]['mean_rmse_mm']:.2f} | "
+            f"{row['mean_correlation']:.3f} | {row['spread_skill']:.2f} | "
+            f"{row['coverage_90']:.2f} | "
+            f"{row['withheld_daily_sd']['correlation']:.3f} | "
+            f"{row['withheld_daily_sd']['amplitude_ratio']:.2f} |"
+        )
+
+    lines += [
+        "",
+        "### Descriptive whole-field agreement",
+        "",
+        "These products are not independent truth. Correlations describe how each "
+        "arm changes the generated field relative to the CPC conditioning, CHIRPS "
+        "training target family, and assimilated S04 IMERG.",
+        "",
+        "| Variant | CPC daily/mean r | CHIRPS daily/mean r | IMERG-S04 daily/mean r "
+        "| Wet fraction | Locality |",
+        "|:--|--:|--:|--:|--:|--:|",
+    ]
+    for row in ordered:
+        spatial = row["spatial_patterns"]
+        def pair(label):
+            values = spatial.get(label, {})
+            return f"{values.get('daily_correlation', float('nan')):.3f}/" \
+                   f"{values.get('period_mean_correlation', float('nan')):.3f}"
+        locality = row["locality_ratio"]
+        lines.append(
+            f"| `{row['variant']}` | {pair('cpc')} | {pair('chirps')} | "
+            f"{pair('imerg_s04')} | {row['wet_day_fraction']:.3f} | "
             f"{'—' if locality is None else f'{locality:.2f}'} |"
+        )
+
+    lines += [
+        "",
+        "### Assimilated-station fit (diagnostic only)",
+        "",
+        "| Variant | CRPS | MAE | Bias | RMSE | Gauge r | Spread/RMSE | Cov90 "
+        "| station-SD r | station-SD amp |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for row in ordered:
+        fit = row["assimilated_fit"]
+        sd = row["assimilated_daily_sd"]
+        lines.append(
+            f"| `{row['variant']}` | {fit.get('crps_mm', float('nan')):.3f} | "
+            f"{fit.get('mean_mae_mm', float('nan')):.3f} | "
+            f"{fit.get('mean_bias_mm', float('nan')):+.3f} | "
+            f"{fit.get('mean_rmse_mm', float('nan')):.3f} | "
+            f"{fit.get('mean_correlation', float('nan')):.3f} | "
+            f"{fit.get('spread_skill', float('nan')):.2f} | "
+            f"{fit.get('coverage_90', float('nan')):.2f} | "
+            f"{sd['correlation']:.3f} | {sd['amplitude_ratio']:.2f} |"
         )
 
     lines += [
@@ -245,7 +395,7 @@ def main() -> None:
         "",
         ("- " + "\n- ".join(f"`{name}`" for name in promoted)) if promoted else "- (none)",
         "",
-        "Promote at most two. Everything else is a five-day coincidence until a "
+        "Promote at most two. Everything else is a short-window coincidence until a "
         "longer window says otherwise.",
         "",
     ]
@@ -357,19 +507,17 @@ def main() -> None:
     axes[1, 1].set_title("E. Calibration — dashed lines are nominal")
     axes[1, 1].grid(alpha=0.2)
 
-    axes[1, 2].barh(
-        positions,
-        [row["wet_day_fraction"] for row in ordered],
-        color=palette,
-    )
+    axes[1, 2].barh(positions, [row["withheld_daily_sd"]["amplitude_ratio"]
+                                for row in ordered], color=palette)
+    axes[1, 2].axvline(1.0, color="black", ls="--", lw=1)
     axes[1, 2].set_yticks(positions)
     axes[1, 2].set_yticklabels(names, fontsize=8)
     axes[1, 2].invert_yaxis()
-    axes[1, 2].set_xlabel("Fraction of land cells with ensemble-mean ≥ 1 mm")
-    axes[1, 2].set_title("F. Wet-day frequency — the prior's drizzle problem")
+    axes[1, 2].set_xlabel("Withheld-station daily-SD amplitude ratio")
+    axes[1, 2].set_title("F. Daily variability amplitude — dashed is one")
 
     figure.suptitle(
-        f"Simultaneous-DA method sweep — {scope['start']} to {scope['end']}, "
+        f"CPC-v2 DA method sweep — {scope['start']} to {scope['end']}, "
         f"{scope['n_days']} days, {scope['withheld_station_days']} withheld station-days "
         "(screening run, not a skill evaluation)",
         fontsize=13,

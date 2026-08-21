@@ -457,6 +457,73 @@ V2_COMPARISON = [
             note="primary frozen simultaneous S04 winner for the V7/CPCv2 comparison"),
 ]
 
+# Gauge-authority screening on the original CPC-v2 production contract.  The
+# six requested weights plus one near-hard stress weight change only the gauge
+# likelihood strength:
+# the checkpoint, prior seed, observation perturbations, S04 IMERG operator,
+# per-stream gamma, sampler and withheld stations remain matched.  Weight 100
+# is deliberately labelled a stress test rather than "perfect": an exactly
+# zero R is singular, and a point gauge is not an exact area-average observation
+# of a 0.05-degree model cell.  At weight 100 the likelihood standard deviation
+# is one tenth of production, which is already sufficiently close to a hard
+# constraint to expose collapse and bullseye failure modes.
+V2_GAUGE_AUTHORITY_WEIGHTS = (
+    ("0p75", 0.75),
+    ("1", 1.0),
+    ("1p25", 1.25),
+    ("1p5", 1.5),
+    ("2", 2.0),
+    ("4", 4.0),
+    ("100_stress", 100.0),
+)
+
+V2_GAUGE_AUTHORITY = [
+    *[
+        Variant(
+            f"v2_gauge_gw{label}",
+            streams="gauges",
+            prior_temperature=1.0,
+            guidance_spread_cells=6.0,
+            guidance_gamma=1.0e-2,
+            gauge_weight=weight,
+            note=(
+                "near-hard gauge-likelihood stress test; not a perfect point-to-cell "
+                "observation"
+                if weight == 100.0
+                else f"CPC-v2 gauges-only production method; gauge weight {weight:g}"
+            ),
+        )
+        for label, weight in V2_GAUGE_AUTHORITY_WEIGHTS
+    ],
+    Variant(
+        "v2_imerg_s04_ig010",
+        streams="imerg",
+        prior_temperature=1.0,
+        imerg_stride=1,
+        guidance_gamma=1.0e-2,
+        note="gauge-free S04 IMERG control matched to the production ig010 stream",
+    ),
+    *[
+        Variant(
+            f"v2_simul_s04_ig010_gw{label}",
+            streams="both",
+            prior_temperature=1.0,
+            imerg_stride=1,
+            gauge_weight=weight,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2,
+            imerg_guidance_gamma=1.0e-2,
+            note=(
+                "near-hard gauge-likelihood stress test with production S04 IMERG; "
+                "not a perfect point-to-cell observation"
+                if weight == 100.0
+                else f"production S04/ig010 simultaneous method; gauge weight {weight:g}"
+            ),
+        )
+        for label, weight in V2_GAUGE_AUTHORITY_WEIGHTS
+    ],
+]
+
 
 def _unique_variants(variants: list[Variant]) -> list[Variant]:
     """De-duplicate catalogue unions by name while preserving first occurrence."""
@@ -483,11 +550,12 @@ GROUPS = {
     "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
     "v2_confirmatory": V2_CONFIRMATORY,
     "v2_comparison": V2_COMPARISON,
+    "v2_gauge_authority": V2_GAUGE_AUTHORITY,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
-        + V2_CONFIRMATORY + V2_COMPARISON
+        + V2_CONFIRMATORY + V2_COMPARISON + V2_GAUGE_AUTHORITY
     ),
 }
 

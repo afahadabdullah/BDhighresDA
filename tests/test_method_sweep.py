@@ -420,6 +420,49 @@ def test_v2_ingestion_triplet_has_exact_selected_streams():
     assert simultaneous.guidance_spread_cells is None
 
 
+@needs_sweep
+def test_v2_gauge_authority_is_a_matched_weight_sweep():
+    variants = sweep.GROUPS["v2_gauge_authority"]
+    gauge = [variant for variant in variants if variant.streams == "gauges"]
+    imerg = [variant for variant in variants if variant.streams == "imerg"]
+    simultaneous = [variant for variant in variants if variant.streams == "both"]
+    expected = [0.75, 1.0, 1.25, 1.5, 2.0, 4.0, 100.0]
+    assert [variant.gauge_weight for variant in gauge] == expected
+    assert [variant.gauge_weight for variant in simultaneous] == expected
+    assert len(imerg) == 1 and imerg[0].name == "v2_imerg_s04_ig010"
+    for variant in gauge:
+        assert variant.prior_temperature == 1.0
+        assert variant.guidance_spread_cells == 6.0
+        assert variant.guidance_gamma == 1.0e-2
+    for variant in simultaneous:
+        assert variant.prior_temperature == 1.0
+        assert variant.imerg_stride == 1
+        assert variant.gauge_component_spread_cells == 6.0
+        assert variant.gauge_guidance_gamma == 1.0e-2
+        assert variant.imerg_guidance_gamma == 1.0e-2
+
+
+def test_station_daily_sd_metrics_detect_amplitude_damping():
+    observed = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 4.0, 8.0],
+        [4.0, 8.0, 16.0],
+        [6.0, 12.0, 24.0],
+    ])
+    metrics = summary.station_daily_sd_metrics(0.5 * observed, observed)
+    assert metrics["n_stations"] == 3
+    assert metrics["correlation"] == pytest.approx(1.0)
+    assert metrics["amplitude_ratio"] == pytest.approx(0.5)
+    assert metrics["bias_mm"] < 0
+
+
+def test_expand_imerg_to_model_grid_preserves_footprints():
+    coarse = np.arange(2 * 3 * 4).reshape(2, 3, 4)
+    expanded = summary.expand_imerg_to_model_grid(coarse, (6, 8))
+    assert expanded.shape == (2, 6, 8)
+    assert np.all(expanded[:, :2, :2] == coarse[:, 0, 0][:, None, None])
+
+
 def test_ingestion_footprints_expand_exactly_to_model_grid():
     coarse = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     expanded = v2_ingestion_summary.upsample_footprints(coarse, (6, 8))
