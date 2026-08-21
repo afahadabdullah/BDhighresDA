@@ -519,7 +519,7 @@ def load_station_bundle(dataset, method_index: int, dates: np.ndarray, members: 
     }
 
 
-def gauge_evaluation(bundle: dict, shared) -> tuple[list[dict], list[dict], list[dict]]:
+def gauge_evaluation(bundle: dict, shared) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     observed = bundle["observed"]
     members = bundle["members"]
     ensemble_mean = members.mean(axis=1)
@@ -553,19 +553,34 @@ def gauge_evaluation(bundle: dict, shared) -> tuple[list[dict], list[dict], list
         station_rows.append(row)
 
     variability_rows = []
+    same_station_rows = []
+    observed_mean = np.nanmean(observed, axis=0)
     observed_sd = np.nanstd(observed, axis=0)
     for source, predicted in predictions.items():
+        predicted_mean = np.nanmean(predicted, axis=0)
         predicted_sd = np.nanstd(predicted, axis=0)
+        mean_metrics = deterministic_metrics(predicted_mean, observed_mean)
         metrics = deterministic_metrics(predicted_sd, observed_sd)
+        variance_ratio = float(np.nanmean(predicted_sd**2) / np.nanmean(observed_sd**2))
         variability_rows.append({
             "source": source,
             "metric": "station_within_period_daily_sd",
             "evaluation": "all_station_variability_fit",
             "independent": False,
-            "variability_ratio": float(np.nanmean(predicted_sd**2) / np.nanmean(observed_sd**2)),
+            "variability_ratio": variance_ratio,
             **metrics,
         })
-    return rows, station_rows, variability_rows
+        same_station_rows.append({
+            "source": source,
+            "n_stations": int(len(observed_sd)),
+            "evaluation": "same_locations_assimilated_fit",
+            "independent": False,
+            **{f"period_mean_{key}": value for key, value in mean_metrics.items()},
+            **{f"daily_sd_{key}": value for key, value in metrics.items()},
+            "daily_sd_variance_ratio": variance_ratio,
+            "daily_sd_amplitude_ratio": float(np.sqrt(variance_ratio)),
+        })
+    return rows, station_rows, variability_rows, same_station_rows
 
 
 def gauge_daily_network_rows(bundle: dict, product_times: np.ndarray,
@@ -806,6 +821,47 @@ def plot_gauges(bundle: dict, gauge_rows: list[dict], out_dir: Path, title: str,
     plt.close(figure)
 
 
+def plot_station_variability(bundle: dict, same_station_rows: list[dict], out_dir: Path,
+                              title: str, label: str) -> None:
+    """Show the exact same-station daily-SD comparison for every product."""
+    import matplotlib.pyplot as plt
+
+    observed_sd = np.nanstd(bundle["observed"], axis=0)
+    predictions = {"analysis": bundle["members"].mean(axis=1), **bundle["products"]}
+    lookup = {row["source"]: row for row in same_station_rows}
+    all_sd = np.concatenate([
+        observed_sd, *[np.nanstd(field, axis=0) for field in predictions.values()]
+    ])
+    maximum = float(np.nanpercentile(all_sd, 99))
+    maximum = max(1.0, maximum)
+    figure, axes = plt.subplots(2, 2, figsize=(10.5, 9.2), squeeze=False)
+    for axis, (source, field) in zip(axes.ravel(), predictions.items()):
+        predicted_sd = np.nanstd(field, axis=0)
+        axis.scatter(observed_sd, predicted_sd, s=31, alpha=0.8)
+        axis.plot([0, maximum], [0, maximum], "k--", lw=1)
+        axis.set_xlim(0, maximum); axis.set_ylim(0, maximum)
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_title(SOURCE_LABELS[source])
+        metrics = lookup[source]
+        axis.text(
+            0.04, 0.96,
+            f"r = {metrics['daily_sd_correlation']:.2f}\n"
+            f"bias = {metrics['daily_sd_bias_mm']:+.2f} mm/day\n"
+            f"amplitude ratio = {metrics['daily_sd_amplitude_ratio']:.2f}",
+            transform=axis.transAxes, va="top", fontsize=9,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.82},
+        )
+        axis.set_xlabel(f"BMD station {label} daily SD (mm/day)")
+        axis.set_ylabel("source station daily SD (mm/day)")
+        axis.grid(alpha=0.2)
+    figure.suptitle(
+        title + "\nSame 39 stations and paired dates; BMD is assimilated fit, not verification"
+    )
+    figure.tight_layout()
+    save_figure(figure, out_dir, "10_same_station_daily_variability")
+    plt.close(figure)
+
+
 def main() -> None:
     args = parse_args()
     requested_months = evaluation_months(args)
@@ -920,7 +976,9 @@ def main() -> None:
             "outside the ADM0 polygon and will be omitted from maps, but retained "
             "in the requested all-station fit tables"
         )
-    gauge_rows, station_rows, gauge_variability_rows = gauge_evaluation(stations, shared)
+    gauge_rows, station_rows, gauge_variability_rows, same_station_rows = gauge_evaluation(
+        stations, shared
+    )
     gauge_daily_rows = gauge_daily_network_rows(
         stations, target_product_times, target_bmd_times
     )
@@ -1139,6 +1197,7 @@ def main() -> None:
     write_rows(out_dir / f"{requested_tag}{args.year}_product_matrix.csv", matrix_rows)
     write_rows(out_dir / "all_station_gauge_fit.csv", gauge_rows)
     write_rows(out_dir / "all_station_daily_variability_fit.csv", gauge_variability_rows)
+    write_rows(out_dir / "same_station_period_matrix.csv", same_station_rows)
     write_rows(out_dir / "all_station_daily_network.csv", gauge_daily_rows)
     write_rows(out_dir / f"station_{requested_tag}{args.year}_summary.csv", station_rows)
     write_rows(out_dir / f"available_{requested_tag}_climatology.csv", climatology_rows)
@@ -1182,6 +1241,7 @@ def main() -> None:
     plot_daily_series(daily_rows, out_dir, title)
     plot_matrix(matrix_rows, out_dir, f"{requested_label} {args.year} {PRODUCT_NAME}")
     plot_gauges(stations, gauge_rows, out_dir, title, requested_label)
+    plot_station_variability(stations, same_station_rows, out_dir, title, requested_label)
     plot_field_grid(climatology_mean, grids, masks, geometry, bounds,
                     out_dir, f"06_leave{args.year}out_{requested_tag}_climatology_maps",
                     f"{requested_label} climatology ({', '.join(map(str, baseline_years))}; excludes {args.year})",
@@ -1251,6 +1311,7 @@ def main() -> None:
         "period_climatology_product_matrix": climatology_matrix_rows,
         "all_station_gauge_fit": gauge_rows,
         "all_station_daily_variability_fit": gauge_variability_rows,
+        "same_station_period_matrix": same_station_rows,
         "all_station_daily_network": gauge_daily_rows,
         "interpretation": {
             "mask": "all map pixels and spatial scores are inside Bangladesh ADM0 and model-valid land only",
