@@ -818,6 +818,11 @@ def parse_args() -> argparse.Namespace:
                         "independent datum; L^2 = 9 assumes one datum per "
                         "correlation patch; larger still treats the satellite as "
                         "broad-scale guidance only")
+    p.add_argument("--imerg-r-only", type=float, default=None,
+                   help="run exactly one named da_sim_rN arm at this satellite R "
+                        "multiplier, without automatically adding background or "
+                        "gauges-only anchors; intended for fixed-config checkpoint "
+                        "comparisons after the R sweep is already complete")
     p.add_argument("--imerg-refine-r", type=float, default=None,
                    help="add CPCv2-derived simultaneous refinements at this R "
                         "multiplier: ig010 (gamma 0.01) with its original L2 loss. "
@@ -879,6 +884,24 @@ def main() -> None:
     arm_imerg_stream: dict[str, str] = {}
     arm_guidance_gamma: dict[str, float] = {}
     arm_huber_delta: dict[str, float | None] = {}
+    if args.imerg_r_only is not None:
+        if args.imerg_r_sweep:
+            raise SystemExit("--imerg-r-only and --imerg-r-sweep are alternatives")
+        if not (args.imerg or args.osse_satellite):
+            raise SystemExit("--imerg-r-only needs --imerg or --osse-satellite")
+        if args.imerg_r_only <= 0.0:
+            raise SystemExit("--imerg-r-only must be positive")
+        value = float(args.imerg_r_only)
+        token = f"{value:g}".replace(".", "p")
+        name = f"da_sim_r{token}"
+        ARMS[name] = ("both", False)
+        ARM_NOTES[name] = (
+            f"IMERG + gauges simultaneously, satellite R x{value:g}"
+        )
+        arm_imerg_r[name] = value
+        # Deliberately replace the placeholder/base --arms selection. This mode
+        # exists to run one frozen winner and nothing else.
+        arms = [name]
     if args.imerg_r_sweep:
         if not (args.imerg or args.osse_satellite):
             raise SystemExit("--imerg-r-sweep needs --imerg or --osse-satellite")
@@ -1237,6 +1260,7 @@ def main() -> None:
         "checkpoints": {"meso": meso_info, "allocation": alloc_info},
         "members": args.members,
         "n_steps": args.n_steps,
+        "seed": args.seed,
         "observations": args.observations,
         "osse": args.observations == "osse",
         "imerg_day_offset": (imerg or {}).get("day_offset"),
