@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=bdhires-brishti05-jun23
+#SBATCH --job-name=bdhires-brishti05-period
 #SBATCH --partition=grace
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
