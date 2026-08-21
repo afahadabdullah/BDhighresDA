@@ -153,6 +153,20 @@ def test_r81_only_v7_dump_can_use_longer_cpcv2_period(tmp_path):
     assert report["comparisons"]["simultaneous_r81"]["v7_arm"] == "da_sim_r81"
 
 
+def test_legacy_cpc_dump_reconstructs_model_dates_from_companion_report(tmp_path):
+    v7_path, cpc_path = write_matched_dumps(tmp_path)
+    with np.load(cpc_path, allow_pickle=False) as source:
+        arrays = {key: source[key] for key in source.files if key != "model_times"}
+    np.savez_compressed(cpc_path, **arrays)
+    cpc_path.with_suffix(".json").write_text(
+        '{"scope": {"background_day_offset": -1}}'
+    )
+
+    report = COMPARISON.compare_dumps(v7_path, cpc_path)
+    assert report["scope"]["observation_dates"] == ["2022-05-04"]
+    assert set(report["comparisons"]) == {"gauges_only", "simultaneous"}
+
+
 def test_june_launcher_locks_latest_latest_r81_and_production_contract():
     submit = (ROOT / "slurm" / "submit_v7_june2023_r81.sh").read_text()
     batch = (ROOT / "slurm" / "v7_june2023_r81.sbatch").read_text()

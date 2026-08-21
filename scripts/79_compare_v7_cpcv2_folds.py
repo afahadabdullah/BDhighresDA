@@ -174,8 +174,10 @@ def compare_folds(v7_paths: list[Path], cpc_paths: list[Path],
             "stations_scored_exactly_once": len(all_eval_ids),
             "bootstrap_unit": "day", "bootstrap_resamples": resamples,
             "audit": (
-                "CPCv2 was subset to the V7 dates; each fold matched station "
-                "coordinates, BMD values, withheld IDs and member count"
+                "CPCv2 was subset to the V7 dates; model dates were validated "
+                "from model_times or the legacy companion report's frozen "
+                "background offset; each fold matched station coordinates, BMD "
+                "values, withheld IDs and member count"
             ),
         },
         "comparisons": results,

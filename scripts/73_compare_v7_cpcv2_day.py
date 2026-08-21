@@ -137,7 +137,7 @@ def _align_cpc_to_v7(
         "station_lon", "eval_idx", "observed_mm",
     )
     _required(
-        cpc, cpc_path, "times", "model_times", "station_ids", "station_lat",
+        cpc, cpc_path, "times", "station_ids", "station_lat",
         "station_lon", "eval_idx", "gauge_mm",
     )
 
@@ -152,9 +152,30 @@ def _align_cpc_to_v7(
     cpc_time_index = np.asarray([cpc_lookup[day] for day in v7_times], dtype=int)
     cpc_times = cpc_all_times[cpc_time_index]
     v7_model_times = np.asarray(v7["model_times"]).astype("datetime64[D]")
-    cpc_model_times = np.asarray(cpc["model_times"]).astype("datetime64[D]")[
-        cpc_time_index
-    ]
+    if "model_times" in cpc:
+        cpc_all_model_times = np.asarray(cpc["model_times"]).astype("datetime64[D]")
+    else:
+        # Confirmatory archives written before model_times was added to the NPZ
+        # still record the exact background offset in the mandatory companion
+        # JSON. Do not merely assume -1 from the experiment name: validate the
+        # saved report and reconstruct the coordinate from that frozen value.
+        report_path = cpc_path.with_suffix(".json")
+        if not report_path.is_file():
+            raise ValueError(
+                f"{cpc_path}: legacy dump has no model_times and its companion "
+                f"report is missing: {report_path}"
+            )
+        try:
+            scope = json.loads(report_path.read_text())["scope"]
+            offset = int(scope["background_day_offset"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"{report_path}: cannot validate legacy CPCv2 model-date offset"
+            ) from error
+        cpc_all_model_times = cpc_all_times + np.timedelta64(offset, "D")
+    if cpc_all_model_times.shape != cpc_all_times.shape:
+        raise ValueError(f"{cpc_path}: CPCv2 model and observation axes differ")
+    cpc_model_times = cpc_all_model_times[cpc_time_index]
     if not np.array_equal(v7_model_times, cpc_model_times):
         raise ValueError(
             "model dates differ: V7 "
@@ -273,8 +294,9 @@ def compare_dumps(v7_path: Path, cpc_path: Path) -> dict:
             "v7_dump": str(v7_path),
             "cpcv2_dump": str(cpc_path),
             "audit": (
-                "matching model/BMD dates, station coordinates, BMD values, "
-                "station pool, and withheld IDs verified"
+                "matching model/BMD dates (using the companion report's frozen "
+                "background offset for legacy CPCv2 dumps), station coordinates, "
+                "BMD values, station pool, and withheld IDs verified"
             ),
             "caveat": (
                 "This is a matched evaluation window, not a significance test. V7 uses its "
