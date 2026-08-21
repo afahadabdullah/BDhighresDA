@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=bdhires-v2-jun23-bgd
+#SBATCH --job-name=bdhires-brishti05-jun23
 #SBATCH --partition=grace
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -30,17 +30,27 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/bdhires-v2-jun23-bgd-${SLURM_JOB_ID}"
 mkdir -p "$MPLCONFIGDIR" logs
 
 ROOT="${V2_CONFIRM_ROOT:-data/processed/v2_confirmatory_2021_2024}"
-OUT="${V2_JUNE_BGD_OUT:-$ROOT/evaluation/june2023_bangladesh_ig010}"
+OUT="${V2_JUNE_BGD_OUT:-$ROOT/evaluation/brishti05_june2023_native_refs}"
 BOUNDARY="${V2_JUNE_BGD_BOUNDARY:-$OUT/inputs/geoBoundaries-BGD-ADM0.geojson}"
 METHOD="${V2_JUNE_BGD_METHOD:-v2_simul_s04_ig010}"
+CPC_DIR="${V2_JUNE_BGD_CPC_DIR:-data/raw/cpc}"
 STORES=(
     "$ROOT/gridded/2021_may_sep.zarr"
     "$ROOT/gridded/2022_may_sep.zarr"
     "$ROOT/gridded/2023_may_sep.zarr"
     "$ROOT/gridded/2024_may_jun.zarr"
 )
+NATIVE_IMERG=(
+    "$ROOT/imerg_native/2021_may_sep.nc"
+    "$ROOT/imerg_native/2022_may_sep.nc"
+    "$ROOT/imerg_native/2023_may_sep.nc"
+    "$ROOT/imerg_native/2024_may_jun.nc"
+)
 
-for required in "$BOUNDARY" "${STORES[@]}" scripts/81_evaluate_cpcv2_june_bangladesh.py; do
+for required in "$BOUNDARY" "${STORES[@]}" "${NATIVE_IMERG[@]}" \
+                "$CPC_DIR/precip.2021.nc" "$CPC_DIR/precip.2022.nc" \
+                "$CPC_DIR/precip.2023.nc" "$CPC_DIR/precip.2024.nc" \
+                scripts/81_evaluate_cpcv2_june_bangladesh.py; do
     [[ -f "$required" || -d "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
 done
 if [[ -s "$OUT/evaluation.json" && "${V2_JUNE_BGD_FORCE:-0}" != "1" ]]; then
@@ -49,16 +59,20 @@ if [[ -s "$OUT/evaluation.json" && "${V2_JUNE_BGD_FORCE:-0}" != "1" ]]; then
     exit 0
 fi
 
-echo "Evaluating saved CPCv2 product (no DA regeneration)"
+echo "Evaluating BRISHTI-05 saved analysis product (no DA regeneration)"
 echo "  method: $METHOD"
-echo "  target: June 2023"
+echo "  produced/product dates: 2023-05-31 through 2023-06-29"
+echo "  paired BMD labels: 2023-06-01 through 2023-06-30 (+1 day)"
 echo "  climatology candidates: complete Junes in 2021-2024 stores"
+echo "  comparison products: native 0.1-degree IMERG; original 0.5-degree CPC"
 echo "  mask: Bangladesh ADM0 ($BOUNDARY)"
 echo "  output: $OUT"
 
 srun --ntasks=1 "$PYTHON_BIN" -u scripts/81_evaluate_cpcv2_june_bangladesh.py \
     --zarr "${STORES[@]}" \
     --boundary-geojson "$BOUNDARY" \
+    --native-imerg "${NATIVE_IMERG[@]}" \
+    --cpc-dir "$CPC_DIR" \
     --method "$METHOD" \
     --year 2023 --month 6 --factor 8 \
     --out-dir "$OUT"
