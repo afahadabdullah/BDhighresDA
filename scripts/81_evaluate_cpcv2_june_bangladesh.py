@@ -17,6 +17,7 @@ as truth.
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import importlib.util
 import json
@@ -68,6 +69,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--method", default=METHOD_DEFAULT)
     parser.add_argument("--year", type=int, default=TARGET_YEAR)
     parser.add_argument("--month", type=int, default=TARGET_MONTH)
+    parser.add_argument(
+        "--months", nargs="+", type=int, default=None,
+        help="one or more contiguous calendar months; overrides --month (e.g. 5 6 7 8)",
+    )
     parser.add_argument("--factor", type=int, default=8,
                         help="assimilated IMERG S04 factor, retained as experiment metadata")
     parser.add_argument(
@@ -79,6 +84,30 @@ def parse_args() -> argparse.Namespace:
         help="directory containing original NOAA precip.YYYY.nc CPC 0.5-degree files",
     )
     return parser.parse_args()
+
+
+def evaluation_months(args: argparse.Namespace) -> tuple[int, ...]:
+    months = tuple(args.months) if args.months is not None else (args.month,)
+    if not months or any(month < 1 or month > 12 for month in months):
+        raise ValueError(f"months must be in 1..12, got {months}")
+    if tuple(sorted(set(months))) != months:
+        raise ValueError(f"months must be sorted and unique, got {months}")
+    if any(right != left + 1 for left, right in zip(months, months[1:])):
+        raise ValueError(f"months must be contiguous, got {months}")
+    return months
+
+
+def period_label(months: tuple[int, ...]) -> str:
+    names = [calendar.month_name[month] for month in months]
+    return names[0] if len(names) == 1 else f"{names[0]}–{names[-1]}"
+
+
+def period_tag(months: tuple[int, ...]) -> str:
+    return "_".join(calendar.month_abbr[month].lower() for month in months)
+
+
+def expected_period_days(year: int, months: tuple[int, ...]) -> int:
+    return sum(calendar.monthrange(year, month)[1] for month in months)
 
 
 def load_shared_evaluator():
@@ -515,12 +544,12 @@ def gauge_evaluation(bundle: dict, shared) -> tuple[list[dict], list[dict], list
             "station_id": station,
             "lat": float(bundle["station_lat"][station_index]),
             "lon": float(bundle["station_lon"][station_index]),
-            "observed_june_mean_mm": float(np.nanmean(observed[:, station_index])),
-            "observed_daily_sd_mm": float(np.nanstd(observed[:, station_index])),
+            "observed_period_mean_mm": float(np.nanmean(observed[:, station_index])),
+            "observed_within_period_daily_sd_mm": float(np.nanstd(observed[:, station_index])),
         }
         for source, predicted in predictions.items():
-            row[f"{source}_june_mean_mm"] = float(np.nanmean(predicted[:, station_index]))
-            row[f"{source}_daily_sd_mm"] = float(np.nanstd(predicted[:, station_index]))
+            row[f"{source}_period_mean_mm"] = float(np.nanmean(predicted[:, station_index]))
+            row[f"{source}_within_period_daily_sd_mm"] = float(np.nanstd(predicted[:, station_index]))
         station_rows.append(row)
 
     variability_rows = []
@@ -530,7 +559,7 @@ def gauge_evaluation(bundle: dict, shared) -> tuple[list[dict], list[dict], list
         metrics = deterministic_metrics(predicted_sd, observed_sd)
         variability_rows.append({
             "source": source,
-            "metric": "station_within_june_daily_sd",
+            "metric": "station_within_period_daily_sd",
             "evaluation": "all_station_variability_fit",
             "independent": False,
             "variability_ratio": float(np.nanmean(predicted_sd**2) / np.nanmean(observed_sd**2)),
@@ -660,7 +689,7 @@ def plot_station_residual_maps(bundle: dict, mask: np.ndarray, geometry: dict, b
         axis.set_title(SOURCE_LABELS[source])
         figure.colorbar(image, ax=axis, shrink=0.78, label="mean residual (mm/day)")
     make_map_axes(axes, geometry, bounds)
-    figure.suptitle(title + "\nstation June-mean residual: source minus BMD")
+    figure.suptitle(title + "\nstation period-mean residual: source minus BMD")
     figure.tight_layout()
     save_figure(figure, out_dir, "09_station_mean_residual_maps")
     plt.close(figure)
@@ -692,7 +721,7 @@ def plot_daily_series(daily_rows: list[dict], out_dir: Path, title: str) -> None
     plt.close(figure)
 
 
-def plot_matrix(rows: list[dict], out_dir: Path) -> None:
+def plot_matrix(rows: list[dict], out_dir: Path, title: str) -> None:
     import matplotlib.pyplot as plt
 
     metrics = ["mean_r", "mean_bias_mm", "mean_rmse_mm", "mean_sd_ratio",
@@ -729,14 +758,15 @@ def plot_matrix(rows: list[dict], out_dir: Path) -> None:
             for row in rows
         ],
     )
-    axis.set_title(f"June 2023 {PRODUCT_NAME} agreement matrix (raw values; colour ranks within metric)")
+    axis.set_title(f"{title} agreement matrix (raw values; colour ranks within metric)")
     figure.colorbar(image, ax=axis, shrink=0.7, label="relative agreement within column")
     figure.tight_layout()
     save_figure(figure, out_dir, "04_product_agreement_matrix")
     plt.close(figure)
 
 
-def plot_gauges(bundle: dict, gauge_rows: list[dict], out_dir: Path, title: str) -> None:
+def plot_gauges(bundle: dict, gauge_rows: list[dict], out_dir: Path, title: str,
+                label: str) -> None:
     import matplotlib.pyplot as plt
 
     observed = bundle["observed"]
@@ -766,8 +796,8 @@ def plot_gauges(bundle: dict, gauge_rows: list[dict], out_dir: Path, title: str)
                            label=SOURCE_LABELS[source])
     axes[1, 1].plot([0, limit], [0, limit], color="black", ls="--", lw=1)
     axes[1, 1].set_xlim(0, limit); axes[1, 1].set_ylim(0, limit)
-    axes[1, 1].set_xlabel("BMD station June mean"); axes[1, 1].set_ylabel("source June mean")
-    axes[1, 1].legend(fontsize=7); axes[1, 1].set_title("Paired 30-day station mean")
+    axes[1, 1].set_xlabel(f"BMD station {label} mean"); axes[1, 1].set_ylabel("source period mean")
+    axes[1, 1].legend(fontsize=7); axes[1, 1].set_title("Paired station-period mean")
     figure.suptitle(
         title + "\nBMD labels are +1 day; scores are assimilated fit, not verification"
     )
@@ -778,6 +808,9 @@ def plot_gauges(bundle: dict, gauge_rows: list[dict], out_dir: Path, title: str)
 
 def main() -> None:
     args = parse_args()
+    requested_months = evaluation_months(args)
+    requested_label = period_label(requested_months)
+    requested_tag = period_tag(requested_months)
     shared = load_shared_evaluator()
     paths = [Path(path) for path in args.zarr]
     archive = shared.load_archive(paths, args.factor)
@@ -800,18 +833,23 @@ def main() -> None:
     times = archive["time"].astype("datetime64[D]")
     years = np.asarray([int(str(day)[:4]) for day in times])
     months = np.asarray([int(str(day)[5:7]) for day in times])
+    requested_month_mask = np.isin(months, requested_months)
     available_years = []
-    for year in sorted(set(years[months == args.month].tolist())):
-        choose = (years == year) & (months == args.month)
-        expected = int((np.datetime64(f"{year}-{args.month % 12 + 1:02d}-01") -
-                        np.datetime64(f"{year}-{args.month:02d}-01")) / np.timedelta64(1, "D")) if args.month < 12 else 31
+    for year in sorted(set(years[requested_month_mask].tolist())):
+        choose = (years == year) & requested_month_mask
+        expected = expected_period_days(year, requested_months)
         if choose.sum() == expected:
             available_years.append(year)
     if args.year not in available_years:
-        raise ValueError(f"target June {args.year} is incomplete; complete years={available_years}")
+        raise ValueError(
+            f"target {requested_label} {args.year} is incomplete; "
+            f"complete years={available_years}"
+        )
     baseline_years = [year for year in available_years if year != args.year]
     if not baseline_years:
-        raise ValueError("leave-target-year-out June climatology needs at least one other year")
+        raise ValueError(
+            f"leave-target-year-out {requested_label} climatology needs at least one other year"
+        )
 
     day_offset = background_day_offset(archive)
     if day_offset != -1:
@@ -819,8 +857,8 @@ def main() -> None:
             f"this evaluation expects the documented BMD +1-day contract, but "
             f"scope.background_day_offset={day_offset:+d}"
         )
-    all_june = (months == args.month) & np.isin(years, available_years)
-    june_bmd_times = times[all_june]
+    all_period = requested_month_mask & np.isin(years, available_years)
+    june_bmd_times = times[all_period]
     june_product_times = june_bmd_times + np.timedelta64(day_offset, "D")
     # Prepared IMERG is stamped with the BMD 03 UTC window end date. The saved
     # analysis, CPC conditioning day, and CHIRPS conditioning field are D-1.
@@ -848,7 +886,7 @@ def main() -> None:
     product_lookup = {day: index for index, day in enumerate(june_product_times)}
     observation_lookup = {day: index for index, day in enumerate(june_bmd_times)}
 
-    target = (years == args.year) & (months == args.month)
+    target = (years == args.year) & requested_month_mask
     target_bmd_times = times[target]
     target_product_times = target_bmd_times + np.timedelta64(day_offset, "D")
     product_positions = np.asarray([product_lookup[day] for day in target_product_times])
@@ -1011,7 +1049,7 @@ def main() -> None:
     yearly_fields: dict[int, dict[str, np.ndarray]] = {}
     climatology_rows = []
     for year in available_years:
-        choose = (years == year) & (months == args.month)
+        choose = (years == year) & requested_month_mask
         year_bmd_times = times[choose]
         year_product_times = year_bmd_times + np.timedelta64(day_offset, "D")
         june_positions = np.asarray([product_lookup[day] for day in year_product_times])
@@ -1038,8 +1076,8 @@ def main() -> None:
                 "bmd_observation_end": str(year_bmd_times[-1]),
                 "native_resolution_degrees": grids[source]["resolution_degrees"],
                 "domain_mean_mm": float(np.nanmean(mean_field[masks[source]])),
-                "spatial_sd_of_june_mean_mm": float(np.nanstd(mean_field[masks[source]])),
-                "mean_within_june_daily_sd_mm": float(np.nanmean(variability_field[masks[source]])),
+                "spatial_sd_of_period_mean_mm": float(np.nanstd(mean_field[masks[source]])),
+                "mean_within_period_daily_sd_mm": float(np.nanmean(variability_field[masks[source]])),
             })
     climatology_mean = {
         source: masked_field_average(
@@ -1059,7 +1097,7 @@ def main() -> None:
         reference_grid = grids[reference]
         analysis_year_means, analysis_year_variability = [], []
         for baseline_year in baseline_years:
-            choose = (years == baseline_year) & (months == args.month)
+            choose = (years == baseline_year) & requested_month_mask
             analysis_days = np.asarray(archive["mean"][method_index, choose], float)
             analysis_native_days = (
                 analysis_days if reference == "chirps" else
@@ -1098,71 +1136,72 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     write_rows(out_dir / "daily_domain_variability.csv", daily_rows)
     write_rows(out_dir / "daily_spatial_agreement.csv", daily_matrix_rows)
-    write_rows(out_dir / "june2023_product_matrix.csv", matrix_rows)
+    write_rows(out_dir / f"{requested_tag}{args.year}_product_matrix.csv", matrix_rows)
     write_rows(out_dir / "all_station_gauge_fit.csv", gauge_rows)
     write_rows(out_dir / "all_station_daily_variability_fit.csv", gauge_variability_rows)
     write_rows(out_dir / "all_station_daily_network.csv", gauge_daily_rows)
-    write_rows(out_dir / "station_june2023_summary.csv", station_rows)
-    write_rows(out_dir / "available_june_climatology.csv", climatology_rows)
-    write_rows(out_dir / "june_climatology_product_matrix.csv", climatology_matrix_rows)
+    write_rows(out_dir / f"station_{requested_tag}{args.year}_summary.csv", station_rows)
+    write_rows(out_dir / f"available_{requested_tag}_climatology.csv", climatology_rows)
+    write_rows(out_dir / f"{requested_tag}_climatology_product_matrix.csv", climatology_matrix_rows)
     field_payload = {
         "product_times": target_product_times.astype(str),
         "bmd_observation_times": target_bmd_times.astype(str),
-        "available_june_years": np.asarray(available_years),
+        "available_complete_period_years": np.asarray(available_years),
         "baseline_years": np.asarray(baseline_years),
     }
     for source in target_fields:
         field_payload[f"{source}_lat"] = grids[source]["lat"]
         field_payload[f"{source}_lon"] = grids[source]["lon"]
         field_payload[f"{source}_bangladesh_mask"] = masks[source]
-        field_payload[f"june2023_{source}_mean"] = monthly_fields[source]
-        field_payload[f"june2023_{source}_daily_sd"] = variability_fields[source]
+        field_payload[f"{requested_tag}{args.year}_{source}_mean"] = monthly_fields[source]
+        field_payload[f"{requested_tag}{args.year}_{source}_daily_sd"] = variability_fields[source]
         field_payload[f"baseline_{source}_mean"] = climatology_mean[source]
         field_payload[f"baseline_{source}_daily_sd"] = climatology_variability[source]
-        field_payload[f"june2023_{source}_anomaly"] = anomalies[source]
+        field_payload[f"{requested_tag}{args.year}_{source}_anomaly"] = anomalies[source]
     np.savez_compressed(
-        out_dir / "june_bangladesh_fields.npz",
+        out_dir / f"{requested_tag}_bangladesh_fields.npz",
         **field_payload,
     )
 
-    title = f"{PRODUCT_NAME} — Bangladesh production contract {args.year}"
+    title = f"{PRODUCT_NAME} — Bangladesh {requested_label} {args.year} production contract"
     station_map = stations["inside_country"]
     overlay = {"lon": stations["station_lon"][station_map],
                "lat": stations["station_lat"][station_map],
                "value": np.nanmean(stations["observed"], axis=0)[station_map]}
     plot_field_grid(monthly_fields, grids, masks, geometry, bounds,
-                    out_dir, "01_june2023_mean_maps", title + " monthly mean", "turbo",
+                    out_dir, f"01_{requested_tag}{args.year}_mean_maps", title + " period mean", "turbo",
                     station_overlay=overlay)
     plot_field_grid(variability_fields, grids, masks, geometry, bounds,
-                    out_dir, "02_june2023_daily_variability_maps",
-                    title + " within-June daily variability", "magma",
+                    out_dir, f"02_{requested_tag}{args.year}_daily_variability_maps",
+                    title + " within-period daily variability", "magma",
                     station_overlay={
                         "lon": stations["station_lon"][station_map],
                         "lat": stations["station_lat"][station_map],
                         "value": np.nanstd(stations["observed"], axis=0)[station_map],
                     })
     plot_daily_series(daily_rows, out_dir, title)
-    plot_matrix(matrix_rows, out_dir)
-    plot_gauges(stations, gauge_rows, out_dir, title)
+    plot_matrix(matrix_rows, out_dir, f"{requested_label} {args.year} {PRODUCT_NAME}")
+    plot_gauges(stations, gauge_rows, out_dir, title, requested_label)
     plot_field_grid(climatology_mean, grids, masks, geometry, bounds,
-                    out_dir, "06_leave2023out_june_climatology_maps",
-                    f"June climatology ({', '.join(map(str, baseline_years))}; excludes {args.year})",
+                    out_dir, f"06_leave{args.year}out_{requested_tag}_climatology_maps",
+                    f"{requested_label} climatology ({', '.join(map(str, baseline_years))}; excludes {args.year})",
                     "turbo")
     plot_field_grid(
         climatology_variability, grids, masks, geometry, bounds, out_dir,
-        "07_leave2023out_june_variability_climatology_maps",
-        f"Within-June daily-SD climatology ({', '.join(map(str, baseline_years))}; excludes {args.year})",
+        f"07_leave{args.year}out_{requested_tag}_variability_climatology_maps",
+        f"Within-{requested_label} daily-SD climatology ({', '.join(map(str, baseline_years))}; excludes {args.year})",
         "magma",
     )
     plot_field_grid(anomalies, grids, masks, geometry, bounds,
-                    out_dir, "08_june2023_anomaly_maps",
-                    f"June {args.year} minus leave-{args.year}-out June climatology",
+                    out_dir, f"08_{requested_tag}{args.year}_anomaly_maps",
+                    f"{requested_label} {args.year} minus leave-{args.year}-out climatology",
                     "RdBu_r", symmetric=True)
     plot_station_residual_maps(stations, fine_mask, geometry, bounds, out_dir, title)
 
     report = {
         "design": {
-            "method": args.method, "target_year": args.year, "month": args.month,
+            "method": args.method, "target_year": args.year,
+            "months": list(requested_months), "period_label": requested_label,
             "product_name": PRODUCT_NAME,
             "product_full_name": PRODUCT_FULL_NAME,
             "lineage_method_key": args.method,
@@ -1182,7 +1221,7 @@ def main() -> None:
             },
             "gauge_stations_total": int(len(stations["station_id"])),
             "gauge_stations_inside_boundary_for_maps": int(stations["inside_country"].sum()),
-            "available_complete_june_years": available_years,
+            "available_complete_period_years": available_years,
             "leave_target_year_out_climatology_years": baseline_years,
             "date_contract": {
                 "bmd_observation_dates": [str(target_bmd_times[0]), str(target_bmd_times[-1])],
@@ -1208,15 +1247,18 @@ def main() -> None:
             },
         },
         "evidence_roles": EVIDENCE_ROLES,
-        "june2023_product_matrix": matrix_rows,
-        "june_climatology_product_matrix": climatology_matrix_rows,
+        "period_product_matrix": matrix_rows,
+        "period_climatology_product_matrix": climatology_matrix_rows,
         "all_station_gauge_fit": gauge_rows,
         "all_station_daily_variability_fit": gauge_variability_rows,
         "all_station_daily_network": gauge_daily_rows,
         "interpretation": {
             "mask": "all map pixels and spatial scores are inside Bangladesh ADM0 and model-valid land only",
             "outside_country": "NaN and rendered white",
-            "climatology": "mean across complete available Junes excluding target year; not a 30-year climate normal",
+            "climatology": (
+                "mean across complete available requested periods excluding target year; "
+                "not a 30-year climate normal"
+            ),
             "gauge_warning": "all production gauges were assimilated, so scores diagnose fit rather than independent skill",
             "support_aware_scoring": (
                 "analysis is area-averaged to each product's actual native support; "
@@ -1246,10 +1288,10 @@ def main() -> None:
         f"# {PRODUCT_NAME}: Bangladesh production-contract evaluation, {args.year}\n\n"
         f"**{PRODUCT_FULL_NAME}.** Reproducibility lineage method: `{args.method}`; "
         f"{target_members.shape[1]} ensemble members; "
-        f"{len(target_product_times)} target days. Produced-analysis/product dates "
+        f"{len(target_product_times)} target days for {requested_label}. Produced-analysis/product dates "
         f"are {target_product_times[0]} through {target_product_times[-1]}; paired BMD "
         f"labels are {target_bmd_times[0]} through {target_bmd_times[-1]} (+1 day). "
-        "June climatology uses complete observation-label years "
+        f"{requested_label} climatology uses complete observation-label years "
         f"{', '.join(map(str, baseline_years))} and excludes {args.year}.\n\n"
         "All spatial maps and matrices use the Bangladesh ADM0 polygon intersected "
         "with the model-valid mask; everything outside is missing and plotted white. "

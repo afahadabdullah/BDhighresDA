@@ -30,7 +30,10 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/bdhires-v2-jun23-bgd-${SLURM_JOB_ID}"
 mkdir -p "$MPLCONFIGDIR" logs
 
 ROOT="${V2_CONFIRM_ROOT:-data/processed/v2_confirmatory_2021_2024}"
-OUT="${V2_JUNE_BGD_OUT:-$ROOT/evaluation/brishti05_june2023_native_refs}"
+MONTHS_TEXT="${BRISHTI_MONTHS:-6}"
+read -r -a MONTHS <<< "$MONTHS_TEXT"
+PERIOD_TAG="${BRISHTI_PERIOD_TAG:-jun}"
+OUT="${V2_JUNE_BGD_OUT:-$ROOT/evaluation/brishti05_${PERIOD_TAG}2023_native_refs}"
 BOUNDARY="${V2_JUNE_BGD_BOUNDARY:-$OUT/inputs/geoBoundaries-BGD-ADM0.geojson}"
 METHOD="${V2_JUNE_BGD_METHOD:-v2_simul_s04_ig010}"
 CPC_DIR="${V2_JUNE_BGD_CPC_DIR:-data/raw/cpc}"
@@ -61,9 +64,9 @@ fi
 
 echo "Evaluating BRISHTI-05 saved analysis product (no DA regeneration)"
 echo "  method: $METHOD"
-echo "  produced/product dates: 2023-05-31 through 2023-06-29"
-echo "  paired BMD labels: 2023-06-01 through 2023-06-30 (+1 day)"
-echo "  climatology candidates: complete Junes in 2021-2024 stores"
+echo "  requested months: ${MONTHS[*]} (2023)"
+echo "  BMD labels are +1 day relative to produced/model dates"
+echo "  climatology candidates: complete matching periods in saved stores"
 echo "  comparison products: native 0.1-degree IMERG; original 0.5-degree CPC"
 echo "  mask: Bangladesh ADM0 ($BOUNDARY)"
 echo "  output: $OUT"
@@ -74,7 +77,7 @@ srun --ntasks=1 "$PYTHON_BIN" -u scripts/81_evaluate_cpcv2_june_bangladesh.py \
     --native-imerg "${NATIVE_IMERG[@]}" \
     --cpc-dir "$CPC_DIR" \
     --method "$METHOD" \
-    --year 2023 --month 6 --factor 8 \
+    --year 2023 --months "${MONTHS[@]}" --factor 8 \
     --out-dir "$OUT"
 
 echo "Evaluation complete: $OUT/evaluation.json"

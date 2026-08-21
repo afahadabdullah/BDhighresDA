@@ -74,6 +74,20 @@ def test_bmd_date_contract_comes_from_frozen_archive():
     assert evaluator.background_day_offset({"datasets": [Dataset(), Dataset()]}) == -1
 
 
+def test_contiguous_period_selection_and_leap_year_length():
+    evaluator = module()
+
+    class Args:
+        month = 6
+        months = [5, 6, 7, 8]
+
+    months = evaluator.evaluation_months(Args())
+    assert months == (5, 6, 7, 8)
+    assert evaluator.period_label(months) == "May–August"
+    assert evaluator.period_tag(months) == "may_jun_jul_aug"
+    assert evaluator.expected_period_days(2023, months) == 123
+
+
 def test_daily_network_rows_preserve_product_and_bmd_dates():
     evaluator = module()
     bundle = {
@@ -108,6 +122,6 @@ def test_launcher_uses_saved_stores_and_gpu_node():
     assert "--boundary-geojson" in source
     assert "--native-imerg" in source
     assert "--cpc-dir" in source
-    assert "2023-05-31 through 2023-06-29" in source
-    assert "2023-06-01 through 2023-06-30 (+1 day)" in source
+    assert "BRISHTI_MONTHS" in source
+    assert "--months" in source
     assert "--cpc-source-zarr" not in source

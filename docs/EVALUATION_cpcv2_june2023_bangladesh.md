@@ -69,3 +69,16 @@ To rerun an existing report:
 ```bash
 V2_JUNE_BGD_FORCE=1 bash slurm/submit_cpcv2_june2023_bangladesh_eval.sh
 ```
+
+## May--August 2023 extension
+
+To submit matched May, July, August, and full May--August analyses of the
+same saved BRISHTI-05 product, run:
+
+```bash
+bash slurm/submit_brishti05_may_aug2023_eval.sh
+```
+
+The seasonal run has 123 paired days. Its leave-2023-out baseline uses 2021
+and 2022 only, because the saved 2024 production archive ends in June. The May
+run can use 2021, 2022, and 2024; July and August use 2021 and 2022.
