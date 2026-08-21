@@ -106,6 +106,68 @@ def test_comparison_scores_optional_v7_r_sweep_against_same_cpc_arm(tmp_path):
     )
 
 
+def test_r81_only_v7_dump_can_use_longer_cpcv2_period(tmp_path):
+    v7_path = tmp_path / "v7_r81.npz"
+    cpc_path = tmp_path / "cpc_season.npz"
+    observations = np.asarray([[1.0, 2.0], [3.0, 4.0]], np.float32)
+    v7_members = np.stack([observations - 0.1, observations + 0.1], axis=1)
+    np.savez_compressed(
+        v7_path,
+        times=np.asarray(["2023-06-01", "2023-06-02"]),
+        model_times=np.asarray(["2023-05-31", "2023-06-01"]),
+        station_ids=np.asarray(["A", "B"]),
+        station_lat=np.asarray([23.0, 24.0]),
+        station_lon=np.asarray([90.0, 91.0]),
+        eval_idx=np.asarray([1]),
+        assim_idx=np.asarray([0]),
+        observed_mm=observations,
+        arm_names=np.asarray(["da_sim_r81"]),
+        station_da_sim_r81=v7_members,
+    )
+    cpc_observations = np.asarray(
+        [[9.0, 9.0], [1.0, 2.0], [3.0, 4.0], [8.0, 8.0]], np.float32
+    )
+    cpc_members = np.stack(
+        [cpc_observations - 0.2, cpc_observations + 0.2], axis=1
+    )
+    np.savez_compressed(
+        cpc_path,
+        times=np.asarray([
+            "2023-05-31", "2023-06-01", "2023-06-02", "2023-06-03"
+        ]),
+        model_times=np.asarray([
+            "2023-05-30", "2023-05-31", "2023-06-01", "2023-06-02"
+        ]),
+        station_ids=np.asarray(["A", "B"]),
+        station_lat=np.asarray([23.0, 24.0]),
+        station_lon=np.asarray([90.0, 91.0]),
+        eval_idx=np.asarray([1]),
+        assim_idx=np.asarray([0]),
+        gauge_mm=cpc_observations,
+        station_v2_simul_s04_ig010=cpc_members,
+    )
+
+    report = COMPARISON.compare_dumps(v7_path, cpc_path)
+    assert list(report["comparisons"]) == ["simultaneous_r81"]
+    assert report["scope"]["observation_dates"] == ["2023-06-01", "2023-06-02"]
+    assert report["comparisons"]["simultaneous_r81"]["v7_arm"] == "da_sim_r81"
+
+
+def test_june_launcher_locks_latest_latest_r81_and_production_contract():
+    submit = (ROOT / "slurm" / "submit_v7_june2023_r81.sh").read_text()
+    batch = (ROOT / "slurm" / "v7_june2023_r81.sbatch").read_text()
+    assert "20260821_1323" in submit
+    assert "source_checkpoints/latest_meso.pt" in submit
+    assert "source_checkpoints/latest_allocation.pt" in submit
+    assert "--array=0-5%3" in batch
+    assert "--imerg-r-only 81" in batch
+    assert "--members \"$MEMBERS\"" in batch
+    assert "--assimilate-all-stations --fields-zarr" in batch
+    assert "--holdout-station-ids-file" in batch
+    assert "MODEL_START=\"2023-05-31\"" in batch
+    assert "OBS_END=\"2023-06-30\"" in batch
+
+
 def test_cpcv2_comparison_group_contains_only_the_two_selected_winners():
     source = (ROOT / "scripts" / "28_simultaneous_method_sweep.py").read_text()
     assert '"v2_comparison": V2_COMPARISON' in source

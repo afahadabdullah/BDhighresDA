@@ -149,7 +149,8 @@ def write_physical_ensemble_zarr(
         complete=False,
         units="mm/day",
         description=(
-            "CPC-v2 physical precipitation ensembles. Cross-validated skill "
+            f"{scope.get('model_family', 'DA')} physical precipitation ensembles. "
+            "Cross-validated skill "
             "must use the separate withheld-station files; assimilated_station "
             "declares which gauges entered this gridded product."
         ),
@@ -319,7 +320,11 @@ def write_physical_ensemble_zarr(
             np.asarray(raw_imerg_mm, np.float32),
             ("time", "imerg_lat", "imerg_lon"),
             chunks=(1, n_imerg_lat, n_imerg_lon),
-            attrs={"units": "mm/day", "spatial_support": "0.4-degree S04"},
+            attrs={
+                "units": "mm/day",
+                "spatial_support": f"{float(grid.res) * imerg_factor:g}-degree",
+                "observation_factor": int(imerg_factor),
+            },
         )
 
     root.attrs["complete"] = True

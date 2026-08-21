@@ -54,7 +54,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bdhires.bmd import neighbored_holdout  # noqa: E402
+from bdhires.bmd import neighbored_holdout, spread_folds  # noqa: E402
 from bdhires.da import (  # noqa: E402
     BilinearObsOperator,
     CompositeObsOperator,
@@ -89,6 +89,7 @@ from bdhires.transforms import (  # noqa: E402
     ResidualSpec,
     load_climatology,
 )
+from bdhires.zarr_output import write_physical_ensemble_zarr  # noqa: E402
 
 # (what is assimilated at 0.1 deg, whether gauges act at 0.05 deg).
 # The 0.1-degree set is one of: none / gauges / imerg / both.
@@ -682,6 +683,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stations", default="data/processed/bmd_daily.csv",
                    help="canonical BMD daily CSV from scripts/05_convert_bmd_dir.py "
                         "-- NOT the Stations.csv catalog")
+    p.add_argument(
+        "--station-ids-file",
+        default=None,
+        help=(
+            "optional exact eligible-station pool, one ID per line. Coverage "
+            "filtering is bypassed and every requested ID is retained; this is "
+            "the audit-safe way to match an existing CPCv2 fold archive"
+        ),
+    )
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
     p.add_argument("--out", required=True)
@@ -701,6 +711,29 @@ def parse_args() -> argparse.Namespace:
             "optional compressed NPZ of daily ensemble-mean 0.05-degree fields. "
             "This retains the V7 subgrid output for a matched spatial comparison "
             "with another DA model without writing the full ensemble."
+        ),
+    )
+    p.add_argument(
+        "--fields-zarr",
+        default=None,
+        help=(
+            "optional restart-safe physical-ensemble Zarr. Requires "
+            "--assimilate-all-stations and retains every 0.05-degree member in "
+            "the same bdhires.physical_ensemble.v1 contract as CPCv2 production"
+        ),
+    )
+    p.add_argument("--assimilate-all-stations", action="store_true",
+                   help="production mode: assimilate every eligible BMD station")
+    p.add_argument("--holdout-folds", type=int, default=1,
+                   help="number of deterministic geographically spread CV folds")
+    p.add_argument("--holdout-fold", type=int, default=0,
+                   help="zero-based withheld fold when --holdout-folds > 1")
+    p.add_argument(
+        "--holdout-station-ids-file",
+        default=None,
+        help=(
+            "optional exact withheld IDs, one per line. Exclusive with "
+            "--assimilate-all-stations and --holdout-folds > 1"
         ),
     )
     p.add_argument("--members", type=int, default=8)
@@ -875,6 +908,31 @@ def main() -> None:
                 "--observations real needs --min-coverage > 0 so that stations "
                 "which did not report are dropped rather than carried as NaN"
             )
+    if args.fields_zarr and not args.assimilate_all_stations:
+        raise SystemExit(
+            "--fields-zarr requires --assimilate-all-stations; fold-specific "
+            "grids are not production products"
+        )
+    if args.fields_zarr and not args.imerg:
+        raise SystemExit(
+            "--fields-zarr currently requires real --imerg so the matched raw "
+            "satellite input can be archived with the physical ensemble"
+        )
+    if args.assimilate_all_stations and args.holdout_folds > 1:
+        raise SystemExit(
+            "--assimilate-all-stations and --holdout-folds > 1 are alternatives"
+        )
+    if args.holdout_station_ids_file and (
+        args.assimilate_all_stations or args.holdout_folds > 1
+    ):
+        raise SystemExit(
+            "--holdout-station-ids-file is exclusive with "
+            "--assimilate-all-stations and --holdout-folds > 1"
+        )
+    if args.holdout_folds < 1:
+        raise SystemExit("--holdout-folds must be at least 1")
+    if not 0 <= args.holdout_fold < args.holdout_folds:
+        raise SystemExit("--holdout-fold must lie in [0, --holdout-folds)")
 
     # Each sweep value becomes its own da_meso arm with its own sigma; the rest
     # of the configuration is identical, so a difference between them is the
@@ -1152,7 +1210,10 @@ def main() -> None:
     try:
         stations, gauge_mm = load_stations(
             args.stations, gauge_times, grid=fine_grid,
-            min_coverage=args.min_coverage,
+            # An imported station pool has already passed the source model's
+            # coverage rule. Reapplying that rule on a shorter comparison
+            # window can silently change the pool and therefore the folds.
+            min_coverage=0.0 if args.station_ids_file else args.min_coverage,
         )
     except ValueError as error:
         # Stations.csv is the station CATALOG (id, name, lat, lon).  What
@@ -1174,19 +1235,76 @@ def main() -> None:
             f"      --out <out>/bmd_daily.csv\n"
             f"then pass --stations <out>/bmd_daily.csv"
         ) from error
+    station_pool_source = "coverage_filter"
+    if args.station_ids_file:
+        station_pool_path = Path(args.station_ids_file)
+        if not station_pool_path.is_file():
+            raise SystemExit(f"station ID pool does not exist: {station_pool_path}")
+        requested = [
+            value.strip() for value in station_pool_path.read_text().splitlines()
+            if value.strip()
+        ]
+        if not requested or len(requested) != len(set(requested)):
+            raise SystemExit(
+                f"{station_pool_path} must contain unique, non-empty station IDs"
+            )
+        station_ids = np.asarray(stations.ids, dtype=str)
+        missing = sorted(set(requested) - set(station_ids.tolist()))
+        if missing:
+            raise SystemExit(
+                f"{station_pool_path} requests stations absent from the V7 "
+                f"domain/BMD file: {missing}"
+            )
+        keep = np.flatnonzero(np.isin(station_ids, requested))
+        stations = stations.subset(keep)
+        gauge_mm = gauge_mm[:, keep]
+        station_pool_source = str(station_pool_path)
     if len(stations) < 5:
         raise SystemExit(f"only {len(stations)} stations fall inside {fine_grid.name}")
-    n_withheld = max(1, min(len(stations) - 1,
-                            int(round(args.withhold * len(stations)))))
-    withheld = neighbored_holdout(
-        stations.lat, stations.lon, n_withheld,
-        radius_km=args.holdout_neighbor_km,
-        max_gap_deg=args.holdout_max_gap_deg,
-    )
+    if args.assimilate_all_stations:
+        withheld = np.asarray([], dtype=np.int64)
+        holdout_source = "all_stations"
+    elif args.holdout_station_ids_file:
+        holdout_path = Path(args.holdout_station_ids_file)
+        if not holdout_path.is_file():
+            raise SystemExit(f"holdout ID file does not exist: {holdout_path}")
+        requested = [
+            value.strip() for value in holdout_path.read_text().splitlines()
+            if value.strip()
+        ]
+        if not requested or len(requested) != len(set(requested)):
+            raise SystemExit(
+                f"{holdout_path} must contain unique, non-empty station IDs"
+            )
+        station_ids = np.asarray(stations.ids, dtype=str)
+        missing = sorted(set(requested) - set(station_ids.tolist()))
+        if missing:
+            raise SystemExit(
+                f"{holdout_path} requests IDs outside the eligible station pool: "
+                f"{missing}"
+            )
+        withheld = np.flatnonzero(np.isin(station_ids, requested)).astype(np.int64)
+        if len(withheld) >= len(stations):
+            raise SystemExit("the holdout file cannot withhold every station")
+        holdout_source = str(holdout_path)
+    elif args.holdout_folds > 1:
+        withheld = spread_folds(
+            stations.lat, stations.lon, args.holdout_folds
+        )[args.holdout_fold]
+        holdout_source = f"spread_fold_{args.holdout_fold}_of_{args.holdout_folds}"
+    else:
+        n_withheld = max(1, min(len(stations) - 1,
+                                int(round(args.withhold * len(stations)))))
+        withheld = neighbored_holdout(
+            stations.lat, stations.lon, n_withheld,
+            radius_km=args.holdout_neighbor_km,
+            max_gap_deg=args.holdout_max_gap_deg,
+        )
+        holdout_source = f"neighbored_fraction_{args.withhold:g}"
     assimilated = np.setdiff1d(np.arange(len(stations)), withheld)
     print(
         f"stations: {len(stations)} total, {len(assimilated)} assimilated, "
-        f"{len(withheld)} withheld (neighboured, {args.holdout_neighbor_km:g} km)",
+        f"{len(withheld)} withheld ({holdout_source})",
         flush=True,
     )
 
@@ -1284,6 +1402,12 @@ def main() -> None:
             "assimilated": [str(s) for s in stations.ids[assimilated]],
             "withheld": [str(s) for s in stations.ids[withheld]],
             "holdout_neighbor_km": args.holdout_neighbor_km,
+            "holdout_source": holdout_source,
+            "holdout_fold": args.holdout_fold if args.holdout_folds > 1 else None,
+            "holdout_folds": (
+                None if args.holdout_station_ids_file else args.holdout_folds
+            ),
+            "station_pool_source": station_pool_source,
         },
         "arms": {name: {"note": ARM_NOTES[name], "days": []} for name in arms},
     }
@@ -1297,11 +1421,11 @@ def main() -> None:
                          dtype=np.float32)
             for arm in arms
         }
-        if args.station_dump else None
+        if (args.station_dump or args.fields_zarr) else None
     )
     observed_at_stations = (
         np.full((len(days), len(stations)), np.nan, dtype=np.float32)
-        if args.station_dump else None
+        if (args.station_dump or args.fields_zarr) else None
     )
     # A mean-field dump is deliberately separate from the station dump: maps
     # are useful for checking whether a model retains 0.05-degree structure,
@@ -1318,6 +1442,24 @@ def main() -> None:
         np.zeros((len(days), fine_grid.nlat, fine_grid.nlon), dtype=bool)
         if args.map_dump else None
     )
+    field_ensembles = (
+        {
+            arm: np.full(
+                (len(days), args.members, fine_grid.nlat, fine_grid.nlon),
+                np.nan, dtype=np.float32,
+            )
+            for arm in arms
+        }
+        if args.fields_zarr else None
+    )
+    production_condition = (
+        np.full((len(days), fine_grid.nlat, fine_grid.nlon), np.nan, np.float32)
+        if args.fields_zarr else None
+    )
+    production_chirps = (
+        np.full((len(days), fine_grid.nlat, fine_grid.nlon), np.nan, np.float32)
+        if args.fields_zarr else None
+    )
 
     panels: dict = {}
     truth_fields: dict = {}
@@ -1330,6 +1472,16 @@ def main() -> None:
         fine_valid = sub["fine_valid"][None].to(device)
         area = sub["cell_area"][None].to(device)
         fine_cond = sub["fine_cond"][None].to(device)
+        if production_condition is not None:
+            row, column = window.meso_local
+            cpc_0p1 = item["base_mm"][0].numpy()[
+                row:row + window.coarse_size,
+                column:column + window.coarse_size,
+            ]
+            production_condition[day_position] = np.repeat(
+                np.repeat(cpc_0p1, 2, axis=0), 2, axis=1
+            )
+            production_chirps[day_position] = fine_truth[0, 0].cpu().numpy()
 
         if args.observations == "osse":
             # Perfect observations: CHIRPS read at the station coordinates
@@ -1353,7 +1505,7 @@ def main() -> None:
         truth_withheld = truth_at_stations[withheld]
         if observed_at_stations is not None:
             observed_at_stations[day_position] = truth_at_stations
-        if not np.isfinite(truth_withheld).any():
+        if len(withheld) and not np.isfinite(truth_withheld).any():
             raise SystemExit(
                 f"no withheld station reported on {date}; the verification set "
                 f"is empty and every score would be vacuous"
@@ -1643,6 +1795,8 @@ def main() -> None:
             # so all are external checks on the analysis.
             meso_mean = meso_mm[:, 0].mean(dim=0).cpu().numpy()
             fine_mean = fine_mm[:, 0].mean(dim=0).cpu().numpy()
+            if field_ensembles is not None:
+                field_ensembles[arm][day_position] = fine_mm[:, 0].cpu().numpy()
             meso_valid = np.asarray(meso_ds.fixed_valid).astype(bool)
             fine_keep = sub["fine_valid"][0].numpy().astype(bool)
             if map_means is not None:
@@ -1714,11 +1868,23 @@ def main() -> None:
 
     for arm in arms:
         entries = results["arms"][arm]["days"]
-        results["arms"][arm]["mean"] = {
-            key: float(np.nanmean([e["withheld"].get(key, np.nan) for e in entries]))
-            for key in ("crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm",
-                    "spread_skill")
-        }
+        if len(withheld):
+            results["arms"][arm]["mean"] = {
+                key: float(np.nanmean([
+                    e["withheld"].get(key, np.nan) for e in entries
+                ]))
+                for key in (
+                    "crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm",
+                    "spread_skill",
+                )
+            }
+        else:
+            results["arms"][arm]["mean"] = {
+                key: None for key in (
+                    "crps_mm", "mae_mm", "bias_mm", "rmse_mm", "spread_mm",
+                    "spread_skill",
+                )
+            }
         keys = sorted({k for e in entries for k in e.get("pattern_r", {})})
         results["arms"][arm]["pattern_r"] = {
             key: float(np.nanmean([e["pattern_r"].get(key, np.nan) for e in entries]))
@@ -1763,6 +1929,69 @@ def main() -> None:
             **{f"meanfield_{arm}": values for arm, values in map_means.items()},
         )
         results["map_dump"] = str(map_path)
+
+    if args.fields_zarr:
+        field_path = Path(args.fields_zarr)
+        row, column = window.meso_local
+        native_imerg = imerg_streams["native"]["precipitation"][
+            :, row:row + window.coarse_size,
+            column:column + window.coarse_size,
+        ]
+        scope = {
+            "start": str(gauge_times[0].astype("datetime64[D]")),
+            "end": str(gauge_times[-1].astype("datetime64[D]")),
+            "model_start": str(day_times[0].astype("datetime64[D]")),
+            "model_end": str(day_times[-1].astype("datetime64[D]")),
+            "n_days": int(len(days)),
+            "members": int(args.members),
+            "seed": int(args.seed),
+            "n_steps": int(args.n_steps),
+            "model_family": "V7 two-stage",
+            "arm": arms[0] if len(arms) == 1 else arms,
+            "assimilate_all_stations": True,
+            "holdout_source": holdout_source,
+            "station_pool_source": station_pool_source,
+            "gauge_day_offset": int(args.gauge_day_offset),
+            "time_coordinate": "BMD/IMERG observation date",
+            "model_and_chirps_time_offset_days": -int(args.gauge_day_offset),
+            "meso_checkpoint": meso_info,
+            "allocation_checkpoint": alloc_info,
+            "satellite_r_multiplier": {
+                arm: arm_imerg_r.get(arm, args.imerg_r_multiplier) for arm in arms
+            },
+        }
+        write_physical_ensemble_zarr(
+            field_path,
+            fields=field_ensembles,
+            method_specs={
+                arm: {
+                    "note": ARM_NOTES[arm],
+                    "imerg_r_multiplier": arm_imerg_r.get(
+                        arm, args.imerg_r_multiplier
+                    ),
+                    "guidance_gamma": arm_guidance_gamma[arm],
+                    "huber_delta": arm_huber_delta[arm],
+                }
+                for arm in arms
+            },
+            selected_times=gauge_times,
+            grid=fine_grid,
+            valid=np.asarray(subgrid_ds.valid[
+                window.fine_origin[0]:window.fine_origin[0] + window.fine_size,
+                window.fine_origin[1]:window.fine_origin[1] + window.fine_size,
+            ], bool),
+            condition=production_condition,
+            chirps=production_chirps,
+            raw_imerg_mm=native_imerg,
+            imerg_factor=int(imerg_streams["native"]["observation_factor"]),
+            station_ids=np.asarray(stations.ids, dtype=str),
+            station_lat=stations.lat,
+            station_lon=stations.lon,
+            gauge_mm=gauge_mm,
+            assim_idx=assimilated,
+            scope=scope,
+        )
+        results["fields_zarr"] = str(field_path)
 
     # Named for the experiment it actually is.  A file called ..._osse.json
     # holding real-data results is a trap for whoever opens it in a month.
@@ -2014,6 +2243,15 @@ def _meso_grid(window):
 
 
 def report(results: dict, arms: list[str]) -> None:
+    if not results["stations"]["withheld"]:
+        print("\n" + "=" * 78)
+        print("ALL-STATION PRODUCTION RUN")
+        print("=" * 78)
+        print(
+            "No gauge score is reported because every eligible station entered "
+            "the likelihood. Use the separate five withheld-fold runs for skill."
+        )
+        return
     print("\n" + "=" * 78)
     print(
         "WITHHELD-GAUGE SCORES  "

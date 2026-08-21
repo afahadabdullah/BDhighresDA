@@ -8,8 +8,8 @@ IDs, ensemble size, and sampling horizon.  It compares the frozen winners in
 two like-for-like rows:
 
 * gauges only: V7 ``da_meso`` vs CPCv2 ``guided_s6_g010_t100``;
-* simultaneous: V7 ``da_sim`` at the selected IMERG R multiplier 9 vs CPCv2
-  ``v2_simul_s04_ig010``.
+* simultaneous: any available V7 ``da_sim``/``da_sim_r*`` arm vs CPCv2
+  ``v2_simul_s04_ig010``. The current production pilot uses only ``r81``.
 
 When the V7 dump also contains ``da_sim_r*`` calibration arms, each is scored
 against that same CPCv2 simultaneous ensemble.  This keeps dates, observations,
@@ -38,7 +38,10 @@ COMPARISONS = {
 
 def _available_comparisons(v7: np.lib.npyio.NpzFile) -> dict[str, tuple[str, str]]:
     """Base winners plus any optional V7 simultaneous R-calibration arms."""
-    comparisons = dict(COMPARISONS)
+    comparisons = {
+        label: pair for label, pair in COMPARISONS.items()
+        if f"station_{pair[0]}" in v7
+    }
     if "arm_names" in v7:
         ordered = np.asarray(v7["arm_names"], dtype=str).tolist()
         arms = [
@@ -139,14 +142,19 @@ def _align_cpc_to_v7(
     )
 
     v7_times = np.asarray(v7["times"]).astype("datetime64[D]")
-    cpc_times = np.asarray(cpc["times"]).astype("datetime64[D]")
-    if not np.array_equal(v7_times, cpc_times):
+    cpc_all_times = np.asarray(cpc["times"]).astype("datetime64[D]")
+    cpc_lookup = {day: index for index, day in enumerate(cpc_all_times)}
+    missing_dates = [str(day) for day in v7_times if day not in cpc_lookup]
+    if missing_dates:
         raise ValueError(
-            "observation dates differ: V7 "
-            f"{v7_times.astype(str).tolist()} vs CPCv2 {cpc_times.astype(str).tolist()}"
+            f"CPCv2 does not contain V7 observation dates {missing_dates}"
         )
+    cpc_time_index = np.asarray([cpc_lookup[day] for day in v7_times], dtype=int)
+    cpc_times = cpc_all_times[cpc_time_index]
     v7_model_times = np.asarray(v7["model_times"]).astype("datetime64[D]")
-    cpc_model_times = np.asarray(cpc["model_times"]).astype("datetime64[D]")
+    cpc_model_times = np.asarray(cpc["model_times"]).astype("datetime64[D]")[
+        cpc_time_index
+    ]
     if not np.array_equal(v7_model_times, cpc_model_times):
         raise ValueError(
             "model dates differ: V7 "
@@ -177,7 +185,9 @@ def _align_cpc_to_v7(
     eval_idx = np.flatnonzero(np.isin(v7_ids, sorted(v7_eval_ids)))
 
     observed = np.asarray(v7["observed_mm"], dtype=np.float64)
-    cpc_observed = np.asarray(cpc["gauge_mm"], dtype=np.float64)[:, cpc_order]
+    cpc_observed = np.asarray(cpc["gauge_mm"], dtype=np.float64)[
+        cpc_time_index
+    ][:, cpc_order]
     if observed.shape != cpc_observed.shape:
         raise ValueError(
             f"observation shape differs: V7 {observed.shape}, CPCv2 {cpc_observed.shape}"
@@ -198,7 +208,9 @@ def _align_cpc_to_v7(
         _required(v7, v7_path, v7_key)
         _required(cpc, cpc_path, cpc_key)
         v7_members = np.asarray(v7[v7_key], dtype=np.float64)
-        cpc_members = np.asarray(cpc[cpc_key], dtype=np.float64)[:, :, cpc_order]
+        cpc_members = np.asarray(cpc[cpc_key], dtype=np.float64)[
+            cpc_time_index
+        ][:, :, cpc_order]
         if v7_members.shape != cpc_members.shape:
             raise ValueError(
                 f"{label}: ensemble shape differs: V7 {v7_members.shape}, "

@@ -186,6 +186,8 @@ def test_zarr_archive_is_xarray_compatible_and_preserves_real_zeros(tmp_path):
     assert dataset.valid.values.tolist() == valid.tolist()
     assert dataset.cpc.values[0, 0, 0] == 0.0
     assert dataset.imerg.values[0, 0, 0] == 0.0
+    assert dataset.imerg.attrs["spatial_support"] == "0.4-degree"
+    assert dataset.imerg.attrs["observation_factor"] == 8
     assert dataset.gauge.values[0, 0] == 0.0
     np.testing.assert_allclose(
         dataset.ensemble_mean.sel({"method": "analysis"}).values[:, valid],
