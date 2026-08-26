@@ -1,25 +1,29 @@
-# BRISHTI-05
+# SURMA-Flow
 
-**Bangladesh Rainfall Integration of Satellite, Hydrometeorological, and
-Terrestrial Information at 0.05°.**
+**Score-guided Unified Rainfall Modeling and Assimilation with Rectified
+Flow.**
 
-BRISHTI-05 is a 30-member, daily precipitation-analysis workflow for
-Bangladesh on a 0.05° (about 5 km) grid. It is generated with **SURMA-Flow
-v1.0**: **Score-guided Unified Rainfall Modeling and Assimilation with
-Rectified Flow**. The learned fine-scale prior uses historical CPC, ERA5, and
-CHIRPS; at analysis time it is guided jointly by BMD rain gauges and GPM IMERG
-V07B satellite accumulations. The repository name, `BDhighresDA`, is retained
-for continuity.
+SURMA-Flow is a conditional, rectified-flow generative model and score-guided
+data-assimilation framework for daily high-resolution rainfall analysis. The
+current **SURMA-Flow v1.0** prior learns fine-scale rainfall structure from
+historical CPC, ERA5, and CHIRPS. At analysis time, the frozen prior is guided
+jointly by BMD rain gauges and GPM IMERG V07B satellite accumulations to
+generate a stochastic ensemble rather than a deterministic interpolation.
 
-The selected production configuration is **SURMA-Flow v1.0**, using
-simultaneous BMD and 0.4° IMERG guidance and a 30-member ensemble. Its legacy
-machine key, `v2_simul_s04_ig010`, is retained only in reproducibility
-metadata. See the full, versioned description in
-[the methodology](docs/METHODOLOGY.md).
+This repository, `BDhighresDA`, is the development and reproducibility codebase
+for SURMA-Flow. Its first released analysis product is **BRISHTI-05**
+(*Bangladesh Rainfall Integration of Satellite, Hydrometeorological, and
+Terrestrial Information at 0.05°*): a 30-member daily precipitation reanalysis
+over Bangladesh on a 0.05° (about 5 km) grid.
 
-## What each data source does
+## SURMA-Flow v1.0
 
-| Source | Role in BRISHTI-05 | Not a claim of |
+The selected configuration uses simultaneous BMD and 0.4° IMERG guidance and a
+30-member ensemble. Its legacy machine key, `v2_simul_s04_ig010`, is retained
+only in reproducibility metadata. The full model and BRISHTI-05 product
+definition is in [the methodology](docs/METHODOLOGY.md).
+
+| Source | SURMA-Flow role | Not a claim of |
 |---|---|---|
 | CPC 0.5° | Coarse conditioning and residual baseline for the learned prior | Independent verification |
 | ERA5 | Atmospheric conditioning variables | Rainfall truth |
@@ -33,7 +37,7 @@ or IMERG describe agreement with those products; they are not independent-truth
 scores. A native 0.05° grid does not by itself establish resolved 0.05°
 physical skill.
 
-## Production contract
+## BRISHTI-05 release contract
 
 - **Grid:** Bangladesh analysis domain, 128 × 128 cells at 0.05°.
 - **Ensemble:** 30 stochastic members per day.
