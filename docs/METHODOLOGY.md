@@ -1,527 +1,341 @@
-# BDhighresDA — Methodology
+# BRISHTI-05 methodology
 
-A 5 km daily precipitation reanalysis for Bangladesh. **ERA5 conditions a
-generative prior; everything that actually measured rainfall — GPM IMERG and
-BMD rain gauges — is assimilated as an observation at inference time.**
+**BRISHTI-05** is the public name for the Bangladesh daily precipitation
+analysis produced by this repository. It means **Bangladesh Rainfall
+Integration of Satellite, Hydrometeorological, and Terrestrial Information at
+0.05°**; *brishti* is Bangla for rain.
 
-The approach follows Manshausen et al. (2025, *JAMES*) — a generative prior
-over km-scale fields with observations assimilated zero-shot at sampling time —
-with the diffusion prior replaced by a **conditional rectified-flow
-(flow-matching) model**, which recent work finds gives better spatial skill at
-about one third of the sampling cost (Wetherell 2026).
+The current released lineage is implemented under the historical machine key
+`v2_simul_s04_ig010` and is sometimes called “CPCv2” in scripts, checkpoint
+paths, and archived Zarr metadata. That is an implementation lineage, not the
+product name. In publications, figures, and user-facing data, call the product
+**BRISHTI-05** and retain the machine key in provenance metadata.
 
----
+BRISHTI-05 is a **daily 0.05° (about 5 km) ensemble analysis over Bangladesh**.
+It combines a learned fine-scale prior conditioned on the coarse CPC rainfall
+analysis and ERA5 atmospheric state with inference-time assimilation of BMD
+gauges and GPM IMERG. It is an analysis product, not an observation and not a
+gridded truth data set.
 
-## 0. Pipeline overview — two phases, and only one of them sees observations
+## 1. Product contract
 
-![BDhighresDA pipeline](figures/pipeline.png)
-
-<sub>Vector version: [`figures/pipeline.svg`](figures/pipeline.svg) · source and
-regeneration: [`figures/pipeline.src.svg`](figures/pipeline.src.svg),
-`python scripts/make_pipeline_figure.py`</sub>
-
-**Phase 1 — training (offline, once).** ERA5 at 0.25° plus static fields
-condition a flow-matching U-Net, which is trained against CHIRPS at 0.05° as
-the target. That is the whole of training: coarse background in, 5 km
-rainfall out. **No observation ever enters this phase.** What the network
-learns is exactly `p(x_5km | ERA5)` — a downscaler, and nothing more.
-
-**Phase 2 — inference (every day, no retraining).** For a given day, ERA5
-conditions the sampler and the ODE is integrated from noise to a 5 km field.
-Without observations, that gives the **background**: a plausible high-res
-realisation consistent with ERA5. Turn observations on and the *same* frozen
-network is used, but at every integration step the state is nudged by the
-gradient of the observation likelihood — IMERG footprints and BMD gauges
-together. That gives the **analysis**.
-
-The separation is the point. Because the network never saw an observation,
-you can add gauges, drop a satellite product, switch to IMERG Early for
-near-real-time, or assimilate radar later — none of it requires retraining.
-That is what "zero-shot data assimilation" means, and it is the property this
-whole design exists to preserve.
-
----
-
-## 1. The problem
-
-| | |
+| Item | Current BRISHTI-05 production contract |
 |---|---|
-| **Background** | ERA5, 0.25° (~28 km), 1940–present, hourly → daily |
-| **Observation 1** | GPM IMERG Final, 0.1° (~10 km), 2000-06 → present, daily |
-| **Observation 2** | BMD daily rain gauges, ~35 stations, 2020–2025 |
-| **Prior training target** | CHIRPS v2.0 daily 0.05°, 1981–present |
-| **Static terrain** | Copernicus DEM GLO-90 (2021), aggregated from ~90 m to 0.05° |
-| **Output** | 0.05° (~5 km) daily precipitation, 16-member ensemble |
-
-ERA5 at 28 km cannot resolve the two features that dominate Bangladesh
-rainfall: the Meghalaya/Shillong orographic barrier, which produces some of
-the highest annual totals on Earth ~40 km north of the border, and the
-mesoscale organisation of monsoon convection. IMERG sees *where* it rained at
-10 km but carries known regime-dependent biases. The gauges are accurate but
-sparse — roughly one per 4,200 km². The generative prior supplies the
-fine-scale structure ERA5 lacks; IMERG constrains the pattern; the gauges
-constrain the amplitude.
-
-The terrain input is the public Copernicus GLO-90 digital surface model,
-area-averaged onto the exact WIDE grid before elevation and slope channels are
-derived. Although GLO-90 is formally a surface rather than bare-earth terrain
-model, vegetation and building-height effects become negligible relative to
-regional relief after aggregation to a 0.05° (~5 km) cell.
-
-## 2. Why generative
-
-A deterministic downscaler trained on MSE produces the *conditional mean*,
-which for precipitation is over-smooth and systematically under-represents
-extremes — exactly the values a flood-risk application needs. A generative
-model samples from `p(x | ERA5)`, giving sharp fields and an ensemble that
-quantifies the real ambiguity in the 28 km → 5 km map.
-
-Assimilation then targets
-
-```
-p(x | y, ERA5)  ∝  p(x | ERA5) · p(y | x)
-```
-
-where `y` stacks the IMERG footprints and the gauge values. The prior handles
-the first factor; the second is a Gaussian likelihood evaluated through a
-differentiable observation operator. **The network is never trained on
-observations.** This "zero-shot DA" property is the central claim of the
-Manshausen paper and the main reason to prefer it over an end-to-end fusion
-model, which must be retrained whenever the observing network changes — a
-serious problem for a country whose gauge network has grown and shifted over
-four decades, and for a satellite product that reissues major versions every
-few years.
-
-## 3. The prior
-
-### 3.1 Conditioning: six ERA5 surface channels
-
-The prior is conditioned on ERA5 and time-invariant fields. Nothing else — and
-deliberately very little of ERA5.
-
-| Channel | Question it answers |
-|---|---|
-| `tp` | How much rain did the background model itself produce? |
-| `tcwv` | How much moisture is in the column? |
-| `cape` | Is the atmosphere unstable enough to convect it out? |
-| `u10` | What is the east–west component of the low-level flow? |
-| `v10` | What is the north–south component of the low-level flow? |
-| `msl` | What is the surrounding synoptic circulation pattern? |
-
-The static inputs remain sqrt-elevation, slope, land–sea mask, four lat/lon
-positional-encoding channels, and sin/cos day-of-year.
-
-**Why so few.** With ~14,000 daily training samples, every additional channel
-is capacity spent on something the network has to learn to ignore. These six
-cover the available column moisture, low-level flow, synoptic circulation,
-instability, and the background model's estimate of rainfall. The wide-domain
-wind and pressure fields, together with static orography, let the convolutional
-network identify Bay of Bengal inflow and terrain-relative flow.
-
-Exact vertically integrated eastward/northward moisture flux is unavailable in
-Earthmover's free surface store. It is not assumed to be equivalent to surface
-wind: instead, IVT is an explicit future ablation. ERA5 `tp` already embeds the
-forecast model's three-dimensional circulation and moisture convergence, so
-omitting IVT is a defensible first baseline rather than removing all dynamical
-information.
-
-`ERA5 tp` deserves a note: it is a *model* field, the background's own
-parameterised guess at rainfall, not a measurement. That is precisely why it
-belongs in the prior and not in the likelihood.
-
-**Additional predictors are ablations, not defaults.** Candidates include
-convective precipitation, cloud cover, 2 m temperature/dewpoint and exact IVT
-from CDS. Add them only if validation CRPS and extreme-rain skill improve;
-report the comparison either way.
-
-### 3.2 Rectified flow / stochastic interpolant
-
-```
-x_t = t·x₁ + (1−t)·x₀ ,   x₀ ~ N(0, I),   x₁ ~ p_data
-```
-
-The network `u_θ(x_t, t, c)` regresses the conditional velocity `x₁ − x₀`
-(Lipman et al. 2023; Albergo et al. 2025), with `c` the conditioning stack
-above concatenated on the channel axis.
-
-**Training target `x₁` is CHIRPS 0.05° daily, 1981–2025.** Because the prior
-never touches IMERG, it is not limited to the satellite era: it trains on the
-full 44-year record in one stage, ~14,000 daily fields for 1981–2018 training.
-
-### 3.3 Conditioning dropout gives two models for the price of one
-
-10% of training samples have `c` zeroed. The same weights are therefore usable
-as a **conditional downscaler** (pass `c`) and as an **unconditional prior**
-`p(x₁)` (pass `c = None`) — the exact object Manshausen et al. train
-separately. The latter gives you a clean ablation: unconditional prior +
-observations only, isolating what ERA5 actually contributes.
-
-### 3.4 From velocity to score, and back
-
-With `x̂₁ = x_t + (1−t)u` and `x̂₀ = x_t − t·u`:
-
-```
-score(x_t) = ∇ₓ log p_t(x_t) = −x̂₀ / (1 − t)                       (A)
-u(x_t)     = ( x_t + (1 − t)·score ) / t                            (B)
-Δu         = ((1 − t) / t) · Δscore                                 (C)
-```
-
-Equation (C) is what lets the score-based DA guidance machinery drop straight
-into a flow-matching sampler. Implemented in `src/bdhires/models/flow.py`,
-unit-tested in `scripts/smoke_test.py`.
-
-## 4. Observations
-
-Both observing systems enter through one likelihood. There is no conditioning
-path for either.
-
-### 4.1 Operators
-
-| Stream | n | Operator `H` | Notes |
-|---|---|---|---|
-| BMD gauges | ~35 | bilinear interpolation to lat/lon | `grid_sample`, differentiable |
-| IMERG | ~3,500 | exact 2×2 block mean | 0.05° → 0.1° |
-
-The IMERG operator is *exact*, not approximate: both the `wide` and `bd` grids
-have edges on multiples of 0.1°, so each 0.05° cell nests perfectly inside one
-IMERG footprint and the forward operator is a plain 2×2 average with no
-interpolation error. (Verified numerically in the smoke test.)
-
-Both operators act in **transformed** space (`log1p`, §5), so observations are
-passed through the same transform as the target before comparison.
-
-### 4.2 Likelihood and guidance
-
-Following Rozet & Louppe (2024) Eq. (3) / Manshausen et al. Eq. (3):
-
-```
-p(y | x_t) = N( y | H(x̂₁),  R + Γ·(1−t)²/t² )
-```
-
-using `μ_t = t`, `σ_t = 1−t` for our interpolant. Observations are heavily
-down-weighted early in the trajectory, when the state is mostly noise, and
-approach their true error variance as `t → 1`. `Γ` is a scalar; Manshausen et
-al. found `1e-3` better than the `1e-2` of the original SDA paper,
-specifically for precipitation. The guidance gradient is taken **through the
-network** (diffusion posterior sampling), so a guided sample costs ~2–3× an
-unguided one — but that cost is independent of how many observations there
-are, which is why the 3,500 IMERG footprints are essentially free on top of
-the 35 gauges.
-
-This is the direct analogue of the 3D-Var cost function
-
-```
-J = (x_b − x)ᵀB⁻¹(x_b − x) + (y − H(x))ᵀR⁻¹(y − H(x))
-```
-
-with the learned prior replacing the `B`-weighted background term — except the
-prior is a full non-Gaussian distribution rather than a Gaussian with a
-hand-tuned covariance, which is precisely why it can produce sharp,
-non-Gaussian rainfall structure that 3D-Var and OI cannot.
-
-### 4.3 Observation error
-
-`R` is diagonal, with two contributions per stream:
-
-- **measurement error** — small for gauges (~5%), larger and
-  regime-dependent for IMERG
-- **representativeness error** — the mismatch between what the instrument
-  senses and what a model cell means. For a point gauge versus a 5 km cell
-  average of daily convective rainfall this is the *dominant* term. For IMERG
-  it is small, because `H` is exact.
-
-Set them badly and the failure modes are opposite and both visible:
-under-specify `R` and the analysis chases individual observations and grows
-bullseyes; over-specify it and the observations do nothing. Tune on withheld
-stations, and measure the IMERG term rather than guessing it
-(`scripts/07_bias_correct_imerg.py --fit-error-model`).
-
-The intended division of labour is **IMERG constrains the pattern, gauges
-constrain the amplitude**, which in practice means σ_IMERG ≈ 3–5× σ_gauge.
-
-### 4.4 IMERG must be de-biased first
-
-A Gaussian likelihood assumes the observation is unbiased. IMERG is not: over
-South Asia it over-detects light rain, and it underestimates orographic
-rainfall along the Meghalaya barrier because passive-microwave retrievals miss
-shallow warm-rain processes over land. A likelihood cannot discover and
-correct that — it will faithfully pull the analysis toward the biased value.
-
-So `scripts/07_bias_correct_imerg.py` fits, on the training years only, a
-per-cell per-season quantile map from IMERG to CHIRPS with wet-day frequency
-adaptation (IMERG's drizzle over-detection has to be removed before the
-quantile map, or it propagates straight through). **Skipping this step is the
-main way this design goes wrong.**
-
-### 4.5 What this buys, relative to conditioning on IMERG
-
-Feeding IMERG to the network as a predictor would also work, and a conditional
-network could learn its biases implicitly. Assimilating it instead buys:
-
-1. **20 extra years of training data** — the prior is not tied to the
-   satellite era, so it trains on 1981–2018 in one stage rather than
-   2001–2018, and the product can extend back to 1981 with gauges only.
-2. **Version and latency independence** — swap IMERG V07 → V08, or Final
-   (3.5-month latency) → Early (4-hour latency, larger `R`) for a
-   near-real-time product, with no retraining.
-3. **An inspectable weighting** — the satellite/gauge trade-off is an explicit
-   number you tune and report, not something buried in network weights.
-4. **Innovation diagnostics** — you get `y − H(x̂)` for IMERG, i.e. a map of
-   where the satellite disagrees with the ERA5-informed prior. That is a
-   publishable result on its own.
-
-The cost is that the bias correction in §4.4 becomes mandatory, and that dense
-observations can over-constrain the ensemble — see §6.
-
-## 5. Precipitation transform
-
-Daily rainfall has an atom at zero and a heavy tail. Both reference papers hit
-tail problems from opposite directions: Manshausen et al. used log/exp and got
-occasional unphysical extremes on inversion (their Appendix C); Wetherell
-(2026) used sqrt and got a dry bias in the far tail.
-
-`src/bdhires/transforms.py` implements `log1p`, `sqrt`, `cbrt` and `none`
-behind one interface. **Default: `log1p` with ε = 0.1 mm** (roughly the BMD
-reporting resolution), then standardisation on training-period statistics.
-Treat the transform as a first-class ablation: run `log1p` vs `sqrt` and
-compare the upper tail of the PDF and FSS at 100 mm/day.
-
-## 6. Ensemble spread — designing against under-dispersion
-
-**Every published generative-DA study reports under-dispersive ensembles.**
-Manshausen et al. state it directly for their km-scale system and name the
-mechanism: the Gaussian approximation used for the likelihood score is
-mode-seeking. Assume this project will hit the same wall, and design against
-it rather than patching it afterwards.
-
-### 6.1 Where the spread is actually going
-
-Five distinct mechanisms, worth separating because the fixes differ:
-
-1. **The prior is under-dispersive.** Manshausen et al. Appendix C found
-   generated states had lower variance than the training distribution. With
-   ~14k training samples, strong EMA and a smooth denoiser, this is expected.
-2. **Deterministic ODE sampling.** With the probability-flow ODE, *all*
-   randomness comes from the `x₀` draw, and the learned flow is a smooth map
-   that tends to contract that Gaussian onto the data manifold. Most
-   generative-DA papers sample this way, and the toy test in
-   `scripts/smoke_test.py` reproduces the contraction: a prior whose true sd
-   is 0.50 samples at 0.43.
-3. **Mode-seeking guidance.** Replacing the true `p(x₀|x_t)` with a Gaussian
-   centred on the posterior mean pulls every member toward the same point.
-4. **Unperturbed observations.** If all members assimilate the identical `y`,
-   the analysis ensemble is too narrow — the exact same result as an EnKF with
-   unperturbed observations, a textbook cause of variance collapse.
-5. **Too many, too-confident observations.** ~3,500 IMERG footprints with a
-   small `R` will pin the field almost everywhere and reduce the analysis to a
-   deterministic downscaling of the satellite.
-
-### 6.2 Fixes, in order of leverage
-
-**(a) Perturbed observations — do this first.** Draw
-`y_r = y + ε_r, ε_r ~ N(0, R)` independently per member. Free at inference,
-statistically the right thing to do (each member is then a posterior draw
-given a plausible realisation of the observation error), and it directly
-removes mechanism 4. Implemented in
-`bdhires.da.observation.perturb_observations`; on by default.
-
-Crucially, the IMERG perturbations must be **spatially correlated**. Satellite
-retrieval errors decorrelate over tens of kilometres; white noise on a 0.1°
-field averages out over any neighbourhood and adds essentially no spread at
-the scales anyone cares about. `error_corr_cells: 3.0` (~30 km) is the
-starting point.
-
-**(b) Prior temperature — the knob that actually inflates.** Sampling the
-tempered density `p^(1/T)` means using `score/T`. Converting that to a
-velocity through Eq. (B) gives, exactly,
-
-```
-u_T = u_θ + (1 − 1/T) · x̂₀ / t
+| Fine grid | 0.05° Bangladesh grid, with a permanent land/valid mask |
+| Public product | Daily physical precipitation ensemble, ensemble mean, and ensemble SD |
+| Ensemble size | 30 members for the 2021–2024 production archive |
+| Learned fine-scale target | CHIRPS daily precipitation at 0.05° |
+| Prior conditioning | Original CPC daily precipitation at 0.5°, CPC validity, ERA5 state, static fields, and seasonal encoding |
+| Inference-time observations | BMD daily gauges and prepared GPM IMERG Final |
+| Selected production method | `v2_simul_s04_ig010` / BRISHTI-05 simultaneous S04 analysis |
+| Production archive | May–September 2021–2023 and May–June 2024 (520 BMD-labelled days) |
+
+The product must be interpreted at the support of each datum. BMD is a point
+measurement, CPC is a coarse conditioning analysis, IMERG is assimilated as a
+0.4° footprint observation in the production method, and CHIRPS is the
+fine-resolution training target. None of CPC, IMERG, or CHIRPS is designated
+as gridded truth in real-data evaluation.
+
+## 2. Separation of learning, conditioning, and assimilation
+
+The three information roles are intentionally different.
+
+1. **Training target — CHIRPS.** The flow model learns the distribution of
+   fine-scale daily fields from CHIRPS. CHIRPS is never treated as independent
+   verification for this model family.
+2. **Conditioning — CPC and ERA5.** The frozen network receives CPC rainfall,
+   CPC coverage, ERA5 atmospheric fields, static geography, and season. CPC is
+   therefore part of the model background, not an observation added by the DA
+   likelihood.
+3. **Assimilation — BMD and IMERG.** At inference, the sampler adds likelihood
+   guidance from BMD and IMERG. Neither BMD nor IMERG is fed as a learned
+   conditioning channel or used as a training target.
+
+This distinction is essential. BRISHTI-05 is not a purely ERA5-conditioned
+downscaler, and it is not an end-to-end neural fusion model of all observing
+systems. It is a CPC- and ERA5-informed generative prior whose posterior is
+updated with available BMD and IMERG observations.
+
+In compact notation, the analysis samples a field conditional on the
+background inputs and observations: `p(fine rain | CPC, ERA5, static, BMD,
+IMERG)`. The learned network provides the first part of that distribution;
+the observation likelihood supplies the BMD and IMERG update during sampling.
+
+## 3. Learned CPCv2 prior
+
+### 3.1 Inputs and target
+
+The `prior_h100_cpc_v2` checkpoint is trained with the configuration in
+[`configs/train_h100_cpc_v2.yaml`](../configs/train_h100_cpc_v2.yaml). Its
+seven dynamic conditioning channels are:
+
+| Source | Channels | Role |
+|---|---|---|
+| CPC Global Unified | `cpc_precip`, `cpc_valid` | Coarse rainfall amount and availability at the original 0.5° support |
+| ERA5 | `tcwv`, `cape`, `u10`, `v10`, `msl` | Moisture, instability, low-level flow, and synoptic state |
+
+Static terrain, land/valid-mask and positional features are packed with the
+dynamic channels; sine/cosine day-of-year encoding is appended at sampling.
+The packing code records the exact channel order in the Zarr and statistics
+metadata, and inference reads that metadata from the checkpoint rather than
+assuming a generic configuration.
+
+The target is daily CHIRPS precipitation at 0.05°. CPC and CHIRPS
+precipitation are transformed with the square-root transform before
+normalisation. The network predicts the standardised residual between
+transformed CHIRPS and transformed CPC; after sampling, that residual is added
+back to the CPC baseline and inverse-transformed to physical mm/day. Thus a
+zero residual reproduces the CPC background on the fine grid, while the flow
+learns the distribution of plausible 0.05° corrections and texture.
+
+This residual formulation means that BRISHTI-05 carries CPC's broad rainfall
+constraint even before any BMD or IMERG assimilation. It also means CPC is
+not an independent comparison product for the BRISHTI-05 background or
+analysis.
+
+### 3.2 Training procedure
+
+The CPCv2 prior uses a conditional rectified-flow U-Net with multiscale
+conditioning. It is trained on 1981–2018, validated on 2019–2020, and the
+2021–2025 interval is reserved for the downstream BMD-era experiments. The
+configuration uses 128×128 crops on the wide South Asia domain, wet-day and
+wet-crop oversampling, dropout, EMA weights, and a logit-normal time sampling
+schedule. A weak 0.5° consistency loss checks both the target and CPC-scale
+amount during training.
+
+The model represents a distribution, not a deterministic regression. Each
+ensemble member starts from an independent noise draw and is integrated to a
+physical 0.05° precipitation field. The learned flow is frozen before data
+assimilation; no BMD or IMERG observation updates its weights.
+
+## 4. Observation preparation and time contract
+
+### 4.1 BMD gauges
+
+BMD daily reports are converted from the canonical station files and screened
+for coverage. For verification runs, stations are split into five spatially
+distributed folds. Stations in the held-out fold do not enter the likelihood;
+they are used only for scoring. In the all-station production archive every
+eligible station is assimilated, so its subsequent fit is a diagnostic of
+observation adherence, not independent validation.
+
+### 4.2 IMERG
+
+IMERG is prepared from half-hourly retrievals into the BMD 03:00–03:00 UTC
+daily window. The files retain precipitation, random retrieval error, and
+retrieval-count fields. The production launcher validates exact dates, units,
+window end time, and the nested footprint grid before a GPU run starts.
+
+For BRISHTI-05 production, the prepared IMERG field is coarsened to **S04**:
+one 0.4° footprint is the exact mean of an 8×8 block of 0.05° cells. The
+sampler uses every valid S04 footprint (stride 1). This is deliberately not
+the native 0.1° IMERG grid used in some earlier experiments.
+
+### 4.3 Dates
+
+The archive uses the BMD observation label as its public daily date. For a BMD
+label `D`:
+
+- BMD and prepared IMERG represent the BMD window ending at 03 UTC on `D`.
+- The CPC/ERA5/CHIRPS background record used to generate the analysis is
+  `D − 1` (`background_day_offset = -1`).
+- The saved CHIRPS field is therefore the `D − 1` conditioning/training-family
+  field, whereas the prepared IMERG timestamp remains the BMD end date `D`.
+
+This one-day contract is stored in run metadata and must be preserved in every
+daily comparison, map title, and station table. A calendar-day product cannot
+silently substitute for the BMD-aligned IMERG file.
+
+## 5. Simultaneous data assimilation
+
+The selected BRISHTI-05 method is
+`v2_simul_s04_ig010`. It jointly assimilates BMD gauges and S04 IMERG during
+the same rectified-flow sampling trajectory. The observation operators are
+differentiable:
+
+- a physical bilinear interpolation from the 0.05° field to each BMD point;
+- an exact physical 8×8 block mean from the 0.05° field to each S04 IMERG
+  footprint.
+
+The observation mismatch is evaluated in the checkpoint's transformed
+(square-root) precipitation space. Guidance follows the likelihood gradient
+through the frozen flow model at each sampling step. The method uses 50 Heun
+steps with two bounded Langevin corrector updates in the guided sampler. The
+production variant sets prior temperature to 1.0 and uses guidance gamma 0.01
+for both the gauge and IMERG streams.
+
+### 5.1 Gauge treatment
+
+Gauges are **not** perfect observations. The production likelihood uses:
+
+| Gauge component | Value | Interpretation |
+|---|---:|---|
+| Measurement SD | 0.10 | Transformed-space measurement uncertainty |
+| Representativeness SD | 0.25 | Point gauge versus 0.05° cell-mean mismatch |
+| Combined likelihood SD | about 0.269 | Square root of the two variance contributions |
+| Gauge likelihood weight | 1.0 | Frozen 2021–2024 production setting |
+| Gauge guidance spread | 6 fine cells | Spreads the point-gauge component over roughly 30–35 km |
+
+The representativeness term is the dominant variance contribution. Each
+ensemble member receives a separately perturbed gauge draw from this finite
+error model. The gauge likelihood is therefore soft, rather than an exact
+interpolation through station reports.
+
+### 5.2 IMERG treatment
+
+The S04 IMERG likelihood uses the supplied retrieval uncertainty plus a
+transformed-space error floor and a representativeness component. In the
+production run, `observations.imerg.factor=8` and
+`observations.imerg.error_corr_cells=0.75` override the generic defaults. The
+0.75-footprint correlation length prevents the dense S04 retrieval errors from
+being treated as independent white noise. IMERG observation perturbations are
+drawn separately for every ensemble member and retain that spatial
+correlation.
+
+The frozen `ig010` selection means IMERG and gauges use the same early-time
+guidance softness (gamma 0.01). No fitted IMERG bias-correction map is applied
+by that frozen production arm. This is a documented limitation: a Gaussian
+likelihood is most defensible when its observation error and bias model are
+well calibrated, so IMERG agreement is interpreted as adherence to an
+assimilated product rather than independent skill.
+
+### 5.3 What gauge-weight experiments mean
+
+The production archive uses `gauge_weight = 1.0`. A weight `w` scales the
+gauge likelihood authority by dividing its effective variance and gamma term
+by `w`; it does not change the physical gauge error used to generate each
+member's perturbed observation draw. Values above one force closer
+assimilated-gauge fit, but may overfit point observations, create local
+bullseyes, and degrade withheld-gauge CRPS. A zero-error “perfect gauge” is
+not part of the real-data product because a point gauge is not an exact 5 km
+area-average measurement and a zero variance likelihood is singular.
+
+## 6. Ensemble interpretation
+
+BRISHTI-05 ensemble members represent conditional downscaling ambiguity plus
+the implemented observation perturbations. They do not yet include ERA5 EDA
+background members or a full structural model-error ensemble. The ensemble
+mean is useful for maps, but it can damp station-scale day-to-day variability;
+that is a property to diagnose, not a reason to add arbitrary zero-mean noise.
+
+Evaluation reports CRPS, ensemble spread divided by RMSE, empirical 90%
+coverage, rank and intensity-stratified diagnostics where available. Add
+observation uncertainty when interpreting rank and spread diagnostics. A
+spread/RMSE value below one indicates under-dispersion; a value above one is
+over-dispersion. The correct remedy must be selected on withheld stations,
+not on stations that entered the likelihood.
+
+The production sampler uses perturbed observations because assimilating the
+same observation into every member is a known source of under-dispersion. Any
+post-hoc spread calibration is a separately labelled product and must never
+replace reporting of the raw BRISHTI-05 ensemble.
+
+## 7. Verification and evidence hierarchy
+
+### 7.1 Primary evidence: withheld BMD gauges
+
+The primary real-data score is five-fold spatially rotated, withheld-gauge
+verification. Every eligible station is held out once. Report CRPS first,
+with MAE, bias, RMSE, correlation, coverage and spread diagnostics alongside.
+For the frozen 2021–2024 confirmation archive, primary aggregate scores
+exclude 2022-05-01 through 2022-05-10 because those days were used in
+configuration selection. Monthly and seasonal aggregates also exclude the
+corresponding selected period where appropriate.
+
+All-station production scores must be labelled **assimilated fit**. They are
+valuable for checking the likelihood and calibration, but cannot demonstrate
+generalization.
+
+### 7.2 Gridded comparisons are agreement, not truth
+
+The archive compares BRISHTI-05 with three product families, each at its
+native support and at a common coarse support:
+
+| Product | Evidence role | Why it is not independent truth |
+|---|---|---|
+| BMD | Independent only when withheld | Production stations were assimilated |
+| IMERG | Observation-adherence and unassimilated native-detail context | The same IMERG family was assimilated at S04 |
+| CPC | Background/conditioning consistency | CPC conditioned the prior and is the residual baseline |
+| CHIRPS | Fine-scale structural/training-family agreement | CHIRPS is the learned target |
+
+Maps and spatial summaries use the Bangladesh ADM0 polygon intersected with
+the permanent model-valid mask; all pixels outside that mask are missing and
+rendered white. A native 0.1° IMERG comparison is informative about detail
+not explicitly constrained by S04 assimilation, but it remains from the same
+observation family. Original CPC is retained at 0.5° and is never falsely
+presented as a 0.05° observation.
+
+### 7.3 Fine-scale claims
+
+An output grid at 0.05° does not by itself demonstrate correct 0.05°
+information. BRISHTI-05 fine-scale analysis should be assessed through:
+
+- exact decomposition into S04 footprint means and below-footprint residuals;
+- member and ensemble-mean spectra, variograms, residual variance, and
+  increment-locality diagnostics;
+- agreement with CHIRPS residual structure, clearly labelled as
+  training-family agreement; and, most importantly,
+- withheld BMD sub-footprint anomaly tests against coarse-product baselines.
+
+Positive fine-scale placement skill at withheld gauges is required before
+claiming demonstrated real-data subgrid resolution. Texture alone, or
+agreement with CHIRPS alone, is not enough.
+
+## 8. Archived BRISHTI-05 data
+
+The CPCv2 production archive remains the authoritative BRISHTI-05 data
+lineage:
+
+```text
+data/processed/v2_confirmatory_2021_2024/
+├── cv/                       five held-out station folds by period
+├── gridded/                  all-station 30-member production ensembles
+├── imerg_native/             prepared BMD-window IMERG
+├── imerg_s04/                exact S04 IMERG used by production DA
+├── production_metadata/      all-station run metadata
+└── evaluation/               BRISHTI-05 descriptive and verification products
 ```
 
-— one extra term, monotone in `T`. Measured on the toy prior in the smoke
-test (true sd 0.50): `T = 1.0 → 0.43`, `1.25 → 0.56`, `1.6 → 0.71`,
-`2.0 → 0.84`. Note that `T = 1` already under-disperses, which is the
-literature's finding reproduced in miniature.
+The gridded Zarr stores retain the historical method key
+`v2_simul_s04_ig010`, the full physical ensemble in mm/day, ensemble mean,
+ensemble SD, CPC conditioning field, CHIRPS field, S04 IMERG, BMD values, and
+station-assimilation flags. They are machine-readable provenance for the
+BRISHTI-05 release. Do not rename arrays in-place: map the historical method
+key to the public product name in user-facing reports.
 
-Inflating the **prior** rather than the analysis is the right place to do it.
-The observations then pull members back wherever they exist, so spread grows
-where the field is unconstrained and stays tight where it is observed — which
-is exactly the behaviour a reanalysis should have, and is not what post-hoc
-inflation of the analysis gives you.
+The Bangladesh production-contract evaluator is documented in
+[`EVALUATION_cpcv2_june2023_bangladesh.md`](EVALUATION_cpcv2_june2023_bangladesh.md).
+It produces Bangladesh-masked maps, same-station daily-variability diagnostics,
+native IMERG 0.1° and original CPC 0.5° comparisons, and conservative evidence
+labels. The broader archive evaluator and its resolved-structure tests are
+documented in [`EVALUATION_v2_gridded_archive.md`](EVALUATION_v2_gridded_archive.md).
 
-**(b′) SDE sampling — worth having, but not for this.** For any `g_t ≥ 0`,
+## 9. Reproducibility
 
+The frozen long-period production launcher is:
+
+```bash
+bash slurm/submit_v2_confirmatory_2021_2024.sh
 ```
-dx = [ u_t(x) + (g_t²/2)·score_t(x) ] dt + g_t dW
-```
 
-has the **same marginals** as the probability-flow ODE (Albergo et al. 2025).
-With `g_t² = 2η(1−t)` the drift correction collapses to `−η·x̂₀`, so the
-update is `x ← x + dt·(u − η·x̂₀) + √(2η(1−t)dt)·z`. Its purpose is to stop
-integration error and mode-seeking guidance compounding along a trajectory —
-**not** to widen the ensemble, and in a small test here it slightly *narrowed*
-it. Keep `η` as a tunable; do not rely on it for dispersion. Reporting this
-honestly is worth more than an extra knob.
+It binds the run to `runs/prior_h100_cpc_v2/best.pt`, uses 30 members, derives
+exact period-specific S04 IMERG files from the prepared BMD-window archive,
+runs five withheld-station folds plus all-station production analyses, and
+writes a dependent summary only after every task completes. The checkpoint's
+training configuration determines its compatible Zarr, statistics,
+transform, residual specification, and conditioning-channel order; inference
+does not substitute those with an arbitrary current configuration.
 
-**(c) Optional future background uncertainty from the ERA5 EDA.** ERA5 ships a
-10-member ensemble of data assimilations at 0.5°. Conditioning different
-analysis members on different EDA members would propagate *background*
-uncertainty into the ensemble — a physically meaningful source that pure
-sampling noise cannot represent. EDA is not present in Earthmover's free
-surface workflow and therefore needs a separate CDS downloader before
-`ensemble.era5_eda: true` can be enabled.
-
-Together (a)–(c) give three separate, physically interpretable spread sources:
-**downscaling ambiguity** (the x₀ draw, widened by `T`), **background error**
-(EDA members), and **observation error** (perturbed obs). That decomposition
-is itself a contribution — most published systems have only the first, and
-even that only through the x₀ draw.
-
-**(d) Loosen the guidance.** Larger `Γ` inflates the assumed likelihood
-variance and softens the pull toward observations. `Γ ∈ {1e-4, 1e-3, 1e-2}` is
-in the tuning grid. Correctly-sized `R`, especially the representativeness
-term, does the same job more honestly.
-
-**(e) Epistemic spread.** Keep U-Net dropout active at sampling time
-(`inference_dropout`), or sample across several EMA checkpoints / training
-seeds. Cheap, and it captures model uncertainty that trajectory noise cannot.
-
-**(f) Post-hoc calibration — last resort.** `bdhires.eval.calibration` provides
-multiplicative variance inflation and rank-based quantile recalibration.
-Inflation fixes the second moment and nothing else; recalibration fixes the
-distribution shape but needs a decent validation sample. **Always report the
-uncalibrated numbers alongside.**
-
-### 6.3 Measure it properly
-
-Two things that make a calibrated ensemble look broken:
-
-- **Forgetting the observation error.** When comparing spread against RMSE at
-  gauges the relation is `MSE(mean, obs) ≈ spread² + σ_obs²`. Omit `σ_obs²` and
-  a perfect ensemble looks under-dispersive. Likewise, rank histograms need
-  observation error added to the members before ranking — Manshausen et al.
-  Appendix D does this.
-- **Averaging over intensity.** Under-dispersion is almost never uniform:
-  generative priors are usually acceptable for light rain and badly
-  under-dispersive for extremes, which is the regime a flood application cares
-  about. `spread_skill_by_bin` reports it stratified by observed intensity.
-
-`calibration_report()` returns overall and per-intensity spread/skill, the
-rank histogram, a scalar flatness deviation, and the inflation factor that
-would be needed — everything for the calibration figure in one call.
-
-### 6.4 Also watch for
-
-- **Assimilation bullseyes.** Manshausen et al. Figure C1 shows precipitation
-  increments concentrated only at assimilated stations, because their prior
-  was too dry so guidance only ever nudged upward. Plot the time-mean
-  increment map; a healthy analysis spreads increments over coherent
-  meteorological structures, not discs around gauges.
-- **Ocean leakage.** CHIRPS is land-only. The valid mask is applied in the
-  loss, the sampler and the output. Do not remove it.
-
-## 7. Data volume
-
-| Split | Period | Days | Purpose |
-|---|---|---|---|
-| Train | 1981-01 → 2018-12 | ~13,900 | prior |
-| Validation | 2019 → 2020 | ~730 | early stopping, DA hyperparameters |
-| Test / product | 2021 → 2025 | ~1,800 | evaluation with real BMD gauges |
-
-Three mitigations for the fact that ~14k daily fields is small for a
-generative model, all implemented:
-
-1. **Random 128×128 crops of a 256×256 wide domain** (84–96.8°E, 16–28.8°N).
-   Multiplies the effective sample count and exposes the model to a wider
-   range of rainfall regimes — Bay of Bengal, Meghalaya, Arakan, Gangetic
-   plain. Absolute position is fed in through static sin/cos channels so
-   location-specific climatology remains learnable. No flips: they would
-   destroy the orography–rainfall relationship.
-2. **The full 44-year record**, available precisely because the prior does not
-   depend on IMERG.
-3. **Strong EMA (0.999), dropout 0.1, cosine LR.** Monitor validation
-   flow-matching loss, and check unconditional samples against the CHIRPS
-   climatology — the "climate of the model" diagnostic of Manshausen
-   Appendix C.
-
-If skill is still limited, the next lever is **more domain, not more years**:
-extend the wide grid over South Asia, train one model, evaluate over
-Bangladesh.
-
-## 8. Time alignment
-
-The most common silent bug in this kind of study.
-
-- CHIRPS day D is 00–24 UTC.
-- ERA5 `tp` is a *backward* hourly accumulation, so day D = sum of steps
-  01:00(D) … 00:00(D+1). The Earthmover extraction script applies this shift
-  before writing each daily annual file.
-- IMERG `3IMERGDF` is already 00–24 UTC and V07 daily `precipitation` is stored
-  in **mm/day**. Do not multiply it by 24. The daily field was formed upstream
-  from the valid half-hourly retrievals; ingest `precipitation_cnt` and
-  `randomError` alongside it for coverage QC and observation uncertainty.
-- State variables are averaged over 00–24 UTC of day D.
-
-Verify by correlating ERA5 `tp` with CHIRPS at lags −2…+2 days. The peak must
-be at lag 0.
-
-## 9. Experiment plan
-
-1. **Pseudo-observations first.** Treat held-out CHIRPS as the nature truth,
-   form exact physical 2×2 means as a 0.1° pseudo-satellite, and sample a
-   spatially spread 40-station pseudo-network. Assimilate 32 stations plus the
-   satellite and retain eight station locations for sub-footprint checking.
-   Compare the guided analysis with a seed- and temperature-matched background.
-   Report 0.1° footprint scores separately from 0.05° subgrid residual scores:
-   dense satellite observations can make footprint RMSE look excellent without
-   demonstrating that the model recovered fine structure. Use reconstruction,
-   error and spread maps plus rank histograms, spread–skill, intensity-binned
-   CRPS, reliability, FSS, spectra, innovations, increment maps, and metric
-   matrices. This validates the machinery and lets `Γ`, observation error and
-   prior temperature be tuned (Manshausen §4.1). It remains an optimistic upper
-   bound because CHIRPS supplies both observations and truth.
-2. **Real gauges, 3-fold cross-validation.** Rotate the withheld third; report
-   RMSE, MAE, CRPS, spread/skill overall and by intensity, and rank
-   histograms at left-out stations. Manshausen et al.'s headline was **10%
-   lower RMSE at left-out stations**; that is the number to beat.
-3. **Ablations**: unconditional prior + obs (what does ERA5 add?); gauges only
-   vs IMERG only vs both (what does each observing system add?); IMERG with
-   and without bias correction; `log1p` vs `sqrt`; Γ; `noise_scale`; perturbed
-   vs unperturbed observations; ensemble size 1/16/64.
-4. **Baselines** at the same withheld stations: raw ERA5 bilinear, IMERG,
-   CHIRPS itself, quantile-mapped ERA5, ordinary kriging of the gauges, and a
-   deterministic U-Net. CHIRPS is a *strong* baseline over Bangladesh because
-   it already blends gauges — beating it at withheld stations is the real bar.
-   The honest framing is that this method adds (i) daily ensemble uncertainty,
-   (ii) ERA5 dynamical information CHIRPS ignores, and (iii) the ability to
-   assimilate observations CHIRPS never saw.
-5. **Verification**: point scores at stations; FSS at 1/10/20/50/100 mm/day
-   across 5–165 km neighbourhoods; SAL; POD/FAR/CSI/ETS; PDF and tail
-   comparison; monsoon-onset composites; spatial bias and increment maps.
-
-One caution worth checking early: CHIRPS already blends GTS gauges, some of
-which are BMD stations. If a withheld station is inside CHIRPS, evaluating
-against it is partly circular. Check the CHIRPS station list before fixing the
-evaluation set.
-
-## 10. Roadmap beyond precipitation
-
-The architecture is multivariate-ready: add `t2m`/`tmax`/`tmin` output
-channels and the same DA machinery assimilates temperature gauges with no code
-change (Mishra South Asia 5 km is the natural target). Multivariate training
-also buys physical consistency — Manshausen et al. showed their model learned
-wind–rain relationships and could infer unobserved channels from observed
-ones. Longer term: sub-daily via IMERG half-hourly, and a 4-D version where
-the prior is over sequences rather than snapshots.
-
----
+Method-selection and diagnostic experiments are not silently promoted into the
+archive. Any new BRISHTI-05 release must state its checkpoint hash, observation
+settings, BMD station file, IMERG preparation path, date contract, ensemble
+size, and whether every scored BMD station was withheld.
 
 ## References
 
 - Manshausen, P., et al. (2025). Generative data assimilation of sparse weather
   station observations at kilometer scales. *JAMES*, 17, e2024MS004505.
-  <https://doi.org/10.1029/2024MS004505> · <https://arxiv.org/abs/2406.16947>
+  <https://doi.org/10.1029/2024MS004505>
 - Rozet, S., & Louppe, G. (2024). Score-based data assimilation.
   <https://arxiv.org/abs/2306.10574>
 - Lipman, Y., et al. (2023). Flow matching for generative modeling.
@@ -529,21 +343,6 @@ the prior is over sequences rather than snapshots.
 - Albergo, M. S., Boffi, N. M., & Vanden-Eijnden, E. (2025). Stochastic
   interpolants: a unifying framework for flows and diffusions.
   <https://arxiv.org/abs/2303.08797>
-- Wetherell, T. (2026). Flow matching for convective-scale precipitation
-  downscaling. <https://arxiv.org/abs/2606.00281>
-- Mardani, M., et al. (2024). Residual corrective diffusion modeling for
-  km-scale atmospheric downscaling (CorrDiff).
-  <https://arxiv.org/abs/2309.15214>
-- Fotiadis, S., et al. (2024). Stochastic flow matching for resolving
-  small-scale physics. <https://arxiv.org/abs/2410.19814>
-- Chen, Y., et al. (2025). FlowDAS: a stochastic interpolant-based framework
-  for data assimilation. NeurIPS 2025. <https://arxiv.org/abs/2501.16642>
-- Karras, T., et al. (2022). Elucidating the design space of diffusion-based
-  generative models (EDM). <https://arxiv.org/abs/2206.00364>
-- Fortin, V., et al. (2014). Why should ensemble spread match the RMSE of the
-  ensemble mean? *Journal of Hydrometeorology*, 15, 1708–1713.
-- Zamo, M., & Naveau, P. (2018). Estimation of the continuous ranked
-  probability score with limited information. *Mathematical Geosciences*, 50.
 - Funk, C., et al. (2015). The climate hazards infrared precipitation with
   stations (CHIRPS). *Scientific Data*, 2, 150066.
 - Huffman, G. J., et al. (2023). GPM IMERG Final Precipitation L3 1 day V07.
