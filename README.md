@@ -1,114 +1,107 @@
-# BDhighresDA
+# BRISHTI-05
 
-**Generative downscaling and score-guided data assimilation for daily rainfall over Bangladesh.**
+**Bangladesh Rainfall Integration of Satellite, Hydrometeorological, and
+Terrestrial Information at 0.05°.**
 
-Conditional **rectified-flow** generative prior downscales ERA5 (0.25°) and CPC (0.5°) to **0.05° (~5 km) daily precipitation**. At inference time, **GPM IMERG half-hourly satellite footprints** and **sparse BMD rain gauge observations** are assimilated via score guidance — enabling zero-shot DA without model retraining.
+BRISHTI-05 is a 30-member, daily precipitation-analysis workflow for
+Bangladesh on a 0.05° (about 5 km) grid. A conditional rectified-flow prior
+learns fine-scale rainfall structure from historical CPC, ERA5, and CHIRPS.
+At analysis time, the prior is guided jointly by BMD rain gauges and GPM IMERG
+V07B satellite accumulations. The repository name, `BDhighresDA`, is retained
+for continuity; the current public analysis product is BRISHTI-05.
 
-![BDhighresDA pipeline](docs/figures/pipeline.png)
+The selected production configuration is the historical machine label
+`v2_simul_s04_ig010`. It uses simultaneous BMD and 0.4° IMERG guidance and a
+30-member ensemble. See the full, versioned description in
+[the methodology](docs/METHODOLOGY.md).
 
----
+## What each data source does
 
-## Accomplishments & Completed Features
-
-- **Generative Flow-Matching Prior**: Trained rectified-flow U-Net models (`configs/train_h100_cpc.yaml`) on NVIDIA GH200 GPUs using ERA5 predictors and CPC conditioning over the `wide` (256×256 @ 0.05°) domain.
-- **55,000+ IMERG Granules Ingested**: Built automated pipeline (`scripts/02_download_imerg_halfhourly.py`, `scripts/08_prepare_imerg_observations.py`) downloading and processing 2021–2024 half-hourly GPM IMERG V07B data into exact BMD reporting windows (03:00–03:00 UTC).
-- **Expanded BMD Station Catalogue**: Parsed and integrated 42 BMD weather stations across Bangladesh (including 7 newly inherited stations: *Dimla, Rajarhat, Gopalgonj, Natrakona, Nikli, Tarash, Tetulia*) with high-coverage quality control (`scripts/05_convert_bmd_dir.py`).
-- **5-Fold Rotated Spatial Cross-Validation**: Implemented disjoint spatial holdout evaluation (`slurm/bmd_imerg_rotated_folds_eval.sbatch`) testing 16 ensemble members across 2021–2024 monsoon seasons (37–38 active stations per year, >4,000 withheld station-days).
-- **Automated Multi-Year Pooled Diagnostics**: Developed multi-year pooling script (`scripts/22_summarize_multiyear_bmd_eval.py`) that aggregates CRPS, RMSE, MAE, Bias, Fisher-pooled Correlation, and heavy-rain Brier scores into JSON, Markdown tables, and auto-generated 6-panel summary figures (`bmd_imerg_2021_2024_pooled_summary.png`).
-- **OSSE Validation of the Assimilation**: Ran observing-system simulation experiments (`scripts/10_osse.py`) assimilating pseudo-gauges and nested 0.1° pseudo-satellite footprints drawn from CHIRPS, confirming that score guidance recovers the truth field across the full range of daily rainfall regimes.
-
-### OSSE: where the assimilation changes the field
-
-![OSSE impact maps](docs/figures/osse_perfect_impact.png)
-
-Three days spanning 1.5 to 28.8 mm/day domain mean, 40-station network, 32 assimilated (circles) and 8 withheld (squares). Column F is the one to read — green means the analysis is closer to CHIRPS than the background was.
-
-| Day | Domain mean | Land area improved |
-|---|--:|--:|
-| 2022-07-07 | 1.5 mm/day | **95%** |
-| 2025-07-25 | 11.2 mm/day | **91%** |
-| 2022-07-23 | 28.8 mm/day | **83%** |
-
-Column D shows the background error is broadly positive — the prior rains too readily, most visibly on the near-dry 2022-07-07 case — and column E shows the assimilation removing it. Skill is highest on dry days and degrades with rainfall intensity, as expected when the constraint comes from point gauges.
-
-> These are *perfect-observation* experiments: the pseudo-satellite is noiseless CHIRPS, so the observations and the verification truth are the same field. The 83–95% figures bound what the assimilation machinery can achieve and are not directly comparable to real IMERG + BMD results, where the observations disagree with CHIRPS.
-
----
-
-## Pipeline Overview
-
-| Step | Task | Script / Command |
+| Source | Role in BRISHTI-05 | Not a claim of |
 |---|---|---|
-| 0 | ERA5 Predictors | `scripts/00_download_era5.py` |
-| 1 | CPC / CHIRPS Targets | `scripts/01_download_chirps.py`, `scripts/02b_download_cpc.py` |
-| 2 | IMERG Half-Hourly Ingestion | `scripts/02_download_imerg_halfhourly.py` |
-| 3 | Static Fields & DEM | `scripts/03_download_dem.py`, `scripts/03_build_static.py` |
-| 4 | Zarr Packing & QC | `scripts/04_regrid_and_pack.py`, `scripts/04_check_alignment.py` |
-| 5 | Station Conversion | `scripts/05_convert_bmd_dir.py` |
-| 6 | Prior Training | `scripts/train.py` (`slurm/submit_train_cpc_gh200.sh`) |
-| 7 | Multi-Year Evaluation | `slurm/submit_bmd_imerg_2021_2024_all.sh` |
-| 8 | Multi-Year Summary & Plots | `scripts/22_summarize_multiyear_bmd_eval.py` |
+| CPC 0.5° | Coarse conditioning and residual baseline for the learned prior | Independent verification |
+| ERA5 | Atmospheric conditioning variables | Rainfall truth |
+| CHIRPS 0.05° | Historical training target family | Verification of the generated analysis |
+| BMD gauges | Analysis-time point observations | A spatially complete rainfall field |
+| GPM IMERG V07B | Analysis-time 0.4° footprint observations | Independent verification when assimilated |
 
----
+Consequently, held-out BMD station folds are the primary performance evidence.
+All-station BMD scores measure assimilation fit. Comparisons with CPC, CHIRPS,
+or IMERG describe agreement with those products; they are not independent-truth
+scores. A native 0.05° grid does not by itself establish resolved 0.05°
+physical skill.
 
-## Quick Start
+## Production contract
 
-### 1. Environment Setup
+- **Grid:** Bangladesh analysis domain, 128 × 128 cells at 0.05°.
+- **Ensemble:** 30 stochastic members per day.
+- **Satellite operator:** exact 8 × 8 fine-cell averages, giving 0.4° IMERG
+  footprints (`S04`), with correlated-footprint error treatment.
+- **Gauge treatment:** each member receives perturbed BMD observations; the
+  established production gauge weight is `1.0`.
+- **Time convention:** for public BMD label day `D`, BMD and IMERG are the BMD
+  03 UTC end-date `D`; CPC/ERA5/CHIRPS background inputs are record `D-1`.
+  This convention must be preserved in all comparisons.
+- **Current archive:** May–September 2021–2023 and May–June 2024, with five
+  rotated spatial BMD holdout folds plus an all-station gridded production
+  archive.
+
+The machine-learning and DA design, error assumptions, evaluation hierarchy,
+and limitations are documented in [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
+The reproducible historical production run is documented in
+[docs/EXPERIMENT_v2_confirmatory_2021_2024.md](docs/EXPERIMENT_v2_confirmatory_2021_2024.md).
+
+## Run the established production workflow
+
+On the target HPC system, after selecting the supported Python environment:
+
 ```bash
-conda env create -f environment.yml && conda activate bdhires
-pip install -e .
+git pull --ff-only origin main
+bash slurm/submit_v2_confirmatory_2021_2024.sh
 ```
 
-### 2. Submit Multi-Year Real BMD + IMERG Evaluation (2021–2024)
-On HPC cluster (Grace Hopper nodes):
+This produces the rotated BMD-fold evidence and the all-station archive under
+`data/processed/v2_confirmatory_2021_2024/`. It is a substantial HPC job;
+consult the experiment document before changing dates, folds, checkpoints, or
+the BMD/IMERG time alignment.
+
+## Evaluate the gridded archive
+
 ```bash
-bash slurm/submit_bmd_imerg_2021_2024_all.sh
-```
-This automatically runs 5-fold cross-validation for 2021, 2022, 2023, 2024, and the full multi-year period, followed by auto-chained pooled summary generation.
-
-### 3. Generate Multi-Year Summary & Figures
-```bash
-python scripts/22_summarize_multiyear_bmd_eval.py \
-    --summaries data/processed/bmd_imerg_eval_2021_may_sep/rotated_summary.json \
-                data/processed/bmd_imerg_eval_2022_may_sep/rotated_summary.json \
-                data/processed/bmd_imerg_eval_2023_may_sep/rotated_summary.json \
-                data/processed/bmd_imerg_eval_2024_may_jun/rotated_summary.json \
-    --out-json data/processed/bmd_imerg_2021_2024_pooled_summary.json \
-    --out-markdown data/processed/bmd_imerg_2021_2024_pooled_summary.md \
-    --out-plot data/processed/bmd_imerg_2021_2024_pooled_summary.png
+bash slurm/submit_v2_gridded_evaluation.sh
+bash slurm/submit_brishti05_may_aug2023_eval.sh
 ```
 
----
+The second command produces same-station, date-aligned diagnostics for May,
+July, August, and May–August 2023 using original CPC 0.5° and native IMERG
+0.1° as descriptive references. Maps are clipped to the Bangladesh boundary.
+Read [the archive evaluation guide](docs/EVALUATION_v2_gridded_archive.md) and
+[the native-reference evaluation](docs/EVALUATION_cpcv2_june2023_bangladesh.md)
+before interpreting those comparisons.
 
-## Domains
+## Repository layout
 
-| Grid | Bounds | Size | Purpose |
-|---|---|---|---|
-| `wide` | 84.0–96.8°E, 16.0–28.8°N | 256×256 @ 0.05° | Offline training (random 128×128 crops) |
-| `bd` | 87.6–94.0°E, 20.3–26.7°N | 128×128 @ 0.05° | Evaluation & production products over Bangladesh |
-
----
-
-## Repository Layout
-
-```
-src/bdhires/
-  grids.py          domain definitions (cell-centre, lat ascending)
-  transforms.py     precipitation transforms (log1p / sqrt)
-  models/unet.py    ADM-style U-Net velocity network
-  models/flow.py    rectified flow interpolant, velocity/score identities, EMA
-  bmd.py            BMD station directory parser & catalogue mapper
-  imerg.py          half-hourly IMERG V07B ingestion & BMD window accumulation
-  da/observation.py station + IMERG observation operators & covariance
-  da/guidance.py    Gaussian likelihood guidance gradients
-  da/sampler.py     ODE/SDE samplers with SDA guidance
-  eval/metrics.py   RMSE, MAE, CRPS, Correlation, Brier Scores
-scripts/            pipeline tools, training, evaluation, and multi-year summary
-slurm/              HPC cluster sbatch & master submission bash wrappers
+```text
+configs/train_h100_cpc_v2.yaml   current CPCv2 / BRISHTI-05 prior configuration
+docs/METHODOLOGY.md              product definition, date contract, and evidence hierarchy
+docs/EXPERIMENT_v2_confirmatory_2021_2024.md
+                                 reproducible historical production protocol
+scripts/28_simultaneous_method_sweep.py
+                                 controlled DA-arm and gauge-authority experiments
+scripts/                          data preparation, training, DA, and evaluation tools
+slurm/                            HPC submission wrappers
+src/bdhires/                      grids, transforms, models, observations, DA, and metrics
 ```
 
----
+## Development validation
+
+The repository also contains observing-system simulation experiments (OSSEs)
+and V7 development scripts. They are useful engineering diagnostics but do not
+supersede the BRISHTI-05 production protocol or its held-out BMD evidence. In
+particular, a perfect-observation OSSE gives an upper-bound test of the
+assimilation machinery, not a real-world verification result.
 
 ## License
 
-MIT (code). CHIRPS, ERA5, and GPM IMERG carry their own data terms. BMD station data is not redistributable without permission.
+MIT for code. CHIRPS, ERA5, CPC, and GPM IMERG have their own data terms. BMD
+station data are not redistributable without permission.
