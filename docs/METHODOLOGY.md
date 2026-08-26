@@ -1,15 +1,17 @@
-# BRISHTI-05 methodology
+# BRISHTI-05 and SURMA-Flow methodology
 
 **BRISHTI-05** is the public name for the Bangladesh daily precipitation
 analysis produced by this repository. It means **Bangladesh Rainfall
 Integration of Satellite, Hydrometeorological, and Terrestrial Information at
-0.05°**; *brishti* is Bangla for rain.
+0.05°**; *brishti* is Bangla for rain. The model is **SURMA-Flow v1.0**:
+**Score-guided Unified Rainfall Modeling and Assimilation with Rectified
+Flow**.
 
 The current released lineage is implemented under the historical machine key
-`v2_simul_s04_ig010` and is sometimes called “CPCv2” in scripts, checkpoint
-paths, and archived Zarr metadata. That is an implementation lineage, not the
-product name. In publications, figures, and user-facing data, call the product
-**BRISHTI-05** and retain the machine key in provenance metadata.
+`v2_simul_s04_ig010`. That key is retained in scripts, checkpoint paths, and
+archived Zarr metadata solely for reproducibility. In publications, figures,
+and user-facing data, call the model **SURMA-Flow v1.0** and the analysis
+product **BRISHTI-05**.
 
 BRISHTI-05 is a **daily 0.05° (about 5 km) ensemble analysis over Bangladesh**.
 It combines a learned fine-scale prior conditioned on the coarse CPC rainfall
@@ -27,7 +29,7 @@ gridded truth data set.
 | Learned fine-scale target | CHIRPS daily precipitation at 0.05° |
 | Prior conditioning | Original CPC daily precipitation at 0.5°, CPC validity, ERA5 state, static fields, and seasonal encoding |
 | Inference-time observations | BMD daily gauges and prepared GPM IMERG Final |
-| Selected production method | `v2_simul_s04_ig010` / BRISHTI-05 simultaneous S04 analysis |
+| Selected production method | SURMA-Flow v1.0 simultaneous S04 analysis (legacy key `v2_simul_s04_ig010`) |
 | Production archive | May–September 2021–2023 and May–June 2024 (520 BMD-labelled days) |
 
 The product must be interpreted at the support of each datum. BMD is a point
@@ -61,11 +63,12 @@ background inputs and observations: `p(fine rain | CPC, ERA5, static, BMD,
 IMERG)`. The learned network provides the first part of that distribution;
 the observation likelihood supplies the BMD and IMERG update during sampling.
 
-## 3. Learned CPCv2 prior
+## 3. SURMA-Flow v1.0 learned prior
 
 ### 3.1 Inputs and target
 
-The `prior_h100_cpc_v2` checkpoint is trained with the configuration in
+The SURMA-Flow v1.0 checkpoint (stored internally as `prior_h100_cpc_v2`) is
+trained with the configuration in
 [`configs/train_h100_cpc_v2.yaml`](../configs/train_h100_cpc_v2.yaml). Its
 seven dynamic conditioning channels are:
 
@@ -95,7 +98,7 @@ analysis.
 
 ### 3.2 Training procedure
 
-The CPCv2 prior uses a conditional rectified-flow U-Net with multiscale
+SURMA-Flow v1.0 uses a conditional rectified-flow U-Net with multiscale
 conditioning. It is trained on 1981–2018, validated on 2019–2020, and the
 2021–2025 interval is reserved for the downstream BMD-era experiments. The
 configuration uses 128×128 crops on the wide South Asia domain, wet-day and
@@ -148,9 +151,9 @@ silently substitute for the BMD-aligned IMERG file.
 
 ## 5. Simultaneous data assimilation
 
-The selected BRISHTI-05 method is
-`v2_simul_s04_ig010`. It jointly assimilates BMD gauges and S04 IMERG during
-the same rectified-flow sampling trajectory. The observation operators are
+The selected model configuration, **SURMA-Flow v1.0**, jointly assimilates BMD
+gauges and S04 IMERG during the same rectified-flow sampling trajectory. Its
+legacy machine key is `v2_simul_s04_ig010`. The observation operators are
 differentiable:
 
 - a physical bilinear interpolation from the 0.05° field to each BMD point;
@@ -283,8 +286,8 @@ agreement with CHIRPS alone, is not enough.
 
 ## 8. Archived BRISHTI-05 data
 
-The CPCv2 production archive remains the authoritative BRISHTI-05 data
-lineage:
+The SURMA-Flow v1.0 production archive remains the authoritative BRISHTI-05
+data lineage:
 
 ```text
 data/processed/v2_confirmatory_2021_2024/
@@ -301,7 +304,8 @@ The gridded Zarr stores retain the historical method key
 ensemble SD, CPC conditioning field, CHIRPS field, S04 IMERG, BMD values, and
 station-assimilation flags. They are machine-readable provenance for the
 BRISHTI-05 release. Do not rename arrays in-place: map the historical method
-key to the public product name in user-facing reports.
+key to **SURMA-Flow v1.0** in model descriptions and to **BRISHTI-05** in
+user-facing analysis products.
 
 The Bangladesh production-contract evaluator is documented in
 [`EVALUATION_cpcv2_june2023_bangladesh.md`](EVALUATION_cpcv2_june2023_bangladesh.md).

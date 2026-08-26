@@ -4,15 +4,17 @@
 Terrestrial Information at 0.05°.**
 
 BRISHTI-05 is a 30-member, daily precipitation-analysis workflow for
-Bangladesh on a 0.05° (about 5 km) grid. A conditional rectified-flow prior
-learns fine-scale rainfall structure from historical CPC, ERA5, and CHIRPS.
-At analysis time, the prior is guided jointly by BMD rain gauges and GPM IMERG
+Bangladesh on a 0.05° (about 5 km) grid. It is generated with **SURMA-Flow
+v1.0**: **Score-guided Unified Rainfall Modeling and Assimilation with
+Rectified Flow**. The learned fine-scale prior uses historical CPC, ERA5, and
+CHIRPS; at analysis time it is guided jointly by BMD rain gauges and GPM IMERG
 V07B satellite accumulations. The repository name, `BDhighresDA`, is retained
-for continuity; the current public analysis product is BRISHTI-05.
+for continuity.
 
-The selected production configuration is the historical machine label
-`v2_simul_s04_ig010`. It uses simultaneous BMD and 0.4° IMERG guidance and a
-30-member ensemble. See the full, versioned description in
+The selected production configuration is **SURMA-Flow v1.0**, using
+simultaneous BMD and 0.4° IMERG guidance and a 30-member ensemble. Its legacy
+machine key, `v2_simul_s04_ig010`, is retained only in reproducibility
+metadata. See the full, versioned description in
 [the methodology](docs/METHODOLOGY.md).
 
 ## What each data source does
@@ -82,7 +84,7 @@ before interpreting those comparisons.
 ## Repository layout
 
 ```text
-configs/train_h100_cpc_v2.yaml   current CPCv2 / BRISHTI-05 prior configuration
+configs/train_h100_cpc_v2.yaml   SURMA-Flow v1.0 configuration (legacy filename)
 docs/METHODOLOGY.md              product definition, date contract, and evidence hierarchy
 docs/EXPERIMENT_v2_confirmatory_2021_2024.md
                                  reproducible historical production protocol
