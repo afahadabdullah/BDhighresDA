@@ -68,8 +68,16 @@ def parse_args() -> argparse.Namespace:
                         help="one or more completed seasonal production stores")
     parser.add_argument(
         "--cv-root", default=None,
-        help="optional experiment root containing cv/<period>/fold*.npz; "
-             "default is inferred from a .../gridded/<period>.zarr path",
+        help="optional experiment root containing held-out evaluation files; "
+            "default is inferred from a .../gridded/<period>.zarr path",
+    )
+    parser.add_argument(
+        "--cv-layout", choices=("five-fold", "single-holdout"), default="five-fold",
+        help=(
+            "five-fold expects cv/<period>/fold{0..4}.npz; single-holdout expects "
+            "evaluation/<period>.npz. The latter is a constrained random 20%% split, "
+            "not exhaustive cross-validation."
+        ),
     )
     parser.add_argument("--out-dir", required=True)
     parser.add_argument(
@@ -81,6 +89,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--texture-members", type=int, default=5,
                         help="evenly spaced members used for spectra/variograms")
     parser.add_argument("--minimum-block-valid", type=float, default=1.0)
+    parser.add_argument(
+        "--selection-daily-start", default=None,
+        help="first configuration-selection date to exclude from independent daily scores",
+    )
+    parser.add_argument(
+        "--selection-daily-end", default=None,
+        help="last configuration-selection date to exclude from independent daily scores",
+    )
     return parser.parse_args()
 
 
@@ -998,8 +1014,28 @@ def infer_cv_root(paths: list[Path]) -> Path | None:
     return parents[0] if parents and all(parent == parents[0] for parent in parents) else None
 
 
+def heldout_files(cv_root: Path, period: str, layout: str) -> list[Path]:
+    """Return the completed held-out files for a production period.
+
+    The original confirmation archive has five exhaustive folds in a period
+    directory.  The combined BMD/BWDB production archive has one explicitly
+    constrained random holdout, stored beside its all-station counterpart.
+    Keeping both layouts here preserves the full gridded diagnostic suite.
+    """
+    if layout == "five-fold":
+        return sorted((cv_root / "cv" / period).glob("fold[0-4].npz"))
+    if layout == "single-holdout":
+        path = cv_root / "evaluation" / f"{period}.npz"
+        return [path] if path.is_file() else []
+    raise ValueError(f"unknown CV layout {layout!r}")
+
+
+def required_heldout_files(layout: str) -> int:
+    return 5 if layout == "five-fold" else 1
+
+
 def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
-                             cv_root: Path | None) -> tuple[list[dict], list[dict]]:
+                             cv_root: Path | None, cv_layout: str) -> tuple[list[dict], list[dict]]:
     if cv_root is None:
         return [], []
     point_members = {name: [] for name in methods}
@@ -1010,10 +1046,9 @@ def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
         for name in methods
     }
     for path in paths:
-        period_dir = cv_root / "cv" / path.stem
-        fold_paths = sorted(period_dir.glob("fold[0-4].npz"))
-        if len(fold_paths) != 5:
-            print(f"[gauges] {period_dir}: need five complete folds; skipping this period")
+        fold_paths = heldout_files(cv_root, path.stem, cv_layout)
+        if len(fold_paths) != required_heldout_files(cv_layout):
+            print(f"[gauges] {path.stem}: incomplete {cv_layout} held-out set; skipping this period")
             continue
         for fold_path in fold_paths:
             dump = np.load(fold_path, allow_pickle=False)
@@ -1084,7 +1119,8 @@ def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
 
 
 def load_withheld_gauge_bundle(
-    paths: list[Path], methods: list[str], factor: int, cv_root: Path | None
+    paths: list[Path], methods: list[str], factor: int, cv_root: Path | None,
+    cv_layout: str,
 ) -> dict | None:
     """Collect every independently withheld station/day exactly once."""
     if cv_root is None:
@@ -1093,9 +1129,8 @@ def load_withheld_gauge_bundle(
     members = {method: [] for method in methods}
     products = {reference: [] for reference in REFERENCE_NAMES}
     for path in paths:
-        period_dir = cv_root / "cv" / path.stem
-        fold_paths = sorted(period_dir.glob("fold[0-4].npz"))
-        if len(fold_paths) != 5:
+        fold_paths = heldout_files(cv_root, path.stem, cv_layout)
+        if len(fold_paths) != required_heldout_files(cv_layout):
             continue
         for fold_path in fold_paths:
             with np.load(fold_path, allow_pickle=False) as dump:
@@ -1519,7 +1554,7 @@ def plot_evaluation_matrix(matrix: list[dict], out_dir: Path, sources: list[Path
         axes[0, 0].set_xlabel("withheld-gauge CRPS (mm/day)")
         axes[0, 0].set_title("A. Independent point value")
     else:
-        axes[0, 0].text(0.5, 0.5, "five CV folds not complete", ha="center", va="center")
+        axes[0, 0].text(0.5, 0.5, "held-out evaluation unavailable", ha="center", va="center")
         axes[0, 0].set_title("A. Independent point value")
     axes[0, 0].set_yticks(y, labels); axes[0, 0].invert_yaxis()
 
@@ -1564,7 +1599,7 @@ def plot_evaluation_matrix(matrix: list[dict], out_dir: Path, sources: list[Path
         axes[1, 2].axvline(0, color="black", ls="--", lw=0.8)
         axes[1, 2].set_xlabel("MSE skill vs zero-subgrid null")
     else:
-        axes[1, 2].text(0.5, 0.5, "five CV folds not complete", ha="center", va="center")
+        axes[1, 2].text(0.5, 0.5, "held-out evaluation unavailable", ha="center", va="center")
     axes[1, 2].set_yticks(y, labels); axes[1, 2].invert_yaxis()
     axes[1, 2].set_title("F. Located subgrid evidence")
 
@@ -2164,6 +2199,14 @@ def plot_scale_diagnostics(spectra: dict, curve_rows: list[dict], methods: list[
 
 def main() -> None:
     args = parse_args()
+    global SELECTION_START, SELECTION_END
+    if (args.selection_daily_start is None) != (args.selection_daily_end is None):
+        raise ValueError("set both --selection-daily-start and --selection-daily-end, or neither")
+    if args.selection_daily_start is not None:
+        SELECTION_START = np.datetime64(args.selection_daily_start, "D")
+        SELECTION_END = np.datetime64(args.selection_daily_end, "D")
+        if SELECTION_END < SELECTION_START:
+            raise ValueError("--selection-daily-end precedes --selection-daily-start")
     paths = [Path(path) for path in args.zarr]
     archive = load_archive(paths, args.factor)
     same_day_cpc_result = load_same_day_cpc(archive, args.cpc_source_zarr)
@@ -2182,10 +2225,10 @@ def main() -> None:
     )
     cv_root = Path(args.cv_root) if args.cv_root else infer_cv_root(paths)
     point_rows, anomaly_rows = evaluate_withheld_gauges(
-        paths, archive["methods"], args.factor, cv_root
+        paths, archive["methods"], args.factor, cv_root, args.cv_layout
     )
     withheld_bundle = load_withheld_gauge_bundle(
-        paths, archive["methods"], args.factor, cv_root
+        paths, archive["methods"], args.factor, cv_root, args.cv_layout
     )
     if same_day_cpc_result is not None:
         attach_same_day_cpc_to_withheld_bundle(
@@ -2239,6 +2282,7 @@ def main() -> None:
             "footprint_degrees": args.factor * FINE_DEGREES,
             "texture_members_sampled": args.texture_members,
             "cv_root": str(cv_root) if cv_root else None,
+            "cv_layout": args.cv_layout,
             "selection_dates_excluded_from_aggregate_daily": [
                 str(SELECTION_START), str(SELECTION_END)
             ],
@@ -2253,7 +2297,7 @@ def main() -> None:
         "interpretation": {
             "independent_evidence": (
                 "withheld-gauge value scores and withheld-gauge anomalies; absent "
-                "until all five CV folds for a period are complete"
+                f"until all required {args.cv_layout} held-out files are complete"
             ),
             "product_agreement": (
                 "CHIRPS/IMERG/CPC correlations and variability are agreement, not truth"
@@ -2303,7 +2347,7 @@ def main() -> None:
         f"Evaluated **{len(archive['time'])} days** from {archive['time'].min()} "
         f"through {archive['time'].max()}.\n\n"
         "CHIRPS, IMERG and CPC metrics are product agreement, not truth. "
-        "Independent downscaling evidence comes from the five-fold withheld-gauge "
+        "Independent downscaling evidence comes from the configured withheld-gauge "
         "scores and sub-footprint anomaly tests when those folds are available. "
         "Production-station scores are explicitly labelled assimilated fit, not "
         "verification. Daily, monthly and May–September temporal variability is "

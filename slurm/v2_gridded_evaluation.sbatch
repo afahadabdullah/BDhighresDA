@@ -45,12 +45,27 @@ printf '  %s\n' "${STORES[@]}"
 echo "  output: $OUT"
 echo "  CHIRPS/IMERG/CPC are agreement references, not asserted truth"
 
-"$PYTHON_BIN" -u scripts/55_evaluate_v2_gridded_archive.py \
-    --zarr "${STORES[@]}" \
-    --cv-root "${V2_EVAL_CV_ROOT:-$ROOT}" \
-    --factor 8 \
-    --texture-members "${V2_EVAL_TEXTURE_MEMBERS:-5}" \
+EVAL_ARGS=(
+    --zarr "${STORES[@]}"
+    --cv-root "${V2_EVAL_CV_ROOT:-$ROOT}"
+    --cv-layout "${V2_EVAL_CV_LAYOUT:-five-fold}"
+    --factor 8
+    --texture-members "${V2_EVAL_TEXTURE_MEMBERS:-5}"
     --out-dir "$OUT"
+)
+if [[ -n "${V2_EVAL_SELECTION_DAILY_START:-}" || -n "${V2_EVAL_SELECTION_DAILY_END:-}" ]]; then
+    [[ -n "${V2_EVAL_SELECTION_DAILY_START:-}" && -n "${V2_EVAL_SELECTION_DAILY_END:-}" ]] || {
+        echo "ERROR: set both V2_EVAL_SELECTION_DAILY_START and V2_EVAL_SELECTION_DAILY_END" >&2
+        exit 1
+    }
+    EVAL_ARGS+=(
+        --selection-daily-start "$V2_EVAL_SELECTION_DAILY_START"
+        --selection-daily-end "$V2_EVAL_SELECTION_DAILY_END"
+    )
+fi
+
+"$PYTHON_BIN" -u scripts/55_evaluate_v2_gridded_archive.py \
+    "${EVAL_ARGS[@]}"
 
 echo "Evaluation complete: $OUT/evaluation.json"
 echo "Figures: $OUT/fig{01..11}_*.png"

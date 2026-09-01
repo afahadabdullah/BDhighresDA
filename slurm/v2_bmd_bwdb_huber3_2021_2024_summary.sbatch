@@ -36,3 +36,5 @@ done
     --manifests "${MANIFESTS[@]}" --station-summaries "${SUMMARIES[@]}" \
     --zarr-stores "${STORES[@]}" --out-dir "$ROOT/summary"
 echo "Summary: $ROOT/summary/huber3_2021_2024_scores.{md,json,png}"
+echo "Catalog: $ROOT/summary/gridded_catalog.json"
+echo "Folds:   $ROOT/summary/fold_plots/{period}_fold0_diagnostics.png"
