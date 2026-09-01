@@ -17,12 +17,100 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
 
 from bdhires.bmd import read_station_dir_bmd
 from bdhires.grids import get_grid
+
+
+_XLSX_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_XLSX_DOC_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_XLSX_PACKAGE_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def _xlsx_column_index(cell_reference: str) -> int:
+    """Return zero-based column index from an XLSX reference such as ``AB14``."""
+    letters = "".join(character for character in cell_reference if character.isalpha())
+    value = 0
+    for character in letters:
+        value = value * 26 + ord(character.upper()) - ord("A") + 1
+    return value - 1
+
+
+def _read_xlsx_sheet_stdlib(path: Path, sheet_name: str) -> pd.DataFrame:
+    """Read a plain XLSX worksheet when the compute environment lacks openpyxl.
+
+    BWDB's delivered workbook contains ordinary XML worksheet cells (no macros,
+    formulas, or rich formatting).  Reading this narrow interchange format here
+    avoids installing packages into the frozen GH200 environment merely to
+    ingest a static research input.
+    """
+    with ZipFile(path) as archive:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in root.findall(f"{_XLSX_MAIN}si"):
+                shared.append("".join(part.text or "" for part in item.iter(f"{_XLSX_MAIN}t")))
+        workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+        relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        targets = {
+            relation.attrib["Id"]: relation.attrib["Target"]
+            for relation in relationships.findall(f"{_XLSX_PACKAGE_REL}Relationship")
+        }
+        sheet_path = None
+        for sheet in workbook.findall(f"{_XLSX_MAIN}sheets/{_XLSX_MAIN}sheet"):
+            if sheet.attrib.get("name") == sheet_name:
+                target = targets[sheet.attrib[f"{_XLSX_DOC_REL}id"]]
+                target = target.lstrip("/")
+                sheet_path = target if target.startswith("xl/") else "xl/" + target
+                break
+        if sheet_path is None:
+            raise ValueError(f"{path} has no worksheet named {sheet_name!r}")
+        root = ElementTree.fromstring(archive.read(sheet_path))
+    rows: list[list[object]] = []
+    width = 0
+    for row in root.findall(f"{_XLSX_MAIN}sheetData/{_XLSX_MAIN}row"):
+        values: dict[int, object] = {}
+        for cell in row.findall(f"{_XLSX_MAIN}c"):
+            column = _xlsx_column_index(cell.attrib["r"])
+            cell_type = cell.attrib.get("t")
+            value = cell.findtext(f"{_XLSX_MAIN}v")
+            if cell_type == "s" and value is not None:
+                parsed: object = shared[int(value)]
+            elif cell_type == "inlineStr":
+                parsed = "".join(part.text or "" for part in cell.iter(f"{_XLSX_MAIN}t"))
+            elif value is None:
+                parsed = None
+            else:
+                try:
+                    parsed = float(value)
+                    if parsed.is_integer():
+                        parsed = int(parsed)
+                except ValueError:
+                    parsed = value
+            values[column] = parsed
+            width = max(width, column + 1)
+        rows.append([values.get(column) for column in range(width)])
+    if not rows:
+        raise ValueError(f"{path}:{sheet_name} has no worksheet rows")
+    # Rows before a later wide cell were initially shorter; pad them now.
+    rows = [row + [None] * (width - len(row)) for row in rows]
+    return pd.DataFrame(rows[1:], columns=[str(value).strip() for value in rows[0]])
+
+
+def read_xlsx_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    """Prefer pandas/openpyxl, with a no-extra-dependency XLSX fallback."""
+    try:
+        return pd.read_excel(path, sheet_name=sheet_name)
+    except ImportError as exc:
+        if "openpyxl" not in str(exc):
+            raise
+        print(f"[BWDB] openpyxl unavailable; using standard-library XLSX reader for {sheet_name}")
+        return _read_xlsx_sheet_stdlib(path, sheet_name)
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,8 +154,8 @@ def pairwise_km(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
 
 def read_bwdb(path: Path, start: pd.Timestamp, end: pd.Timestamp, max_mm: float) -> tuple[pd.DataFrame, dict]:
     """Read the supplied BWDB workbook without relying on its stale date fields."""
-    stations = pd.read_excel(path, sheet_name="StationList")
-    data = pd.read_excel(path, sheet_name="RainfallData")
+    stations = read_xlsx_sheet(path, "StationList")
+    data = read_xlsx_sheet(path, "RainfallData")
     stations.columns = [str(column).strip() for column in stations.columns]
     data.columns = [str(column).strip() for column in data.columns]
     # ``Station`` is the workbook's label; accepting the older ``Station Name``
@@ -90,7 +178,11 @@ def read_bwdb(path: Path, start: pd.Timestamp, end: pd.Timestamp, max_mm: float)
     # real-time catalogue places it at 20.8925N, not 18.8925N.
     stations.loc[stations["Station ID"] == "CL312", "Latitude"] = 20.8925
 
-    data["Date"] = pd.to_datetime(data["Date"], errors="coerce").dt.normalize()
+    date_values = data["Date"]
+    if pd.api.types.is_numeric_dtype(date_values):
+        data["Date"] = pd.to_datetime(date_values, unit="D", origin="1899-12-30", errors="coerce").dt.normalize()
+    else:
+        data["Date"] = pd.to_datetime(date_values, errors="coerce").dt.normalize()
     data = data[(data["Date"] >= start) & (data["Date"] <= end)].copy()
     ids = [station_id for station_id in stations["Station ID"] if station_id in data.columns]
     if not ids:
