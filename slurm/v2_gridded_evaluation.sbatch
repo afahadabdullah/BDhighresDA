@@ -63,6 +63,13 @@ if [[ -n "${V2_EVAL_SELECTION_DAILY_START:-}" || -n "${V2_EVAL_SELECTION_DAILY_E
         --selection-daily-end "$V2_EVAL_SELECTION_DAILY_END"
     )
 fi
+if [[ -n "${V2_EVAL_COMPARISON_ZARR:-}" ]]; then
+    EVAL_ARGS+=(
+        --comparison-zarr "$V2_EVAL_COMPARISON_ZARR"
+        --comparison-method "${V2_EVAL_COMPARISON_METHOD:-v2_simul_s04_huber3}"
+        --comparison-label "${V2_EVAL_COMPARISON_LABEL:-BMD-only Huber3 (prior production)}"
+    )
+fi
 
 "$PYTHON_BIN" -u scripts/55_evaluate_v2_gridded_archive.py \
     "${EVAL_ARGS[@]}"

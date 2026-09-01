@@ -12,5 +12,13 @@ export V2_EVAL_CV_LAYOUT="single-holdout"
 export V2_EVAL_SELECTION_DAILY_START="${V2_EVAL_SELECTION_DAILY_START:-2022-05-01}"
 export V2_EVAL_SELECTION_DAILY_END="${V2_EVAL_SELECTION_DAILY_END:-2022-05-31}"
 export V2_EVAL_TEXTURE_MEMBERS="${V2_EVAL_TEXTURE_MEMBERS:-5}"
+export V2_BMD_ONLY_ROOT="${V2_BMD_ONLY_ROOT:-data/processed/v2_confirmatory_2021_2024}"
+export V2_EVAL_COMPARISON_ZARR="${V2_EVAL_COMPARISON_ZARR:-$V2_BMD_ONLY_ROOT/gridded/2024_may_jun.zarr}"
+export V2_EVAL_COMPARISON_METHOD="${V2_EVAL_COMPARISON_METHOD:-v2_simul_s04_huber3}"
+export V2_EVAL_COMPARISON_LABEL="${V2_EVAL_COMPARISON_LABEL:-BMD-only Huber3 (prior production)}"
+
+if (( $# == 0 )); then
+    set -- "$V2_CONFIRM_ROOT/gridded/2024_may_jun.zarr"
+fi
 
 exec bash slurm/submit_v2_gridded_evaluation.sh "$@"

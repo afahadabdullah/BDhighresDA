@@ -90,6 +90,21 @@ def parse_args() -> argparse.Namespace:
                         help="evenly spaced members used for spectra/variograms")
     parser.add_argument("--minimum-block-valid", type=float, default=1.0)
     parser.add_argument(
+        "--comparison-zarr", default=None,
+        help=(
+            "optional completed all-station Zarr from another production run; it is "
+            "shown only as a labelled spatial comparison, never as verification truth"
+        ),
+    )
+    parser.add_argument(
+        "--comparison-method", default="v2_simul_s04_huber3",
+        help="method to extract from --comparison-zarr",
+    )
+    parser.add_argument(
+        "--comparison-label", default="BMD-only Huber3 (prior production)",
+        help="label shown for the optional comparison field",
+    )
+    parser.add_argument(
         "--selection-daily-start", default=None,
         help="first configuration-selection date to exclude from independent daily scores",
     )
@@ -426,6 +441,29 @@ def load_archive(paths: list[Path], factor: int) -> dict:
         "imerg": imerg,
         "imerg_coarse": imerg_coarse,
     }
+
+
+def load_spatial_comparison(path: Path, method: str, archive: dict, label: str) -> dict:
+    """Load one matched prior-production field for a map-only sensitivity view."""
+    dataset = validate_store(path)
+    methods = dataset.method.values.astype(str).tolist()
+    if method not in methods:
+        raise ValueError(f"{path}: comparison method {method!r} not in {methods}")
+    if not np.array_equal(dataset.lat.values, archive["lat"]) or not np.array_equal(dataset.lon.values, archive["lon"]):
+        raise ValueError(f"{path}: comparison grid differs from the evaluated archive")
+    times = np.asarray(dataset.time.values).astype("datetime64[D]")
+    if not np.array_equal(times, archive["time"]):
+        raise ValueError(
+            f"{path}: comparison dates differ; spatial comparison requires an exact matched window"
+        )
+    values = np.asarray(dataset.ensemble_mean.isel(method=methods.index(method)).values, float)
+    scope = dataset.attrs.get("scope", {})
+    result = {
+        "path": str(path), "method": method, "label": label, "mean": values,
+        "scope": scope, "days": int(dataset.sizes["time"]),
+    }
+    dataset.close()
+    return result
 
 
 def load_same_day_cpc(archive: dict, override: str | None = None) -> tuple[np.ndarray, Path] | None:
@@ -2135,6 +2173,72 @@ def plot_subgrid_case(archive: dict, factor: int, out_dir: Path,
     plt.close(figure)
 
 
+def plot_prior_production_spatial_comparison(
+    archive: dict, comparison: dict, factor: int, out_dir: Path, sources: list[Path]
+) -> None:
+    """Map the current combined-network Huber3 field against prior BMD-only Huber3."""
+    mask = strict_block_mask(archive["valid"], factor, 1.0)
+    primary = confirmatory_daily_mask(archive["time"])
+    candidates = np.flatnonzero(primary)
+    chirps_residual = residual_stack(archive["chirps"][primary], factor, mask)
+    day_index = int(candidates[np.nanargmax(np.nanmean(chirps_residual[:, mask] ** 2, axis=1))])
+    if "v2_simul_s04_huber3" not in archive["methods"]:
+        raise ValueError("evaluated archive lacks v2_simul_s04_huber3 for spatial comparison")
+    current = archive["mean"][archive["methods"].index("v2_simul_s04_huber3"), day_index]
+    previous = comparison["mean"][day_index]
+    current_residual = residual_stack(current[None], factor, mask)[0]
+    previous_residual = residual_stack(previous[None], factor, mask)[0]
+    difference = current - previous
+    residual_difference = current_residual - previous_residual
+    panels = {
+        "Combined BMD+BWDB Huber3": (current, current_residual),
+        comparison["label"]: (previous, previous_residual),
+        "Combined − BMD-only": (difference, residual_difference),
+    }
+    full_values = np.concatenate([values[archive["valid"]] for values, _ in panels.values()])
+    residual_values = np.concatenate([values[mask] for _, values in panels.values()])
+    full_max = float(np.nanpercentile(full_values, 99))
+    difference_max = float(np.nanpercentile(np.abs(difference[archive["valid"]]), 99))
+    residual_max = float(np.nanpercentile(np.abs(residual_values), 99))
+    plt = use_paper_style()
+    figure, axes = plt.subplots(2, 3, figsize=(10, 6), constrained_layout=True)
+    table = []
+    mean_image = difference_image = residual_image = None
+    for column, (name, (field, residual)) in enumerate(panels.items()):
+        if column < 2:
+            top = axes[0, column].imshow(np.where(archive["valid"], field, np.nan), origin="lower", vmin=0, vmax=full_max, cmap="Blues")
+            mean_image = top
+        else:
+            top = axes[0, column].imshow(np.where(archive["valid"], field, np.nan), origin="lower", vmin=-difference_max, vmax=difference_max, cmap="RdBu")
+            difference_image = top
+        bottom = axes[1, column].imshow(np.where(mask, residual, np.nan), origin="lower", vmin=-residual_max, vmax=residual_max, cmap="RdBu")
+        residual_image = bottom
+        axes[0, column].set_title(name, fontsize=8)
+        for axis in axes[:, column]:
+            axis.set_xticks([]); axis.set_yticks([]); axis.grid(False)
+        table.extend({
+            "date": str(archive["time"][day_index]), "panel": name,
+            "lat_index": int(row), "lon_index": int(column_index),
+            "full_mm": finite_float(field[row, column_index]),
+            "subgrid_mm": finite_float(residual[row, column_index]),
+        } for row in range(field.shape[0]) for column_index in range(field.shape[1]))
+    axes[0, 0].set_ylabel("daily ensemble mean")
+    axes[1, 0].set_ylabel("below-0.4° residual")
+    figure.colorbar(mean_image, ax=axes[0, :2], shrink=0.75, label="mm/day")
+    figure.colorbar(difference_image, ax=axes[0, 2], shrink=0.75, label="difference (mm/day)")
+    figure.colorbar(residual_image, ax=axes[1, :], shrink=0.75, label="subgrid residual (mm/day)")
+    figure.suptitle(f"Spatial sensitivity to adding BWDB gauges: {archive['time'][day_index]}")
+    save_figure(
+        figure, out_dir, "12", "prior_bmd_only_spatial_comparison", data={"fields": table},
+        sources=sources,
+        caption=(
+            "Matched Huber3 production fields from the combined BMD+BWDB and earlier BMD-only runs. "
+            "This is a spatial sensitivity comparison, not independent verification and not a truth map."
+        ),
+    )
+    plt.close(figure)
+
+
 def plot_scale_diagnostics(spectra: dict, curve_rows: list[dict], methods: list[str],
                            out_dir: Path, sources: list[Path]) -> None:
     plt = use_paper_style()
@@ -2209,6 +2313,12 @@ def main() -> None:
             raise ValueError("--selection-daily-end precedes --selection-daily-start")
     paths = [Path(path) for path in args.zarr]
     archive = load_archive(paths, args.factor)
+    comparison = (
+        load_spatial_comparison(
+            Path(args.comparison_zarr), args.comparison_method, archive, args.comparison_label
+        )
+        if args.comparison_zarr else None
+    )
     same_day_cpc_result = load_same_day_cpc(archive, args.cpc_source_zarr)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2293,6 +2403,10 @@ def main() -> None:
             "same_day_cpc_source": (
                 str(same_day_cpc_result[1]) if same_day_cpc_result else None
             ),
+            "spatial_comparison": (
+                {key: value for key, value in comparison.items() if key != "mean"}
+                if comparison else None
+            ),
         },
         "interpretation": {
             "independent_evidence": (
@@ -2363,6 +2477,11 @@ def main() -> None:
     plot_subgrid_matrix(matrix, out_dir, paths)
     plot_scale_diagnostics(spectra, curve_rows, archive["methods"], out_dir, paths)
     plot_subgrid_case(archive, args.factor, out_dir, paths)
+    if comparison:
+        plot_prior_production_spatial_comparison(
+            archive, comparison, args.factor, out_dir,
+            [*paths, Path(comparison["path"])],
+        )
     plot_monthly_grid_maps(
         temporal_grids, archive, "monthly_mean", "06", out_dir,
         paths, temporal_grid_path, temporal_grid_summary,
