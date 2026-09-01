@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
                         help="evenly spaced members used for spectra/variograms")
     parser.add_argument("--minimum-block-valid", type=float, default=1.0)
     parser.add_argument(
-        "--comparison-zarr", default=None,
+        "--comparison-zarr", nargs="+", default=None,
         help=(
             "optional completed all-station Zarr from another production run; it is "
             "shown only as a labelled spatial comparison, never as verification truth"
@@ -443,26 +443,30 @@ def load_archive(paths: list[Path], factor: int) -> dict:
     }
 
 
-def load_spatial_comparison(path: Path, method: str, archive: dict, label: str) -> dict:
+def load_spatial_comparison(paths: list[Path], method: str, archive: dict, label: str) -> dict:
     """Load one matched prior-production field for a map-only sensitivity view."""
-    dataset = validate_store(path)
-    methods = dataset.method.values.astype(str).tolist()
-    if method not in methods:
-        raise ValueError(f"{path}: comparison method {method!r} not in {methods}")
-    if not np.array_equal(dataset.lat.values, archive["lat"]) or not np.array_equal(dataset.lon.values, archive["lon"]):
-        raise ValueError(f"{path}: comparison grid differs from the evaluated archive")
-    times = np.asarray(dataset.time.values).astype("datetime64[D]")
-    if not np.array_equal(times, archive["time"]):
+    fields, times_list = [], []
+    for path in paths:
+        dataset = validate_store(path)
+        methods = dataset.method.values.astype(str).tolist()
+        if method not in methods:
+            raise ValueError(f"{path}: comparison method {method!r} not in {methods}")
+        if not np.array_equal(dataset.lat.values, archive["lat"]) or not np.array_equal(dataset.lon.values, archive["lon"]):
+            raise ValueError(f"{path}: comparison grid differs from the evaluated archive")
+        fields.append(np.asarray(dataset.ensemble_mean.isel(method=methods.index(method)).values, float))
+        times_list.append(np.asarray(dataset.time.values).astype("datetime64[D]"))
+        dataset.close()
+    times = np.concatenate(times_list)
+    order = np.argsort(times)
+    if len(np.unique(times)) != len(times) or not np.array_equal(times[order], archive["time"]):
         raise ValueError(
-            f"{path}: comparison dates differ; spatial comparison requires an exact matched window"
+            "comparison dates differ; spatial comparison requires an exact matched window"
         )
-    values = np.asarray(dataset.ensemble_mean.isel(method=methods.index(method)).values, float)
-    scope = dataset.attrs.get("scope", {})
+    values = np.concatenate(fields, axis=0)[order]
     result = {
-        "path": str(path), "method": method, "label": label, "mean": values,
-        "scope": scope, "days": int(dataset.sizes["time"]),
+        "paths": [str(path) for path in paths], "method": method, "label": label,
+        "mean": values, "days": int(len(times)),
     }
-    dataset.close()
     return result
 
 
@@ -2315,7 +2319,8 @@ def main() -> None:
     archive = load_archive(paths, args.factor)
     comparison = (
         load_spatial_comparison(
-            Path(args.comparison_zarr), args.comparison_method, archive, args.comparison_label
+            [Path(path) for path in args.comparison_zarr], args.comparison_method,
+            archive, args.comparison_label,
         )
         if args.comparison_zarr else None
     )
@@ -2480,7 +2485,7 @@ def main() -> None:
     if comparison:
         plot_prior_production_spatial_comparison(
             archive, comparison, args.factor, out_dir,
-            [*paths, Path(comparison["path"])],
+            [*paths, *[Path(path) for path in comparison["paths"]]],
         )
     plot_monthly_grid_maps(
         temporal_grids, archive, "monthly_mean", "06", out_dir,

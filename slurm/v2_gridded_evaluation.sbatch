@@ -64,8 +64,12 @@ if [[ -n "${V2_EVAL_SELECTION_DAILY_START:-}" || -n "${V2_EVAL_SELECTION_DAILY_E
     )
 fi
 if [[ -n "${V2_EVAL_COMPARISON_ZARR:-}" ]]; then
+    IFS=: read -r -a COMPARISON_STORES <<< "$V2_EVAL_COMPARISON_ZARR"
+    for store in "${COMPARISON_STORES[@]}"; do
+        [[ -d "$store" ]] || { echo "ERROR: missing comparison store $store" >&2; exit 1; }
+    done
     EVAL_ARGS+=(
-        --comparison-zarr "$V2_EVAL_COMPARISON_ZARR"
+        --comparison-zarr "${COMPARISON_STORES[@]}"
         --comparison-method "${V2_EVAL_COMPARISON_METHOD:-v2_simul_s04_huber3}"
         --comparison-label "${V2_EVAL_COMPARISON_LABEL:-BMD-only Huber3 (prior production)}"
     )

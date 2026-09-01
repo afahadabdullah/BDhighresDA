@@ -13,6 +13,20 @@ export V2_EVAL_CV_ROOT="${V2_EVAL_CV_ROOT:-$V2_CONFIRM_ROOT}"
 export V2_EVAL_TEXTURE_MEMBERS="${V2_EVAL_TEXTURE_MEMBERS:-5}"
 POOL="${V2_EVAL_POOL:-1}"
 PER_SEASON="${V2_EVAL_PER_SEASON:-1}"
+COMPARISON_ROOT="${V2_EVAL_COMPARISON_ROOT:-}"
+
+comparison_for_store() {
+    local eval_store="$1"
+    if [[ -z "$COMPARISON_ROOT" ]]; then
+        printf '%s' "${V2_EVAL_COMPARISON_ZARR:-}"
+        return
+    fi
+    local label
+    label="$(basename "$eval_store" .zarr)"
+    local comparison="$COMPARISON_ROOT/gridded/$label.zarr"
+    [[ -d "$comparison" ]] || { echo "ERROR: matched comparison store missing: $comparison" >&2; exit 1; }
+    printf '%s' "$comparison"
+}
 
 STORES=()
 if (( $# )); then
@@ -35,8 +49,9 @@ if [[ "$PER_SEASON" == "1" ]]; then
     for store in "${STORES[@]}"; do
         label="$(basename "$store" .zarr)"
         out="$V2_CONFIRM_ROOT/evaluation/$label"
+        comparison="$(comparison_for_store "$store")"
         result="$(sbatch --parsable \
-            --export="ALL,V2_EVAL_ZARRS=$store,V2_EVAL_OUT=$out" \
+            --export="ALL,V2_EVAL_ZARRS=$store,V2_EVAL_OUT=$out,V2_EVAL_COMPARISON_ZARR=$comparison" \
             slurm/v2_gridded_evaluation.sbatch)"
         echo "  $label: ${result%%;*} -> $out"
     done
@@ -46,10 +61,16 @@ fi
 
 if [[ "$POOL" == "1" && ${#STORES[@]} -gt 1 ]]; then
     joined="$(IFS=:; echo "${STORES[*]}")"
+    comparisons=()
+    for store in "${STORES[@]}"; do
+        comparison="$(comparison_for_store "$store")"
+        [[ -n "$comparison" ]] && comparisons+=("$comparison")
+    done
+    comparison_joined="$(IFS=:; echo "${comparisons[*]}")"
     label="pooled_${#STORES[@]}_seasons"
     out="$V2_CONFIRM_ROOT/evaluation/$label"
     result="$(sbatch --parsable \
-        --export="ALL,V2_EVAL_ZARRS=$joined,V2_EVAL_OUT=$out" \
+        --export="ALL,V2_EVAL_ZARRS=$joined,V2_EVAL_OUT=$out,V2_EVAL_COMPARISON_ZARR=$comparison_joined" \
         slurm/v2_gridded_evaluation.sbatch)"
     echo "  pooled: ${result%%;*} -> $out"
 fi
