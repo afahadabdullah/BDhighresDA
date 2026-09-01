@@ -410,7 +410,7 @@ def main() -> None:
         "temporal_support_note": (
             "Date labels are aligned and both sources use background day D-1. BWDB aligns exactly "
             "with the existing 03 UTC prepared IMERG; BMD retains a three-hour support mismatch. "
-            "This mixed-support May experiment is an evaluation, not a replacement production archive."
+            "Withheld-gauge scores must retain this mixed-support caveat; all-station output is a production analysis, not independent gauge verification."
         ),
         "analysis_selection": fold_manifest,
         "source_station_counts": summary.groupby("source")["station_id"].nunique().astype(int).to_dict(),

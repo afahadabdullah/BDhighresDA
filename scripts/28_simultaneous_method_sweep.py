@@ -442,6 +442,13 @@ V2_CONFIRMATORY = [
             note="secondary frozen candidate: robust joint likelihood"),
 ]
 
+# Frozen production winner from the combined BMD+BWDB May 2022 experiment.
+# ``resolve_variants`` adds the background reference automatically, leaving
+# exactly one assimilating analysis method in this group.
+V2_HUBER3_WINNER = [
+    next(variant for variant in V2_CONFIRMATORY if variant.name == "v2_simul_s04_huber3")
+]
+
 # The one-day V7/CPCv2 comparison must not silently choose a different spatial
 # split for the two model families.  These are the frozen winners from the two
 # CPCv2 tournaments: the selected gauges-only method, and the primary frozen
@@ -549,13 +556,14 @@ GROUPS = {
     "v2_ingestion_s04": V2_INGESTION_S04,
     "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
     "v2_confirmatory": V2_CONFIRMATORY,
+    "v2_huber3_winner": V2_HUBER3_WINNER,
     "v2_comparison": V2_COMPARISON,
     "v2_gauge_authority": V2_GAUGE_AUTHORITY,
     "all": _unique_variants(
         CORE + TEMPERING + BIAS + WEIGHTING + TWOSTEP
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
-        + V2_CONFIRMATORY + V2_COMPARISON + V2_GAUGE_AUTHORITY
+        + V2_CONFIRMATORY + V2_HUBER3_WINNER + V2_COMPARISON + V2_GAUGE_AUTHORITY
     ),
 }
 
