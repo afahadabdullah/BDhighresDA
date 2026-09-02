@@ -104,6 +104,13 @@ def compute_metrics(predicted: np.ndarray, truth: np.ndarray) -> dict[str, float
     return {"mae": mae, "rmse": rmse, "bias": bias, "corr": corr}
 
 
+def extract_eval_ensemble_flat(ens_arr: np.ndarray, eval_idx: np.ndarray) -> np.ndarray:
+    """Flatten (n_days, n_members, n_stations) -> (n_days * n_eval, n_members) aligned with gauge_mm[:, eval_idx].reshape(-1)."""
+    eval_ens = ens_arr[:, :, eval_idx]
+    eval_trans = np.swapaxes(eval_ens, 1, 2)
+    return eval_trans.reshape(-1, eval_ens.shape[1])
+
+
 def add_gauge_markers(
     ax, lons, lats, values, assim_idx, eval_idx, vmin, vmax, cmap="viridis"
 ):
@@ -547,7 +554,7 @@ def main():
         variant_names,
         key=lambda v: (
             fair_crps_1d(
-                station_ensembles[v][:, :, eval_idx].reshape(-1, station_ensembles[v].shape[1]),
+                extract_eval_ensemble_flat(station_ensembles[v], eval_idx),
                 obs_eval_flat,
             ).mean()
             if v in station_ensembles
@@ -560,7 +567,7 @@ def main():
     for v in sorted_variants:
         if v not in station_ensembles:
             continue
-        ens_flat = station_ensembles[v][:, :, eval_idx].reshape(-1, station_ensembles[v].shape[1])
+        ens_flat = extract_eval_ensemble_flat(station_ensembles[v], eval_idx)
         c = float(np.nanmean(fair_crps_1d(ens_flat, obs_eval_flat)))
         m = float(np.nanmean(np.abs(ens_flat.mean(axis=1) - obs_eval_flat)))
         var_crps.append(c)
@@ -632,8 +639,16 @@ def main():
     ax_cdf.grid(alpha=0.3, which="both")
 
     ax_dist = axes3[1, 1]
-    if distance_km is not None:
-        dist_eval = np.tile(distance_km[eval_idx], (n_days, 1)).reshape(-1)
+    if len(eval_idx) > 0 and len(assim_idx) > 0:
+        eval_lat_pts = station_lat[eval_idx]
+        eval_lon_pts = station_lon[eval_idx]
+        assim_lat_pts = station_lat[assim_idx]
+        assim_lon_pts = station_lon[assim_idx]
+        dist_per_eval_station = np.array([
+            float(np.min(111.0 * np.sqrt((elat - assim_lat_pts) ** 2 + (np.cos(np.deg2rad(elat)) * (elon - assim_lon_pts)) ** 2)))
+            for elat, elon in zip(eval_lat_pts, eval_lon_pts)
+        ])
+        dist_eval = np.tile(dist_per_eval_station, n_days)
         bins = [(0, 15), (15, 30), (30, 60), (60, 200)]
         bin_labels = ["<15 km\n(dense cluster)", "15–30 km\n(near)", "30–60 km\n(medium)", ">60 km\n(isolated)"]
         bin_crps_bg = []
@@ -643,23 +658,26 @@ def main():
             mask_b = (dist_eval >= b_low) & (dist_eval < b_high) & np.isfinite(obs_eval_flat)
             if mask_b.any():
                 if "background" in station_ensembles:
+                    ens_bg = extract_eval_ensemble_flat(station_ensembles["background"], eval_idx)
                     bin_crps_bg.append(
                         float(np.nanmean(fair_crps_1d(
-                            station_ensembles["background"][:, :, eval_idx].reshape(-1, station_ensembles["background"].shape[1])[mask_b],
+                            ens_bg[mask_b],
                             obs_eval_flat[mask_b],
                         )))
                     )
                 if ref_arm in station_ensembles:
+                    ens_ref = extract_eval_ensemble_flat(station_ensembles[ref_arm], eval_idx)
                     bin_crps_ref.append(
                         float(np.nanmean(fair_crps_1d(
-                            station_ensembles[ref_arm][:, :, eval_idx].reshape(-1, station_ensembles[ref_arm].shape[1])[mask_b],
+                            ens_ref[mask_b],
                             obs_eval_flat[mask_b],
                         )))
                     )
                 if best_arm in station_ensembles:
+                    ens_best = extract_eval_ensemble_flat(station_ensembles[best_arm], eval_idx)
                     bin_crps_best.append(
                         float(np.nanmean(fair_crps_1d(
-                            station_ensembles[best_arm][:, :, eval_idx].reshape(-1, station_ensembles[best_arm].shape[1])[mask_b],
+                            ens_best[mask_b],
                             obs_eval_flat[mask_b],
                         )))
                     )
@@ -833,7 +851,7 @@ def main():
     for v in sorted_variants:
         if v not in station_ensembles:
             continue
-        ens_flat = station_ensembles[v][:, :, eval_idx].reshape(-1, station_ensembles[v].shape[1])
+        ens_flat = extract_eval_ensemble_flat(station_ensembles[v], eval_idx)
         crps_v = float(np.nanmean(fair_crps_1d(ens_flat, obs_eval_flat)))
         m_v = compute_metrics(ens_flat.mean(axis=1), obs_eval_flat)
         summary_md.append(

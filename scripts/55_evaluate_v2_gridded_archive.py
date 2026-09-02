@@ -2186,9 +2186,11 @@ def plot_prior_production_spatial_comparison(
     candidates = np.flatnonzero(primary)
     chirps_residual = residual_stack(archive["chirps"][primary], factor, mask)
     day_index = int(candidates[np.nanargmax(np.nanmean(chirps_residual[:, mask] ** 2, axis=1))])
-    if "v2_simul_s04_huber3" not in archive["methods"]:
-        raise ValueError("evaluated archive lacks v2_simul_s04_huber3 for spatial comparison")
-    current = archive["mean"][archive["methods"].index("v2_simul_s04_huber3"), day_index]
+    cand_methods = [m for m in archive["methods"] if m != "background"]
+    if not cand_methods:
+        raise ValueError("evaluated archive lacks an analysis method for spatial comparison")
+    target_method = "v2_simul_s04_huber3" if "v2_simul_s04_huber3" in cand_methods else cand_methods[0]
+    current = archive["mean"][archive["methods"].index(target_method), day_index]
     previous = comparison["mean"][day_index]
     current_residual = residual_stack(current[None], factor, mask)[0]
     previous_residual = residual_stack(previous[None], factor, mask)[0]

@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--station-summaries", nargs="+", required=True)
     parser.add_argument("--zarr-stores", nargs="+", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--winner", default=None, help="Name of candidate method (default: auto-detected or v2_simul_s04_huber3)")
     return parser.parse_args()
 
 
@@ -229,6 +230,16 @@ def main() -> None:
     collections = [args.dumps, args.reports, args.manifests, args.station_summaries, args.zarr_stores]
     if any(len(values) != len(PERIODS) for values in collections):
         raise ValueError("each input collection must contain exactly four period files/stores")
+
+    global WINNER, METHODS
+    if args.winner:
+        WINNER = args.winner
+    else:
+        first_dump = np.load(args.dumps[0], allow_pickle=False)
+        cand_methods = [m for m in first_dump["variant_names"].astype(str).tolist() if m != BACKGROUND]
+        if cand_methods:
+            WINNER = cand_methods[0]
+    METHODS = [BACKGROUND, WINNER]
 
     period_results: dict[str, dict] = {}
     period_data: dict[str, dict] = {}
