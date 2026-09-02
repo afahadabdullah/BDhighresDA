@@ -161,6 +161,19 @@ class Variant:
     gauge_guidance_gamma: float | None = None
     imerg_guidance_gamma: float | None = None
     ensrf_localization_km: float = 200.0
+    secondary_source_prefix: str = "BWDB_"
+    secondary_r_multiplier: float = 1.0
+    """Observation-error multiplier for gauges whose id starts with the prefix.
+
+    The production gauge error budget (``sigma_obs`` + ``representativeness``)
+    was set against the BMD synoptic network.  ``output/bwdb_analysis/
+    paired_station_metrics.csv`` measures what happens when a second network is
+    added: co-located BMD/BWDB pairs at a median separation of 3.6 km agree only
+    to a median daily r of 0.73, 8 of 35 pairs fall below 0.6, and seasonal-total
+    ratios run from 0.73 to 1.31.  Assimilating both sources under one scalar R
+    asserts a trust in the secondary network that the paired record does not
+    support.  1.0 (the default) leaves every earlier run bit-identical.
+    """
     note: str = ""
 
     @property
@@ -449,6 +462,91 @@ V2_HUBER3_WINNER = [
     next(variant for variant in V2_CONFIRMATORY if variant.name == "v2_simul_s04_huber3")
 ]
 
+# Dense-network gauge methods.  Every arm here answers the same question: the
+# frozen ``v2_simul_s04_huber3`` contract was selected on ~39 BMD gauges with a
+# median nearest-neighbour separation near 60 km, and it is now being handed
+# ~304 BMD+BWDB gauges whose median nearest-neighbour separation is 15 km.  Three
+# things in that contract are density-dependent and none of them were re-derived:
+#
+#   1. ``gauge_component_spread_cells=6`` is a 33 km Gaussian, so each gauge's
+#      gradient reaches roughly +/-66 km.  At 60 km spacing a kernel overlaps one
+#      or two neighbours; at 15 km spacing it overlaps of order fifty, and the
+#      summed gauge gradient at a point grows with that count.
+#   2. ``guidance.clip_norm`` caps the summed gradient.  A cap that never bound
+#      on 39 gauges can bind on nearly every step with 304, at which point the
+#      analysis is no longer the posterior the config describes.
+#   3. ``R`` is one scalar for both networks (see ``secondary_r_multiplier``).
+#
+# ``prod_huber3`` reproduces the frozen contract exactly and is the bar; each
+# other arm changes one of the three mechanisms.  The background reference is
+# inserted by ``resolve_variants``.
+V2_DENSE_GAUGE = [
+    Variant("prod_huber3", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="frozen production contract; the bar every dense arm must clear"),
+    Variant("dense_s3", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="spread rescaled to the dense network (~17 km, near the 15 km spacing)"),
+    Variant("dense_s2", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=2.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="narrower still (~11 km); tests whether s3 is already too broad"),
+    Variant("dense_s3_l2", streams="both", prior_temperature=1.0,
+            imerg_stride=1,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="s3 with the Huber cost removed; separates robustness from saturation"),
+    Variant("dense_s6_bwdb_r4", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=6.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="production spread, BWDB error inflated 4x; isolates trust from reach"),
+    Variant("dense_s3_bwdb_r4", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="both corrections together; the leading candidate"),
+    Variant("dense_s3_gw050", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0, gauge_weight=0.50,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="s3 with half gauge authority; the source-blind version of r4"),
+]
+
+# The localized-EnSRF alternative for the same dense network.  Joint guidance
+# spreads a point gauge with a fixed isotropic kernel, which is a statement
+# about B that does not adapt to the flow; a serial EnSRF taper applies the
+# ensemble's own covariance and handles observation density natively, which is
+# why it is the standard answer to this problem outside generative DA.
+# ``prod_huber3`` is repeated so the comparison happens inside one job, against
+# one shared background draw.
+V2_DENSE_GAUGE_ENSRF = [
+    V2_DENSE_GAUGE[0],
+    Variant("twostep_ensrf_loc50", streams="both", algorithm="twostep_ensrf",
+            prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=50.0,
+            note="IMERG guides the sampler; gauges update it with a 50 km taper"),
+    Variant("twostep_ensrf_loc100", streams="both", algorithm="twostep_ensrf",
+            prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=100.0),
+    Variant("twostep_ensrf_loc150", streams="both", algorithm="twostep_ensrf",
+            prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=150.0,
+            note="taper at the measured ~146 km variogram range"),
+    Variant("twostep_ensrf_loc100_bwdb_r4", streams="both",
+            algorithm="twostep_ensrf", prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=100.0,
+            secondary_r_multiplier=4.0,
+            note="localized EnSRF with the BWDB error budget corrected too"),
+]
+
 # The one-day V7/CPCv2 comparison must not silently choose a different spatial
 # split for the two model families.  These are the frozen winners from the two
 # CPCv2 tournaments: the selected gauges-only method, and the primary frozen
@@ -557,6 +655,8 @@ GROUPS = {
     "v2_simultaneous_refine": V2_SIMULTANEOUS_REFINE,
     "v2_confirmatory": V2_CONFIRMATORY,
     "v2_huber3_winner": V2_HUBER3_WINNER,
+    "v2_dense_gauge": V2_DENSE_GAUGE,
+    "v2_dense_gauge_ensrf": V2_DENSE_GAUGE_ENSRF,
     "v2_comparison": V2_COMPARISON,
     "v2_gauge_authority": V2_GAUGE_AUTHORITY,
     "all": _unique_variants(
@@ -1027,6 +1127,45 @@ def main() -> None:
         device=device,
         representativeness=float(gauge_config["representativeness"]),
     )
+    assimilated_ids = np.asarray(stations.ids)[assim_idx].astype(str)
+
+    def gauge_error_scale(variant: Variant) -> np.ndarray:
+        """Per-assimilated-station multiplier on the gauge error variance.
+
+        Returns all ones for every variant that does not set
+        ``secondary_r_multiplier``, so the frozen arms are unchanged.
+        """
+        scale = np.ones(len(assim_idx), dtype=np.float64)
+        if variant.secondary_r_multiplier == 1.0:
+            return scale
+        if variant.secondary_r_multiplier <= 0.0:
+            raise ValueError(
+                f"{variant.name}: secondary_r_multiplier must be positive"
+            )
+        secondary = np.char.startswith(
+            assimilated_ids, variant.secondary_source_prefix
+        )
+        if not secondary.any():
+            raise ValueError(
+                f"{variant.name}: secondary_r_multiplier="
+                f"{variant.secondary_r_multiplier} was requested but no assimilated "
+                f"station id starts with {variant.secondary_source_prefix!r}. "
+                "Refusing to run an arm that is silently identical to its control."
+            )
+        scale[secondary] = float(variant.secondary_r_multiplier)
+        return scale
+
+    def gauge_R_for(variant: Variant) -> torch.Tensor:
+        """Gauge observation-error variance vector for one variant."""
+        scale = torch.from_numpy(
+            gauge_error_scale(variant).astype(np.float32)
+        ).to(device)
+        return gauge_R * scale / variant.gauge_weight
+
+    def gauge_variance_for(variant: Variant) -> np.ndarray:
+        """The same budget in the numpy form the serial EnSRF consumes."""
+        return gauge_variance * gauge_error_scale(variant) / variant.gauge_weight
+
     gauge_operator = PhysicalBilinearObsOperator(
         grid, stations.lat[assim_idx], stations.lon[assim_idx], transform, valid=valid
     ).to(device)
@@ -1168,7 +1307,7 @@ def main() -> None:
                     grid=grid,
                     transform=transform,
                     valid=valid,
-                    observation_variance=gauge_variance / variant.gauge_weight,
+                    observation_variance=gauge_variance_for(variant),
                     localization_km=variant.ensrf_localization_km,
                     seed=day_seed + 3_000_000,
                 )
@@ -1291,7 +1430,7 @@ def main() -> None:
             )
 
             if variant.streams == "gauges":
-                operator, y, R = gauge_operator, gauge_y, gauge_R / variant.gauge_weight
+                operator, y, R = gauge_operator, gauge_y, gauge_R_for(variant)
                 gamma_vector = torch.full(
                     (len(assim_idx),), gauge_gamma / variant.gauge_weight, device=device
                 )
@@ -1311,7 +1450,7 @@ def main() -> None:
                         ],
                     ).to(device)
                 y = torch.cat([gauge_y, satellite_y], dim=2)
-                R = torch.cat([gauge_R / variant.gauge_weight, satellite_R])
+                R = torch.cat([gauge_R_for(variant), satellite_R])
                 gamma_vector = torch.cat(
                     [
                         torch.full(
@@ -1366,7 +1505,7 @@ def main() -> None:
                     grid=grid,
                     transform=transform,
                     valid=valid,
-                    observation_variance=gauge_variance / variant.gauge_weight,
+                    observation_variance=gauge_variance_for(variant),
                     localization_km=variant.ensrf_localization_km,
                     seed=day_seed + 3_000_000,
                 )

@@ -70,7 +70,7 @@ def localized_serial_ensrf(
     grid,
     transform: PrecipTransform,
     valid: np.ndarray,
-    observation_variance: float,
+    observation_variance,
     localization_km: float,
     seed: int,
 ) -> tuple[np.ndarray, dict]:
@@ -84,6 +84,15 @@ def localized_serial_ensrf(
     ensemble_mm = np.asarray(ensemble_mm, dtype=np.float32)
     if ensemble_mm.shape[0] < 3:
         raise ValueError("serial EnSRF needs at least three ensemble members")
+    # ``observation_variance`` is a scalar (one error budget for the whole
+    # network) or one value per observation.  The per-observation form exists so
+    # a mixed-authority network can give a secondary gauge source its own,
+    # larger error rather than asserting that both sources are equally
+    # trustworthy.  A scalar broadcasts, so every earlier call is unchanged.
+    variance_per_obs = np.broadcast_to(
+        np.asarray(observation_variance, dtype=np.float64),
+        (np.asarray(observations_mm).shape[0],),
+    ).astype(np.float64)
     state = transform.forward(np.nan_to_num(ensemble_mm, nan=0.0)).astype(np.float32)
     dry = float(transform.forward(np.array(0.0, dtype=np.float32)))
     state[:, ~valid] = dry
@@ -103,7 +112,8 @@ def localized_serial_ensrf(
         predicted_variance = float(
             np.dot(predicted_anomaly, predicted_anomaly) / (len(predicted) - 1)
         )
-        denominator = predicted_variance + observation_variance
+        obs_variance = float(variance_per_obs[index])
+        denominator = predicted_variance + obs_variance
         if not np.isfinite(denominator) or denominator <= 1e-8:
             continue
         state_mean = state.mean(axis=0)
@@ -121,7 +131,7 @@ def localized_serial_ensrf(
         )
         gain = gaspari_cohn(distance, localization_km) * covariance / denominator
         innovation = observed - predicted_mean
-        alpha = 1.0 / (1.0 + np.sqrt(observation_variance / denominator))
+        alpha = 1.0 / (1.0 + np.sqrt(obs_variance / denominator))
         updated_mean = state_mean + gain * innovation
         updated_anomaly = state_anomaly - alpha * predicted_anomaly[:, None, None] * gain
         state = (updated_mean[None] + updated_anomaly).astype(np.float32)

@@ -108,6 +108,7 @@ def guidance_grad(
     mask: torch.Tensor | None = None,
     mask_fill: float = 0.0,
     to_precip=None,
+    diagnostics: dict | None = None,
 ):
     """Return ``(velocity, grad_x log p(y|x_t))``.
 
@@ -138,6 +139,7 @@ def guidance_grad(
             "around the guided sampler call; use torch.no_grad() only for "
             "UNGUIDED sampling, and .detach() the result instead."
         )
+    component_norms: list[float] = []
     component_spreads = getattr(H, "component_spread_cells", None)
     if component_spreads is not None and cfg.spread_cells:
         raise ValueError(
@@ -195,6 +197,10 @@ def guidance_grad(
                     component_grad = spread_gradient(
                         component_grad, spread, mask=mask
                     )
+                if diagnostics is not None:
+                    component_norms.append(
+                        float(component_grad.flatten(1).norm(dim=1).mean())
+                    )
                 component_grads.append(component_grad)
             grad = torch.stack(component_grads).sum(dim=0)
             _require_finite_gradient(grad, "summed observation components")
@@ -206,9 +212,46 @@ def guidance_grad(
     # changing its total, but it lowers the peak and hence the norm, so
     # clipping first would rescale against a norm the applied field no longer
     # has.
+    pre_clip_norm = grad.flatten(1).norm(dim=1)
     if cfg.clip_norm is not None:
-        n = grad.flatten(1).norm(dim=1).view(-1, 1, 1, 1)
+        n = pre_clip_norm.view(-1, 1, 1, 1)
         grad = grad * (cfg.clip_norm / n.clamp_min(cfg.clip_norm))
+
+    if diagnostics is not None:
+        # Whether the norm cap binds is not a cosmetic detail.  Once it binds on
+        # most steps the increment stops scaling with the innovation and the
+        # guidance degenerates towards a fixed-magnitude direction chosen by
+        # whichever observations happen to have the largest residual: a
+        # different method from the one the config describes.  The likelihood
+        # gradient grows roughly with the number of observations, so a cap
+        # calibrated on ~35 gauges can start binding silently when the same
+        # config is handed 300.  Recording it makes that visible in the report
+        # instead of leaving it to be inferred from the maps.
+        record = diagnostics.setdefault(
+            "guidance",
+            {
+                "calls": 0,
+                "members": 0,
+                "clipped_members": 0,
+                "pre_clip_norm_sum": 0.0,
+                "pre_clip_norm_max": 0.0,
+                "clip_norm": cfg.clip_norm,
+                "component_norm_sums": None,
+            },
+        )
+        record["calls"] += 1
+        record["members"] += int(pre_clip_norm.numel())
+        record["pre_clip_norm_sum"] += float(pre_clip_norm.sum())
+        record["pre_clip_norm_max"] = max(
+            record["pre_clip_norm_max"], float(pre_clip_norm.max())
+        )
+        if cfg.clip_norm is not None:
+            record["clipped_members"] += int((pre_clip_norm > cfg.clip_norm).sum())
+        if component_norms:
+            if record["component_norm_sums"] is None:
+                record["component_norm_sums"] = [0.0] * len(component_norms)
+            for position, value in enumerate(component_norms):
+                record["component_norm_sums"][position] += value
 
     return u.detach(), grad.detach()
 

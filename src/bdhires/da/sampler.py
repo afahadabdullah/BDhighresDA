@@ -273,6 +273,7 @@ def assimilate(
         u, g = guidance_grad(
             xx, tt, model, flow, cond, H, y, R, gcfg,
             mask=mask, mask_fill=cfg.mask_fill, to_precip=to_precip,
+            diagnostics=diagnostics,
         )
         return combine(u, xx, tt), g
 
