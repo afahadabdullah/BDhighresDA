@@ -462,12 +462,6 @@ V2_HUBER3_WINNER = [
     next(variant for variant in V2_CONFIRMATORY if variant.name == "v2_simul_s04_huber3")
 ]
 
-# New winning configuration for dense BMD+BWDB network:
-# Super-obbing (0.25 deg) with dense_s6_bwdb_r4 (spread s=6, BWDB R x4, Huber delta=3.0)
-V2_BMD_BWDB_SUPEROB_WINNER = [
-    next(variant for variant in V2_DENSE_GAUGE if variant.name == "dense_s6_bwdb_r4")
-]
-
 # Dense-network gauge methods.  Every arm here answers the same question: the
 # frozen ``v2_simul_s04_huber3`` contract was selected on ~39 BMD gauges with a
 # median nearest-neighbour separation near 60 km, and it is now being handed
@@ -595,6 +589,12 @@ V2_DENSE_GAUGE = [
             gauge_guidance_gamma=2.0e-2, imerg_guidance_gamma=1.0e-3,
             secondary_r_multiplier=4.0,
             note="s3+bwdb_r4 with double gauge guidance gradient"),
+]
+
+# New winning configuration for dense BMD+BWDB network:
+# Super-obbing (0.25 deg) with dense_s6_bwdb_r4 (spread s=6, BWDB R x4, Huber delta=3.0)
+V2_BMD_BWDB_SUPEROB_WINNER = [
+    next(variant for variant in V2_DENSE_GAUGE if variant.name == "dense_s6_bwdb_r4")
 ]
 
 # The localized-EnSRF alternative for the same dense network.
