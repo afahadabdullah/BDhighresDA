@@ -118,3 +118,24 @@ def test_launcher_references_bwdb_and_huber3():
     submit_src = (ROOT / "slurm" / "submit_bmd_bwdb_bangladesh_eval.sh").read_text()
     assert "v2_bmd_bwdb_huber3_2021_2024" in submit_src
     assert "slurm/bmd_bwdb_bangladesh_eval.sbatch" in submit_src
+
+
+def test_data_checker_fair_crps():
+    checker_path = ROOT / "scripts" / "86_check_bmd_bwdb_2021_2024_archive.py"
+    spec = importlib.util.spec_from_file_location("bmd_bwdb_checker", checker_path)
+    loaded = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(loaded)
+
+    # Perfect ensemble matching truth should have fair CRPS = 0
+    members = np.ones((5, 30)) * 4.0
+    truth = np.ones(5) * 4.0
+    crps = loaded.fair_crps_per_sample(members, truth)
+    assert np.allclose(crps, 0.0)
+
+
+def test_checker_sbatch_references():
+    sbatch_src = (ROOT / "slurm" / "bmd_bwdb_data_checker.sbatch").read_text()
+    assert "86_check_bmd_bwdb_2021_2024_archive.py" in sbatch_src
+    assert "v2_bmd_bwdb_huber3_2021_2024" in sbatch_src
+
