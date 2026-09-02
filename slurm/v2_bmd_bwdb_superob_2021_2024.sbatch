@@ -92,7 +92,11 @@ fi
 SUPEROB_R="$("$PYTHON_BIN" -c "
 import json
 data = json.load(open('$SUPEROB_REPORT'))
-print(data['budget_recommendations']['superob_implied_representativeness'])
+rec = data.get('recommended_representativeness') or data.get('budget_recommendations') or {}
+val = rec.get('superob_implied_representativeness')
+if val is None:
+    val = rec.get('implied_representativeness', 0.45)
+print(val)
 ")"
 
 COMMON_ARGS=(
