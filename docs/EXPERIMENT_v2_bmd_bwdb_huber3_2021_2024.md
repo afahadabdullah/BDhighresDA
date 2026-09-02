@@ -45,11 +45,9 @@ assimilated-fit gauge plots.  The one-holdout layout is stated in the output;
 it is not treated as five-fold exhaustive verification.
 
 The launcher follows the earlier archive pattern: it evaluates each completed
-2021--2024 seasonal Zarr and then the pooled archive.  Every evaluation reads
-the matching earlier BMD-only Huber3 production Zarr and writes a labelled
-spatial-sensitivity map (`fig12`): combined BMD+BWDB, prior BMD-only, and their
-difference.  The prior run is a comparison field, not truth or independent
-verification.
+2021--2024 seasonal Zarr and then the pooled archive, producing the exact
+standard eleven-figure evaluation suite (including maps and colorbars) used
+for the prior CPC-v2 archive.
 
 All outputs live below:
 
@@ -61,5 +59,5 @@ data/processed/v2_bmd_bwdb_huber3_2021_2024/
 │   ├── huber3_2021_2024_scores.{md,json,png}
 │   ├── gridded_catalog.json
 │   └── fold_plots/<period>_fold0_diagnostics.png
-└── evaluation/{period,pooled_4_seasons}/fig{01..12}_*.png # full evaluator + BMD-only map comparison
+└── evaluation/{period,pooled_4_seasons}/fig{01..11}_*.png # full evaluator figures
 ```
