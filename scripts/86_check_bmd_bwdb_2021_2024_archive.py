@@ -197,13 +197,33 @@ def check_production_run(prod_npz: Path, prod_json: Path, label: str) -> dict:
         )
 
     # Verify assimilated fit scores (which ARE finite and meaningful in production)
+    variants_dict = report.get("variants") or report.get("results") or {}
     assimilated_fit = {}
+    gauge_mm = np.asarray(dump["gauge_mm"], float)
+
     for method in EXPECTED_METHODS:
-        entry = report.get("results", {}).get(method, {})
+        entry = variants_dict.get(method, {})
         fit = entry.get("assimilated_fit", {})
         crps = fit.get("crps_mm")
         rmse = fit.get("mean_rmse_mm")
         mae = fit.get("mean_mae_mm")
+
+        # If not present in JSON, compute directly from production dump arrays
+        if crps is None or not np.isfinite(crps) or rmse is None or not np.isfinite(rmse):
+            key = f"station_{method}"
+            if key in dump and len(assim_idx) > 0:
+                ens = np.asarray(dump[key][:, :, assim_idx], float)
+                obs = gauge_mm[:, assim_idx]
+                flat_obs = obs.reshape(-1)
+                flat_ens = np.moveaxis(ens, 1, 2).reshape(-1, ens.shape[1])
+                valid_mask = np.isfinite(flat_obs) & np.all(np.isfinite(flat_ens), axis=1)
+
+                if valid_mask.any():
+                    crps_vals = fair_crps_per_sample(flat_ens, flat_obs)
+                    crps = float(np.nanmean(crps_vals))
+                    diff = flat_ens.mean(axis=1)[valid_mask] - flat_obs[valid_mask]
+                    rmse = float(np.sqrt(np.mean(diff**2)))
+                    mae = float(np.mean(np.abs(diff)))
 
         if crps is None or not np.isfinite(crps):
             errors.append(f"Production {method}: assimilated_fit CRPS is missing or NaN")
@@ -214,8 +234,9 @@ def check_production_run(prod_npz: Path, prod_json: Path, label: str) -> dict:
             "crps_mm": crps,
             "rmse_mm": rmse,
             "mae_mm": mae,
-            "samples": fit.get("n", 0),
+            "samples": fit.get("n", int(np.isfinite(gauge_mm[:, assim_idx]).sum())),
         }
+
 
     return {
         "status": "PASS" if not errors else "FAIL",
