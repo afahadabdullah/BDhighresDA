@@ -50,7 +50,8 @@ SEED="${V2_DENSE_SEED:-202205}"
 CELL_DEG="${V2_DENSE_CELL_DEG:-0.25}"
 CKPT="${BMD_CKPT:-runs/prior_h100_cpc_v2/best.pt}"
 CONFIG="${BMD_CONFIG:-configs/da.yaml}"
-IMERG="${V2_DENSE_IMERG:-data/processed/v2_confirmatory_2021_2024/imerg_s04/2022_may_sep.nc}"
+IMERG_SOURCE="${V2_DENSE_IMERG:-data/processed/v2_confirmatory_2021_2024/imerg_s04/2022_may_sep.nc}"
+IMERG="${V2_DENSE_IMERG_SUBSET:-$ROOT/imerg_s04_${START//-/}_${END//-/}.nc}"
 BACKGROUND_DAY_OFFSET="${BACKGROUND_DAY_OFFSET:--1}"
 GROUP_JOINT="${V2_DENSE_GROUP:-v2_dense_gauge}"
 GROUP_ENSRF="${V2_DENSE_GROUP_ENSRF:-v2_dense_gauge_ensrf}"
@@ -112,6 +113,11 @@ esac
 
 PREFIX="$ROOT/profiles/$LABEL"
 mkdir -p "$ROOT/profiles"
+if [[ ! -s "$IMERG" ]]; then
+    "$PYTHON_BIN" -u scripts/43_subset_prepared_imerg.py \
+        --input "$IMERG_SOURCE" --start "$START" --end "$END" \
+        --out "$IMERG" --report "${IMERG%.nc}_qc.json"
+fi
 for required in "$STATIONS" "$HOLDOUT" "$IMERG" "$CKPT" "$CONFIG"; do
     [[ -f "$required" ]] || { echo "ERROR: required file missing: $required"; exit 1; }
 done

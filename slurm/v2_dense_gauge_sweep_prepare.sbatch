@@ -40,14 +40,26 @@ SEASON_END="${V2_DENSE_SEASON_END:-2022-09-30}"
 HOLDOUT_SEED="${V2_DENSE_HOLDOUT_SEED:-202122}"
 CELL_DEG="${V2_DENSE_CELL_DEG:-0.25}"
 SIGMA_OBS="${V2_DENSE_SIGMA_OBS:-0.10}"
+START="${V2_DENSE_START:-2022-05-01}"
+END="${V2_DENSE_END:-2022-05-05}"
+IMERG_SOURCE="${V2_DENSE_IMERG:-data/processed/v2_confirmatory_2021_2024/imerg_s04/2022_may_sep.nc}"
+IMERG_SUBSET="$ROOT/imerg_s04_${START//-/}_${END//-/}.nc"
 
-for required in "$BMD_STATIONS" "$BWDB_XLSX" "$STATS"; do
+for required in "$BMD_STATIONS" "$BWDB_XLSX" "$STATS" "$IMERG_SOURCE"; do
     [[ -f "$required" ]] || { echo "ERROR: required file missing: $required"; exit 1; }
 done
 [[ -d "$BMD_DATA_DIR" ]] || { echo "ERROR: missing BMD data directory: $BMD_DATA_DIR"; exit 1; }
 
 STATION_ROOT="$ROOT/stations"
 mkdir -p "$STATION_ROOT/holdout"
+
+if [[ ! -s "$IMERG_SUBSET" ]]; then
+    "$PYTHON_BIN" -u scripts/43_subset_prepared_imerg.py \
+        --input "$IMERG_SOURCE" --start "$START" --end "$END" \
+        --out "$IMERG_SUBSET" --report "${IMERG_SUBSET%.nc}_qc.json"
+else
+    echo "Reusing $IMERG_SUBSET"
+fi
 
 if [[ -s "$STATION_ROOT/combined_daily.csv" && -s "$STATION_ROOT/holdout/fold0.txt" ]]; then
     echo "Reusing $STATION_ROOT/combined_daily.csv"

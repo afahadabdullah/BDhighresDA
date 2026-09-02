@@ -136,10 +136,28 @@ def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) 
         imerg_time = np.asarray(dataset.time.values).astype("datetime64[D]")
         expected_time = np.asarray(times).astype("datetime64[D]")
         if not np.array_equal(imerg_time, expected_time):
-            raise ValueError(
-                f"IMERG dates do not exactly match checkpoint dates: "
-                f"{imerg_time[[0, -1]]} versus {expected_time[[0, -1]]}"
-            )
+            if (
+                len(imerg_time) > 0
+                and len(expected_time) > 0
+                and expected_time[0] >= imerg_time[0]
+                and expected_time[-1] <= imerg_time[-1]
+                and np.isin(expected_time, imerg_time).all()
+            ):
+                start_idx = int(np.where(imerg_time == expected_time[0])[0][0])
+                end_idx = int(np.where(imerg_time == expected_time[-1])[0][0]) + 1
+                if np.array_equal(imerg_time[start_idx:end_idx], expected_time):
+                    dataset = dataset.isel(time=slice(start_idx, end_idx))
+                    imerg_time = expected_time
+                    print(
+                        f"[imerg] sliced {path} to requested window: "
+                        f"{expected_time[0]}..{expected_time[-1]} ({len(expected_time)} days)",
+                        flush=True,
+                    )
+            if not np.array_equal(imerg_time, expected_time):
+                raise ValueError(
+                    f"IMERG dates do not exactly match checkpoint dates: "
+                    f"{imerg_time[[0, -1]]} versus {expected_time[[0, -1]]}"
+                )
         end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
         try:
             end_hour = int(end_hour)
