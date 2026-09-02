@@ -41,3 +41,18 @@ done
     --out-dir "$ROOT/summary"
 
 echo "Summary: $ROOT/summary/dense_gauge_sweep.{md,json,csv,png}"
+
+BEST_PROFILE="${PROFILE_ARGS[0]#*=}"
+for arg in "${PROFILE_ARGS[@]}"; do
+    if [[ "$arg" == *"repr_measured="* ]]; then
+        BEST_PROFILE="${arg#*=}"
+    fi
+done
+
+"$PYTHON_BIN" -u scripts/89_plot_dense_sweep_maps_and_diagnostics.py \
+    --npz "${BEST_PROFILE}.npz" \
+    --report "${BEST_PROFILE}.json" \
+    --station-summary "$STATION_ROOT/station_summary.csv" \
+    --out-dir "$ROOT/plots"
+
+echo "Plots:   $ROOT/plots/dense_sweep_*.png"

@@ -481,11 +481,13 @@ V2_HUBER3_WINNER = [
 # other arm changes one of the three mechanisms.  The background reference is
 # inserted by ``resolve_variants``.
 V2_DENSE_GAUGE = [
+    # Baseline frozen contract
     Variant("prod_huber3", streams="both", prior_temperature=1.0,
             imerg_stride=1, huber_delta=3.0,
             gauge_component_spread_cells=6.0,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
             note="frozen production contract; the bar every dense arm must clear"),
+    # Spread variations with uniform R
     Variant("dense_s3", streams="both", prior_temperature=1.0,
             imerg_stride=1, huber_delta=3.0,
             gauge_component_spread_cells=3.0,
@@ -496,37 +498,100 @@ V2_DENSE_GAUGE = [
             gauge_component_spread_cells=2.0,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
             note="narrower still (~11 km); tests whether s3 is already too broad"),
+    Variant("dense_s4", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=4.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="intermediate spread (~22 km) between s3 and production s6"),
     Variant("dense_s3_l2", streams="both", prior_temperature=1.0,
             imerg_stride=1,
             gauge_component_spread_cells=3.0,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
             note="s3 with the Huber cost removed; separates robustness from saturation"),
+    # BWDB observation error inflation strength (r2, r4, r8)
+    Variant("dense_s3_bwdb_r2", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=2.0,
+            note="s3 with BWDB error inflated 2x (milder inflation)"),
+    Variant("dense_s3_bwdb_r4", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="both corrections together; leading candidate"),
+    Variant("dense_s3_bwdb_r8", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=8.0,
+            note="s3 with BWDB error inflated 8x; strongly prioritizes synoptic BMD"),
+    # Interaction of spread and BWDB inflation
     Variant("dense_s6_bwdb_r4", streams="both", prior_temperature=1.0,
             imerg_stride=1, huber_delta=3.0,
             gauge_component_spread_cells=6.0,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
             secondary_r_multiplier=4.0,
             note="production spread, BWDB error inflated 4x; isolates trust from reach"),
-    Variant("dense_s3_bwdb_r4", streams="both", prior_temperature=1.0,
+    Variant("dense_s4_bwdb_r4", streams="both", prior_temperature=1.0,
             imerg_stride=1, huber_delta=3.0,
-            gauge_component_spread_cells=3.0,
+            gauge_component_spread_cells=4.0,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
             secondary_r_multiplier=4.0,
-            note="both corrections together; the leading candidate"),
+            note="intermediate spread (~22 km) combined with BWDB r4"),
+    Variant("dense_s2_bwdb_r4", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=2.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="narrow spread (~11 km) combined with BWDB r4"),
+    # Gauge authority / weight scaling
     Variant("dense_s3_gw050", streams="both", prior_temperature=1.0,
             imerg_stride=1, huber_delta=3.0,
             gauge_component_spread_cells=3.0, gauge_weight=0.50,
             gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
-            note="s3 with half gauge authority; the source-blind version of r4"),
+            note="s3 with half gauge authority; source-blind version of r4"),
+    Variant("dense_s3_gw075", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0, gauge_weight=0.75,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            note="s3 with 75% gauge authority"),
+    Variant("dense_s3_bwdb_r4_gw075", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0, gauge_weight=0.75,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="s3+bwdb_r4 with mild 75% authority softening"),
+    # Huber cost sensitivity on leading candidate
+    Variant("dense_s3_bwdb_r4_l2", streams="both", prior_temperature=1.0,
+            imerg_stride=1,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="s3+bwdb_r4 with Huber cost removed; pure L2 loss"),
+    Variant("dense_s3_bwdb_r4_h1p5", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=1.5,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=1.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="s3+bwdb_r4 with tighter Huber delta=1.5"),
+    # Guidance gradient strength
+    Variant("dense_s3_bwdb_r4_g005", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=5.0e-3, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="s3+bwdb_r4 with half gauge guidance gradient"),
+    Variant("dense_s3_bwdb_r4_g020", streams="both", prior_temperature=1.0,
+            imerg_stride=1, huber_delta=3.0,
+            gauge_component_spread_cells=3.0,
+            gauge_guidance_gamma=2.0e-2, imerg_guidance_gamma=1.0e-3,
+            secondary_r_multiplier=4.0,
+            note="s3+bwdb_r4 with double gauge guidance gradient"),
 ]
 
-# The localized-EnSRF alternative for the same dense network.  Joint guidance
-# spreads a point gauge with a fixed isotropic kernel, which is a statement
-# about B that does not adapt to the flow; a serial EnSRF taper applies the
-# ensemble's own covariance and handles observation density natively, which is
-# why it is the standard answer to this problem outside generative DA.
-# ``prod_huber3`` is repeated so the comparison happens inside one job, against
-# one shared background draw.
+# The localized-EnSRF alternative for the same dense network.
 V2_DENSE_GAUGE_ENSRF = [
     V2_DENSE_GAUGE[0],
     Variant("twostep_ensrf_loc50", streams="both", algorithm="twostep_ensrf",
@@ -540,11 +605,21 @@ V2_DENSE_GAUGE_ENSRF = [
             prior_temperature=1.0, imerg_stride=1,
             imerg_guidance_gamma=1.0e-3, ensrf_localization_km=150.0,
             note="taper at the measured ~146 km variogram range"),
+    Variant("twostep_ensrf_loc50_bwdb_r4", streams="both",
+            algorithm="twostep_ensrf", prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=50.0,
+            secondary_r_multiplier=4.0,
+            note="50 km EnSRF with BWDB error budget corrected 4x"),
     Variant("twostep_ensrf_loc100_bwdb_r4", streams="both",
             algorithm="twostep_ensrf", prior_temperature=1.0, imerg_stride=1,
             imerg_guidance_gamma=1.0e-3, ensrf_localization_km=100.0,
             secondary_r_multiplier=4.0,
-            note="localized EnSRF with the BWDB error budget corrected too"),
+            note="100 km EnSRF with BWDB error budget corrected 4x"),
+    Variant("twostep_ensrf_loc100_bwdb_r8", streams="both",
+            algorithm="twostep_ensrf", prior_temperature=1.0, imerg_stride=1,
+            imerg_guidance_gamma=1.0e-3, ensrf_localization_km=100.0,
+            secondary_r_multiplier=8.0,
+            note="100 km EnSRF with BWDB error budget corrected 8x"),
 ]
 
 # The one-day V7/CPCv2 comparison must not silently choose a different spatial
@@ -664,6 +739,7 @@ GROUPS = {
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
         + V2_CONFIRMATORY + V2_HUBER3_WINNER + V2_COMPARISON + V2_GAUGE_AUTHORITY
+        + V2_DENSE_GAUGE + V2_DENSE_GAUGE_ENSRF
     ),
 }
 
