@@ -90,6 +90,10 @@ def parse_args() -> argparse.Namespace:
         "--cpc-dir", default="data/raw/cpc",
         help="directory containing original NOAA precip.YYYY.nc CPC 0.5-degree files",
     )
+    parser.add_argument(
+        "--product-name", default=None,
+        help="display name for evaluated product (e.g. BRISHTI-05 (BMD+BWDB Superob))",
+    )
     return parser.parse_args()
 
 
@@ -780,10 +784,21 @@ def main() -> None:
     requested_tag = period_tag(requested_months)
     shared = load_shared_evaluator()
     paths = [Path(path) for path in args.zarr]
-    archive = shared.load_archive(paths, args.factor)
-    if args.method not in archive["methods"]:
-        raise ValueError(f"{args.method!r} not in archived methods {archive['methods']}")
-    method_index = archive["methods"].index(args.method)
+    global PRODUCT_NAME, SOURCE_LABELS, EVIDENCE_ROLES
+    if args.product_name:
+        PRODUCT_NAME = args.product_name
+        SOURCE_LABELS["analysis"] = PRODUCT_NAME
+        EVIDENCE_ROLES["analysis"] = f"{PRODUCT_NAME} saved all-station posterior analysis"
+
+    target_method = args.method
+    if target_method not in archive["methods"]:
+        cand = [m for m in archive["methods"] if m != "background"]
+        if len(cand) == 1:
+            target_method = cand[0]
+            print(f"[eval] auto-detected candidate analysis method: {target_method}")
+        else:
+            raise ValueError(f"{args.method!r} not in archived methods {archive['methods']}")
+    method_index = archive["methods"].index(target_method)
 
     boundary_path = Path(args.boundary_geojson)
     geometry = geometry_from_geojson(json.loads(boundary_path.read_text()))
