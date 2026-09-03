@@ -784,6 +784,7 @@ def main() -> None:
     requested_tag = period_tag(requested_months)
     shared = load_shared_evaluator()
     paths = [Path(path) for path in args.zarr]
+    archive = shared.load_archive(paths, args.factor)
     global PRODUCT_NAME, SOURCE_LABELS, EVIDENCE_ROLES
     if args.product_name:
         PRODUCT_NAME = args.product_name
