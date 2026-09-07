@@ -358,10 +358,46 @@ development window, not independent confirmation. Do not choose architecture on
 the long test archive. A later confirmatory evaluation must preserve the existing
 date/fold exclusions, including 2022-05-01..10 and May 2022 for monthly scores.
 
+### F. May 1--10 matched HPC evaluation against completed CPCv2
+
+After the full GraphFlow checkpoint is frozen, submit the five-fold development
+comparison with:
+
+```bash
+git pull --ff-only origin main
+bash slurm/submit_graphflow_g0_da_may2022.sh
+```
+
+This launcher runs only GraphFlow. It reuses the already completed CPCv2
+`v2_simul_s04_ig010` folds under
+`data/processed/v2_simultaneous_refinement/ing2022_s04`, requires the same BMD
+daily files and prepared S04 IMERG product, and refuses a comparison if dates,
+folds, observations, ensemble size, seed, or frozen DA parameters differ.
+Override `GRAPHFLOW_CPC_ROOT`, `GRAPHFLOW_IMERG`, `GRAPHFLOW_CKPT`, or
+`BMD_CKPT` only when the corresponding HPC paths differ.
+
+The dependent summary writes:
+
+```text
+runs/graphflow_g0_multimesh/da_may2022/summary/
+├── comparison.md
+├── comparison.json
+└── comparison.png
+```
+
+The summary reports four distinct cases (CPCv2 background/DA and GraphFlow
+background/DA), paired CRPS confidence intervals, the difference in within-model
+DA gain, withheld-gauge DA gain versus distance to the nearest assimilated
+gauge, and grid-increment amplitude versus distance. The difference in
+within-model gain is the clean test of whether GraphFlow extracts more useful
+information from observations, rather than merely starting from a better prior.
+May 1--10, 2022 was a development/selection window, so this is a controlled
+diagnostic rather than an independent confirmatory claim.
+
 ## Remaining checks and limitations
 
-- CUDA tests, batch-32 memory, realistic ensemble throughput, real-data preflight,
-  30-epoch paired screens and full training are pending HPC/data availability.
+- The full GraphFlow training run is complete. The matched real-observation DA
+  folds and their pooled comparison remain pending on HPC.
 - No learned GraphFlow checkpoint, rainfall CRPS/RMSE gain, or improved physical
   observation-response structure is claimed. Only synthetic/engineering outputs
   were generated locally.

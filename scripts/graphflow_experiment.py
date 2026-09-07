@@ -156,10 +156,16 @@ def frozen_da(args):
     sys.modules[spec.name] = sweep
     spec.loader.exec_module(sweep)
     frozen = next(v for v in sweep.V2_CONFIRMATORY if v.name == "v2_simul_s04_ig010")
-    for label, ckpt in (("cpcv2_control", args.unet_ckpt), (EXPERIMENT, args.graphflow_ckpt)):
+    runs = {
+        "cpcv2": ("cpcv2_control", args.unet_ckpt),
+        "graphflow": (EXPERIMENT, args.graphflow_ckpt),
+    }
+    selected_runs = runs.values() if args.model == "both" else (runs[args.model],)
+    folds = range(5) if args.fold is None else (args.fold,)
+    for label, ckpt in selected_runs:
         group = f"{label}_frozen_da"
         sweep.GROUPS[group] = [replace(frozen, name=group)]
-        for fold in range(5):
+        for fold in folds:
             prefix = out / label / f"fold{fold}"
             prefix.parent.mkdir(exist_ok=True)
             if prefix.with_suffix(".npz").exists() or prefix.with_suffix(".json").exists():
@@ -180,10 +186,16 @@ def frozen_da(args):
                 sweep.main()
             finally:
                 sys.argv = previous_argv
-    (out / "comparison.json").write_text(json.dumps(dict(
+    metadata_name = (
+        "comparison.json"
+        if args.model == "both" and args.fold is None
+        else f"run_{args.model}_{'all' if args.fold is None else f'fold{args.fold}'}.json"
+    )
+    (out / metadata_name).write_text(json.dumps(dict(
         experiment=EXPERIMENT, frozen_reference="v2_simul_s04_ig010",
         unet_checkpoint=args.unet_ckpt, graphflow_checkpoint=args.graphflow_ckpt,
         start=args.start, end=args.end, members=30, folds=5,
+        selected_model=args.model, selected_fold=args.fold,
         interpretation="Four cases: each prior, and each prior with identical frozen DA. "
                        "Default dates are development-only; not independent confirmation.",
     ), indent=2) + "\n")
@@ -213,6 +225,14 @@ def main():
     da.add_argument("--start", default="2022-05-01")
     da.add_argument("--end", default="2022-05-10")
     da.add_argument("--out", default=f"runs/{EXPERIMENT}/frozen_da")
+    da.add_argument(
+        "--model", choices=("both", "cpcv2", "graphflow"), default="both",
+        help="run both priors, or only one side of the paired comparison",
+    )
+    da.add_argument(
+        "--fold", type=int, choices=range(5),
+        help="run one zero-based spatial fold; default runs all five",
+    )
     args = parser.parse_args()
     if args.action == "smoke" and args.steps < 2:
         parser.error("smoke requires at least two optimization steps")
