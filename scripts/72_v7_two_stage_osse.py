@@ -80,7 +80,7 @@ from bdhires.eval.v7_window import bangladesh_window  # noqa: E402
 from bdhires.models import (  # noqa: E402
     AllocationFlow,
     RectifiedFlow,
-    UNet,
+    model_from_checkpoint,
     select_weights,
 )
 from bdhires.transforms import (  # noqa: E402
@@ -471,11 +471,9 @@ def meso_expected_cond_channels(frozen: Path, in_channels: int = 1) -> int:
 def load_meso(frozen: Path, cond_channels: int, size: int, cfg: dict, device):
     """Stage A: the CPCv2 UNet, rebuilt from the checkpoint's own config."""
     checkpoint = torch.load(frozen, map_location="cpu", weights_only=False)
-    model = UNet(
-        in_channels=1, cond_channels=cond_channels, out_channels=1,
-        image_size=size, **cfg["model"],
+    model = model_from_checkpoint(
+        checkpoint, cond_channels=cond_channels, image_size=size,
     )
-    model.load_state_dict(select_weights(checkpoint), strict=True)
     return model.to(device).eval(), cfg
 
 

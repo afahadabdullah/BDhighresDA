@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.eval import MonitorConfig, ValidationMonitor  # noqa: E402
 from bdhires.grids import Grid, WIDE, at_resolution, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
+from bdhires.models import EMA, RectifiedFlow, build_model, model_metadata, flow_matching_loss  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     load_climatology,
     CondTransform,
@@ -379,7 +379,7 @@ def main():
     hurdle_enabled = bool(hurdle_cfg.get("enabled", False))
     dry_threshold_mm = float(hurdle_cfg.get("wet_threshold_mm", 0.1))
     # Channel 0 is the flow velocity; channel 1 is the dry-probability logit.
-    model = UNet(
+    model = build_model(
         in_channels=1,
         cond_channels=train_ds.total_cond_channels,
         out_channels=2 if hurdle_enabled else 1,
@@ -427,6 +427,8 @@ def main():
     stale_evaluations = 0
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
+        if "model_config" in ck and ck["model_config"] != model_metadata(model):
+            raise ValueError("resume checkpoint architecture differs from the requested model")
         model.load_state_dict(ck["model"])
         if ema is not None:
             if ck.get("ema") is None:
@@ -637,6 +639,7 @@ def main():
                     improved = True     # no sampled score yet
             state = dict(
                 model=model.state_dict(),
+                model_config=model_metadata(model),
                 ema=ema.state_dict() if ema is not None else None,
                 weights="ema" if ema is not None else "model",
                 opt=opt.state_dict(),
@@ -704,6 +707,7 @@ def main():
         save_checkpoint(
             dict(
                 model=model.state_dict(),
+                model_config=model_metadata(model),
                 ema=ema.state_dict() if ema is not None else None,
                 weights="ema" if ema is not None else "model",
                 cfg=cfg,

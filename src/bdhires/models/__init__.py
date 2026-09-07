@@ -9,6 +9,8 @@ from .flow import (  # noqa: F401
     split_prediction,
 )
 from .unet import UNet  # noqa: F401
+from .graphflow_unet import GraphFlowUNet  # noqa: F401
+from .factory import build_model, model_from_checkpoint, model_metadata  # noqa: F401
 from .hierarchical_subgrid import (  # noqa: F401
     AllocationFlow,
     CoarseHurdleFlow,

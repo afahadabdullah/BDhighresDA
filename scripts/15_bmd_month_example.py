@@ -44,7 +44,7 @@ from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset, load_stations  # noqa: E402
 from bdhires.eval import crps_ensemble  # noqa: E402
 from bdhires.grids import Grid, WIDE, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
+from bdhires.models import RectifiedFlow, model_from_checkpoint  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     CondTransform,
     PrecipTransform,
@@ -592,14 +592,11 @@ def main() -> None:
     valid = dataset.fixed_valid > 0
     slices = dataset.fixed_spatial_slices()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNet(
-        in_channels=1,
+    model = model_from_checkpoint(
+        checkpoint,
         cond_channels=dataset.total_cond_channels,
-        out_channels=1,
         image_size=grid.nlon,
-        **training_config["model"],
     )
-    model.load_state_dict(select_weights(checkpoint), strict=True)
     model = model.to(device).eval()
     flow = RectifiedFlow()
     mask = torch.from_numpy(valid.astype(np.float32)[None, None]).to(device)

@@ -181,7 +181,7 @@ def training_summary(
     add("")
     add(" MODEL")
     add(_row(
-        "UNet",
+        "GraphFlowUNet" if hasattr(model, "graph_config") else "UNet",
         f"base={model.base_channels_arg}  mult={list(model.channel_mult)}  "
         f"blocks={model.num_res_blocks}  heads={model.num_heads}  "
         f"dropout={model.dropout}",
@@ -194,6 +194,8 @@ def training_summary(
             else "input only"
         )
     ))
+    if hasattr(model, "graph_config"):
+        add(_sub(f"graph: {model.graph_config}"))
     add(_sub("level   resolution   channels   attn"))
     for level in model.levels():
         name = str(level["level"])

@@ -39,7 +39,7 @@ from bdhires.da import (  # noqa: E402
 from bdhires.da.sampler import assimilate as run_assim  # noqa: E402
 from bdhires.data import PrecipDataset, DatasetConfig, load_stations  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
+from bdhires.models import RectifiedFlow, model_from_checkpoint  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     load_climatology,
     CondTransform,
@@ -51,9 +51,7 @@ from bdhires.transforms import (  # noqa: E402
 def load_model(ckpt_path: str, cond_channels: int, crop: int, device):
     ck = torch.load(ckpt_path, map_location="cpu")
     cfg = ck["cfg"]
-    model = UNet(in_channels=1, cond_channels=cond_channels, out_channels=1,
-                 image_size=crop, **cfg["model"])
-    model.load_state_dict(select_weights(ck), strict=True)
+    model = model_from_checkpoint(ck, cond_channels=cond_channels, image_size=crop)
     return model.to(device).eval(), cfg
 
 

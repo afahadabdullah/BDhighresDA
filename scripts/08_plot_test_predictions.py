@@ -34,7 +34,7 @@ from bdhires.da import SamplerConfig  # noqa: E402
 from bdhires.da.sampler import sample  # noqa: E402
 from bdhires.data import DatasetConfig, PrecipDataset  # noqa: E402
 from bdhires.grids import WIDE, crop_offsets, get_grid  # noqa: E402
-from bdhires.models import RectifiedFlow, UNet, select_weights  # noqa: E402
+from bdhires.models import RectifiedFlow, UNet, model_from_checkpoint  # noqa: E402
 from bdhires.transforms import (  # noqa: E402
     load_climatology,
     CondTransform,
@@ -149,15 +149,11 @@ def load_best_model(
     device: torch.device,
 ) -> tuple[UNet, dict, dict]:
     training_config = checkpoint["cfg"]
-    model = UNet(
-        in_channels=1,
+    model = model_from_checkpoint(
+        checkpoint,
         cond_channels=cond_channels,
-        out_channels=1,
         image_size=image_size,
-        **training_config["model"],
     )
-    # EMA when the run used it, the online weights when it did not.
-    model.load_state_dict(select_weights(checkpoint), strict=True)
     metadata = {
         key: checkpoint.get(key)
         for key in (

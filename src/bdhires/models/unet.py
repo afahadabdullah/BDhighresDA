@@ -240,6 +240,13 @@ class UNet(nn.Module):
         nn.init.zeros_(self.out_conv.weight)
         nn.init.zeros_(self.out_conv.bias)
 
+    def _process_encoder_level(self, h, level, emb, condition_features):
+        """Hook after a level's final block, before its skip and downsample.
+
+        The baseline is an identity; it adds no parameters or state-dict keys.
+        """
+        return h
+
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor | None = None):
         if x.ndim != 4 or x.shape[1] != self.in_channels:
             raise ValueError(
@@ -296,6 +303,12 @@ class UNet(nn.Module):
                         )
                 else:
                     h = layer(h)
+            level = self.down_condition_levels[index]
+            if level >= 0 and (
+                index + 1 == len(self.down)
+                or self.down_condition_levels[index + 1] != level
+            ):
+                h = self._process_encoder_level(h, level, emb, condition_features)
             hs.append(h)
         for index, layer in enumerate(self.mid):
             h = layer(h, emb) if isinstance(layer, ResBlock) else layer(h)

@@ -30,7 +30,7 @@ from train import (  # noqa: E402
     load_cfg,
 )
 
-from bdhires.models import EMA, RectifiedFlow, UNet, flow_matching_loss  # noqa: E402
+from bdhires.models import EMA, RectifiedFlow, build_model, flow_matching_loss  # noqa: E402
 from bdhires.utils.dist import amp_dtype  # noqa: E402
 
 EXPECTED_STATIC_CHANNELS = 7
@@ -243,7 +243,7 @@ def main() -> None:
     hurdle_cfg = config["train"].get("hurdle") or {}
     hurdle_enabled = bool(hurdle_cfg.get("enabled", False))
     dry_threshold_mm = float(hurdle_cfg.get("wet_threshold_mm", 0.1))
-    model = UNet(
+    model = build_model(
         in_channels=1,
         cond_channels=train_dataset.total_cond_channels,
         # 2 channels when the hurdle head is on: velocity plus the dry logit.
