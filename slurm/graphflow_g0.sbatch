@@ -12,11 +12,13 @@
 # A separate experimental launcher. Default to engineering benchmarks, not training.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?submit from the repository root}"
+mkdir -p logs
 export PYTHONNOUSERSITE=1
 unset PYTHONHOME
 export PYTHONPATH="$PWD/src"
 GRAPHFLOW_PYTHON="${GRAPHFLOW_PYTHON:-/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python}"
 GRAPHFLOW_ACTION="${GRAPHFLOW_ACTION:-benchmark}"
+GRAPHFLOW_RESUME="${GRAPHFLOW_RESUME:-}"
 [[ -x "$GRAPHFLOW_PYTHON" ]] || { echo "Missing Python: $GRAPHFLOW_PYTHON" >&2; exit 1; }
 "$GRAPHFLOW_PYTHON" -c 'import torch; assert torch.cuda.is_available(), "CUDA required"; print(torch.cuda.get_device_name())'
 case "$GRAPHFLOW_ACTION" in
@@ -31,7 +33,11 @@ case "$GRAPHFLOW_ACTION" in
             --out runs/graphflow_g0_multimesh/real_data_preflight.json
         ;;
     screen|full)
-        srun "$GRAPHFLOW_PYTHON" scripts/graphflow_experiment.py train --stage "$GRAPHFLOW_ACTION"
+        TRAIN_ARGS=(--stage "$GRAPHFLOW_ACTION")
+        if [[ -n "$GRAPHFLOW_RESUME" ]]; then
+            TRAIN_ARGS+=(--resume "$GRAPHFLOW_RESUME")
+        fi
+        srun "$GRAPHFLOW_PYTHON" scripts/graphflow_experiment.py train "${TRAIN_ARGS[@]}"
         ;;
     control-screen)
         srun "$GRAPHFLOW_PYTHON" scripts/graphflow_experiment.py train --stage screen --baseline
