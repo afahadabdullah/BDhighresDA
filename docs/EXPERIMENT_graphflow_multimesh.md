@@ -394,6 +394,39 @@ information from observations, rather than merely starting from a better prior.
 May 1--10, 2022 was a development/selection window, so this is a controlled
 diagnostic rather than an independent confirmatory claim.
 
+### G. Broad one-fold GraphFlow DA screen
+
+The matched five-fold result showed a significantly better GraphFlow background
+but an underdispersed analysis and less incremental benefit from the unchanged
+CPCv2 guidance. Screen alternative DA contracts on one fixed spatial fold with:
+
+```bash
+git pull --ff-only origin main
+bash slurm/submit_graphflow_g0_da_screen_may2022.sh --exclude=gh043
+```
+
+The screen evaluates 49 GraphFlow DA arms plus one common background over
+2022-05-01..10, 30 members, fold 0. Categories include joint and per-stream
+likelihood weights, prior temperatures and temperature/weight interactions,
+guidance gamma, gauge-gradient spread, Huber likelihoods, IMERG-guided flow
+followed by localized gauge EnSRF, and gauge/IMERG stream controls. The exact
+current frozen arm is `gfs_joint_base` and is the paired CRPS baseline.
+
+Outputs are:
+
+```text
+runs/graphflow_g0_multimesh/da_screen_may2022/
+├── graphflow_g0_multimesh/fold0.{npz,json}
+├── fold0_screen.md
+├── fold0_screen.json
+└── fold0_screen.png
+```
+
+This is deliberately a broad, one-fold development screen with only seven or
+eight withheld stations. It may reject unstable or poorly calibrated arms and
+form a shortlist, but cannot establish improvement. Promote at most three arms
+and rerun those unchanged on all five folds before making a DA claim.
+
 ## Remaining checks and limitations
 
 - The full GraphFlow training run is complete. The matched real-observation DA

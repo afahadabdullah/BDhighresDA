@@ -33,6 +33,115 @@ G0_CONFIG = ROOT / "configs/train_h100_cpc_graphflow_g0.yaml"
 EXPERIMENT = "graphflow_g0_multimesh"
 
 
+def graphflow_da_screen_variants(sweep, frozen):
+    """Broad one-fold DA screen around the frozen GraphFlow baseline.
+
+    Each arm changes a named mechanism.  This catalogue is private to the
+    GraphFlow process and never changes the historical CPCv2 method catalogue.
+    """
+    variants = [replace(
+        frozen, name="gfs_joint_base",
+        note="current frozen GraphFlow DA baseline",
+    )]
+
+    # Joint likelihood authority: both streams together, then each stream alone.
+    for label, weight in (("025", 0.25), ("050", 0.50), ("075", 0.75), ("125", 1.25)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_w{label}",
+            gauge_weight=weight, imerg_weight=weight,
+            note=f"joint gauge and IMERG likelihood weight {weight:g}",
+        ))
+    for label, weight in (("050", 0.50), ("075", 0.75), ("125", 1.25)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_gw{label}", gauge_weight=weight,
+            note=f"gauge likelihood weight {weight:g}; IMERG fixed",
+        ))
+    for label, weight in (("025", 0.25), ("050", 0.50), ("075", 0.75), ("125", 1.25)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_iw{label}", imerg_weight=weight,
+            note=f"IMERG likelihood weight {weight:g}; gauges fixed",
+        ))
+
+    # Prior inflation and a small temperature/authority interaction grid.
+    for label, temperature in (("105", 1.05), ("110", 1.10), ("115", 1.15),
+                               ("125", 1.25), ("150", 1.50)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_t{label}", prior_temperature=temperature,
+            note=f"prior temperature {temperature:g}; likelihood fixed",
+        ))
+    for tlabel, temperature in (("110", 1.10), ("125", 1.25), ("150", 1.50)):
+        for wlabel, weight in (("050", 0.50), ("075", 0.75)):
+            variants.append(replace(
+                frozen, name=f"gfs_joint_t{tlabel}_w{wlabel}",
+                prior_temperature=temperature,
+                gauge_weight=weight, imerg_weight=weight,
+                note=f"temperature {temperature:g}, both likelihood weights {weight:g}",
+            ))
+
+    # Larger gamma softens early-time guidance and can preserve posterior spread.
+    for label, gamma in (("020", 2.0e-2), ("050", 5.0e-2), ("100", 1.0e-1)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_gamma{label}",
+            gauge_guidance_gamma=gamma, imerg_guidance_gamma=gamma,
+            note=f"both guidance gamma values {gamma:g}",
+        ))
+    variants.extend([
+        replace(frozen, name="gfs_joint_gg020", gauge_guidance_gamma=2.0e-2,
+                note="gauge gamma 0.02; IMERG gamma fixed"),
+        replace(frozen, name="gfs_joint_ig020", imerg_guidance_gamma=2.0e-2,
+                note="IMERG gamma 0.02; gauge gamma fixed"),
+    ])
+
+    # Gauge-footprint scale and robust likelihood.
+    for label, spread in (("s0", 0.0), ("s3", 3.0), ("s9", 9.0), ("s12", 12.0)):
+        variants.append(replace(
+            frozen, name=f"gfs_joint_{label}",
+            gauge_component_spread_cells=spread,
+            note=f"gauge component gradient spread {spread:g} grid cells",
+        ))
+    variants.extend([
+        replace(frozen, name="gfs_joint_huber3", huber_delta=3.0,
+                note="robust joint likelihood with Huber delta 3"),
+        replace(frozen, name="gfs_joint_huber5", huber_delta=5.0,
+                note="robust joint likelihood with Huber delta 5"),
+    ])
+
+    # A genuinely different process: IMERG-guided flow followed by gauge EnSRF.
+    for radius in (50.0, 100.0, 150.0, 200.0, 300.0):
+        variants.append(replace(
+            frozen, name=f"gfs_twostep_l{int(radius)}",
+            algorithm="twostep_ensrf", gauge_component_spread_cells=None,
+            ensrf_localization_km=radius,
+            note=f"IMERG-guided flow then gauge EnSRF at {radius:g} km",
+        ))
+    for radius in (100.0, 150.0, 200.0):
+        variants.append(replace(
+            frozen, name=f"gfs_twostep_t110_l{int(radius)}",
+            algorithm="twostep_ensrf", gauge_component_spread_cells=None,
+            prior_temperature=1.10, ensrf_localization_km=radius,
+            note=f"temperature 1.1, IMERG flow then gauge EnSRF at {radius:g} km",
+        ))
+
+    # Stream and covariance controls clarify which observation source helps.
+    variants.extend([
+        replace(frozen, name="gfs_gauges_guided", streams="gauges",
+                gauge_component_spread_cells=None, guidance_spread_cells=6.0,
+                note="gauges-only guided-flow control"),
+        replace(frozen, name="gfs_imerg_guided", streams="imerg",
+                gauge_component_spread_cells=None,
+                note="IMERG-only guided-flow control"),
+    ])
+    for radius in (50.0, 100.0, 150.0, 200.0, 300.0):
+        variants.append(replace(
+            frozen, name=f"gfs_gauge_ensrf_l{int(radius)}",
+            streams="gauges", algorithm="ensrf",
+            gauge_component_spread_cells=None,
+            ensrf_localization_km=radius,
+            note=f"gauges-only EnSRF at {radius:g} km",
+        ))
+    return variants
+
+
 def experiment_directory(path: str | Path) -> Path:
     """Keep the experiment outside every historical production directory."""
     path = Path(path)
@@ -156,6 +265,8 @@ def frozen_da(args):
     sys.modules[spec.name] = sweep
     spec.loader.exec_module(sweep)
     frozen = next(v for v in sweep.V2_CONFIRMATORY if v.name == "v2_simul_s04_ig010")
+    if args.variant_set == "screen" and args.model != "graphflow":
+        raise ValueError("the broad DA screen is GraphFlow-only; use --model graphflow")
     runs = {
         "cpcv2": ("cpcv2_control", args.unet_ckpt),
         "graphflow": (EXPERIMENT, args.graphflow_ckpt),
@@ -163,8 +274,12 @@ def frozen_da(args):
     selected_runs = runs.values() if args.model == "both" else (runs[args.model],)
     folds = range(5) if args.fold is None else (args.fold,)
     for label, ckpt in selected_runs:
-        group = f"{label}_frozen_da"
-        sweep.GROUPS[group] = [replace(frozen, name=group)]
+        group = f"{label}_{args.variant_set}_da"
+        sweep.GROUPS[group] = (
+            graphflow_da_screen_variants(sweep, frozen)
+            if args.variant_set == "screen"
+            else [replace(frozen, name=group)]
+        )
         for fold in folds:
             prefix = out / label / f"fold{fold}"
             prefix.parent.mkdir(exist_ok=True)
@@ -189,15 +304,22 @@ def frozen_da(args):
     metadata_name = (
         "comparison.json"
         if args.model == "both" and args.fold is None
-        else f"run_{args.model}_{'all' if args.fold is None else f'fold{args.fold}'}.json"
+        else f"run_{args.model}_{args.variant_set}_"
+             f"{'all' if args.fold is None else f'fold{args.fold}'}.json"
     )
     (out / metadata_name).write_text(json.dumps(dict(
         experiment=EXPERIMENT, frozen_reference="v2_simul_s04_ig010",
         unet_checkpoint=args.unet_ckpt, graphflow_checkpoint=args.graphflow_ckpt,
         start=args.start, end=args.end, members=30, folds=5,
         selected_model=args.model, selected_fold=args.fold,
-        interpretation="Four cases: each prior, and each prior with identical frozen DA. "
-                       "Default dates are development-only; not independent confirmation.",
+        variant_set=args.variant_set,
+        interpretation=(
+            "Broad one-fold development screen; shortlist at most three arms for "
+            "five-fold verification."
+            if args.variant_set == "screen" else
+            "Four cases: each prior, and each prior with identical frozen DA. "
+            "Default dates are development-only; not independent confirmation."
+        ),
     ), indent=2) + "\n")
 
 
@@ -232,6 +354,10 @@ def main():
     da.add_argument(
         "--fold", type=int, choices=range(5),
         help="run one zero-based spatial fold; default runs all five",
+    )
+    da.add_argument(
+        "--variant-set", choices=("frozen", "screen"), default="frozen",
+        help="frozen comparison arm or broad GraphFlow-only DA screening catalogue",
     )
     args = parser.parse_args()
     if args.action == "smoke" and args.steps < 2:

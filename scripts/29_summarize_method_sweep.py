@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-days", type=int, default=3)
     parser.add_argument("--n-resamples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--title", default="CPC-v2 DA method sweep")
     parser.add_argument("--out-markdown", default="data/processed/sweep_ranking.md")
     parser.add_argument("--out-plot", default="data/processed/sweep_ranking.png")
     parser.add_argument("--out-json", default=None)
@@ -271,7 +272,7 @@ def main() -> None:
     ordered = sorted(rows, key=lambda row: row["crps_mm"])
 
     lines = [
-        f"# CPC-v2 DA method sweep — {scope['start']} to {scope['end']}",
+        f"# {args.title} — {scope['start']} to {scope['end']}",
         "",
         f"- Days: **{scope['n_days']}**, members: **{scope['members']}**, "
         f"withheld station-days: **{scope['withheld_station_days']}**",
@@ -413,8 +414,11 @@ def main() -> None:
         print(f"[summary] wrote {args.out_json}", flush=True)
 
     # ------------------------------------------------------------------ figure
-    figure, axes = plt.subplots(2, 3, figsize=(19, 10), constrained_layout=True)
     names = [row["variant"] for row in ordered]
+    figure_height = max(10.0, min(24.0, 4.0 + 0.28 * len(names)))
+    figure, axes = plt.subplots(
+        2, 3, figsize=(19, figure_height), constrained_layout=True
+    )
     positions = np.arange(len(names))
     palette = plt.get_cmap("tab20")(np.linspace(0, 1, max(len(names), 2)))
 
@@ -483,7 +487,10 @@ def main() -> None:
     axes[1, 0].set_xlabel("Distance to nearest assimilated gauge (km)")
     axes[1, 0].set_ylabel("Mean |analysis − background| (mm day$^{-1}$)")
     axes[1, 0].set_title("D. Increment locality — falling curve = station bullseyes")
-    axes[1, 0].legend(fontsize=6, ncol=2)
+    axes[1, 0].legend(
+        fontsize=5 if len(names) > 20 else 6,
+        ncol=3 if len(names) > 20 else 2,
+    )
     axes[1, 0].grid(alpha=0.2)
 
     axes[1, 1].scatter(
@@ -517,7 +524,7 @@ def main() -> None:
     axes[1, 2].set_title("F. Daily variability amplitude — dashed is one")
 
     figure.suptitle(
-        f"CPC-v2 DA method sweep — {scope['start']} to {scope['end']}, "
+        f"{args.title} — {scope['start']} to {scope['end']}, "
         f"{scope['n_days']} days, {scope['withheld_station_days']} withheld station-days "
         "(screening run, not a skill evaluation)",
         fontsize=13,
