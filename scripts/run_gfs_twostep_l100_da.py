@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     )
     # Execution mode
     parser.add_argument(
+        "--arm",
+        default=ARM_NAME,
+        help=f"Assimilation variant name (default: {ARM_NAME}, e.g. gfs_joint_iw125)",
+    )
+    parser.add_argument(
         "--plot-only",
         action="store_true",
         help="Skip DA run; generate plots from an existing .npz dump",
@@ -160,9 +165,10 @@ def compute_metrics(predicted: np.ndarray, truth: np.ndarray) -> dict[str, float
 
 
 def run_targeted_da(args: argparse.Namespace, dump_path: Path, report_path: Path) -> None:
-    """Run DA exclusively for background + gfs_twostep_l100."""
-    print(f"[gfs_twostep_l100] loading GraphFlow checkpoint: {args.graphflow_ckpt}")
-    print(f"[gfs_twostep_l100] period: {args.start} to {args.end}; fold {args.fold}; {args.members} members")
+    """Run DA exclusively for background + selected arm."""
+    arm_name = getattr(args, "arm", ARM_NAME)
+    print(f"[{arm_name}] loading GraphFlow checkpoint: {args.graphflow_ckpt}")
+    print(f"[{arm_name}] period: {args.start} to {args.end}; fold {args.fold}; {args.members} members")
 
     spec = importlib.util.spec_from_file_location(
         "_graphflow_sweep_module", ROOT / "scripts/28_simultaneous_method_sweep.py"
@@ -174,25 +180,28 @@ def run_targeted_da(args: argparse.Namespace, dump_path: Path, report_path: Path
     # Base frozen simultaneous candidate
     frozen = next(v for v in sweep.V2_CONFIRMATORY if v.name == "v2_simul_s04_ig010")
 
-    # Define gfs_twostep_l100 variant
-    twostep_variant = replace(
-        frozen,
-        name=ARM_NAME,
-        algorithm="twostep_ensrf",
-        gauge_component_spread_cells=None,
-        ensrf_localization_km=100.0,
-        note="IMERG-guided flow then gauge EnSRF at 100 km",
+    # Import experiment module to resolve any screening arm
+    exp_spec = importlib.util.spec_from_file_location(
+        "_graphflow_experiment", ROOT / "scripts/graphflow_experiment.py"
     )
+    exp = importlib.util.module_from_spec(exp_spec)
+    exp_spec.loader.exec_module(exp)
+    all_screen_variants = exp.graphflow_da_screen_variants(sweep, frozen)
+    selected_variant = next((v for v in all_screen_variants if v.name == arm_name), None)
+    if selected_variant is None:
+        raise ValueError(
+            f"Unknown arm '{arm_name}'. Available screen variants: {[v.name for v in all_screen_variants]}"
+        )
 
     # Register targeted group
-    group_name = "gfs_twostep_l100_targeted"
-    sweep.GROUPS[group_name] = [twostep_variant]
+    group_name = f"{arm_name}_targeted"
+    sweep.GROUPS[group_name] = [selected_variant]
 
     # Hook sample_at_stations to intercept full 4D members (T, M, H, W)
     captured_fields: dict[str, np.ndarray] = {}
     original_sample_at_stations = sweep.sample_at_stations
 
-    expected_order = ["background", ARM_NAME]
+    expected_order = ["background", arm_name]
     capture_index = 0
 
     def hooked_sample_at_stations(members, grid, lat, lon):
@@ -322,6 +331,7 @@ def plot_single_spatial_diagnostic(
     assim_idx: np.ndarray,
     eval_idx: np.ndarray,
     out_path: Path,
+    arm_name: str = ARM_NAME,
 ) -> None:
     """Render a 2x3 cartographic spatial diagnostic grid for a single day or period mean."""
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
@@ -400,7 +410,7 @@ def plot_single_spatial_diagnostic(
     cbar02 = plt.colorbar(im02, ax=ax02, orientation="horizontal", shrink=0.75, pad=0.04)
     cbar02.set_label("Precipitation (mm/day)", fontsize=9)
     an_domain_mean = np.nanmean(masked_an)
-    ax02.set_title(f"C. {ARM_NAME} Analysis Mean\nDomain mean: {an_domain_mean:.1f} mm/day", fontsize=10, weight="bold")
+    ax02.set_title(f"C. {arm_name} Analysis Mean\nDomain mean: {an_domain_mean:.1f} mm/day", fontsize=10, weight="bold")
     ax02.legend(loc="lower right", fontsize=8, framealpha=0.85)
 
     # ------------------------------------------------------------------
@@ -547,9 +557,18 @@ def plot_single_spatial_diagnostic(
             ax.set_ylabel("Latitude (°N)", fontsize=8)
             ax.grid(True, linestyle=":", alpha=0.3, color="gray")
 
+    subtitle = (
+        "Two-Step DA: IMERG Flow Guidance + 100 km Gauge EnSRF"
+        if "twostep" in arm_name
+        else (
+            "Joint Guidance DA (1.25x IMERG likelihood weight)"
+            if "iw125" in arm_name
+            else "GraphFlow G0 DA Analysis Evaluation"
+        )
+    )
     fig.suptitle(
-        f"GraphFlow G0 2D Spatial Diagnostics: {ARM_NAME} ({date_label})\n"
-        "Two-Step DA: IMERG Flow Guidance + Localized Gauge EnSRF (100 km radius)",
+        f"GraphFlow G0 2D Spatial Diagnostics: {arm_name} ({date_label})\n"
+        f"{subtitle}",
         fontsize=13,
         weight="bold",
         y=1.01,
@@ -566,12 +585,12 @@ def plot_single_spatial_diagnostic(
 # ---------------------------------------------------------------------------
 
 
-def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
+def generate_spatial_diagnostics(dump_path: Path, out_dir: Path, arm_name: str = ARM_NAME) -> None:
     """Read .npz dump and generate period-mean and daily spatial diagnostic plots."""
     if not dump_path.exists():
         raise FileNotFoundError(f"Dump file does not exist: {dump_path}")
 
-    print(f"[gfs_twostep_l100] reading dump: {dump_path}")
+    print(f"[{arm_name}] reading dump: {dump_path}")
     data = np.load(dump_path, allow_pickle=False)
 
     times = [str(t) for t in data["times"]]
@@ -589,7 +608,7 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
 
     # Check for mean fields
     bg_key = "meanfield_background"
-    an_key = f"meanfield_{ARM_NAME}"
+    an_key = f"meanfield_{arm_name}"
     if bg_key not in data or an_key not in data:
         available_meanfields = [k for k in data.files if k.startswith("meanfield_")]
         raise KeyError(
@@ -615,11 +634,11 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
 
     # Check for spread fields
     bg_std = np.asarray(data["stdfield_background"], dtype=float) if "stdfield_background" in data else None
-    an_std = np.asarray(data[f"stdfield_{ARM_NAME}"], dtype=float) if f"stdfield_{ARM_NAME}" in data else None
+    an_std = np.asarray(data[f"stdfield_{arm_name}"], dtype=float) if f"stdfield_{arm_name}" in data else None
 
     # Station extractions
     bg_station = np.asarray(data["station_background"], dtype=float) if "station_background" in data else None
-    an_station = np.asarray(data[f"station_{ARM_NAME}"], dtype=float) if f"station_{ARM_NAME}" in data else None
+    an_station = np.asarray(data[f"station_{arm_name}"], dtype=float) if f"station_{arm_name}" in data else None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         bg_stn_mean = np.nanmean(bg_station, axis=1) if bg_station is not None else None
@@ -629,7 +648,7 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Multi-day Period Mean Plot
-    print("[gfs_twostep_l100] plotting 10-day period mean spatial diagnostics ...")
+    print(f"[{arm_name}] plotting 10-day period mean spatial diagnostics ...")
     period_label = f"Period Mean: {times[0]} to {times[-1]} ({n_days} days)"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -659,6 +678,7 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
         assim_idx=assim_idx,
         eval_idx=eval_idx,
         out_path=out_dir / "spatial_summary_period_mean.png",
+        arm_name=arm_name,
     )
 
     # Also save as PDF for publication quality
@@ -679,10 +699,11 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
         assim_idx=assim_idx,
         eval_idx=eval_idx,
         out_path=out_dir / "spatial_summary_period_mean.pdf",
+        arm_name=arm_name,
     )
 
     # 2. Daily Spatial Diagnostic Plots
-    print(f"[gfs_twostep_l100] plotting daily spatial diagnostic maps for {n_days} days ...")
+    print(f"[{arm_name}] plotting daily spatial diagnostic maps for {n_days} days ...")
     for d, day_str in enumerate(times):
         plot_single_spatial_diagnostic(
             date_label=f"Day {day_str}",
@@ -701,11 +722,12 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
             assim_idx=assim_idx,
             eval_idx=eval_idx,
             out_path=plots_dir / f"spatial_day_{day_str}.png",
+            arm_name=arm_name,
         )
 
     # 3. Numeric Summary Report
     summary_report = {
-        "arm": ARM_NAME,
+        "arm": arm_name,
         "period": f"{times[0]} to {times[-1]}",
         "n_days": n_days,
         "n_stations_assimilated": len(assim_idx),
@@ -742,21 +764,21 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
         }
 
     # Save JSON summary
-    json_path = out_dir / f"{ARM_NAME}_summary.json"
+    json_path = out_dir / f"{arm_name}_summary.json"
     json_path.write_text(json.dumps(summary_report, indent=2))
-    print(f"[gfs_twostep_l100] wrote JSON summary: {json_path}")
+    print(f"[{arm_name}] wrote JSON summary: {json_path}")
 
     # Write Markdown summary
     md_lines = [
-        f"# Spatial Diagnostic Summary: `{ARM_NAME}`",
+        f"# Spatial Diagnostic Summary: `{arm_name}`",
         "",
         f"- **Period**: {summary_report['period']} ({n_days} days)",
-        f"- **Method**: Decoupled Two-Step Assimilation (IMERG Generative Flow + 100 km Gauge EnSRF)",
+        f"- **Method**: GraphFlow G0 Assimilation Screen ({arm_name})",
         f"- **Stations**: {len(assim_idx)} assimilated, {len(eval_idx)} withheld evaluation",
         "",
         "## Domain Spatial Precipitation",
         "",
-        f"| Metric | Background Prior | {ARM_NAME} Analysis | Difference / IMERG |",
+        f"| Metric | Background Prior | {arm_name} Analysis | Difference / IMERG |",
         "|:--|--:|--:|--:|",
         f"| Domain Mean (mm/day) | {summary_report['domain_mean_rain']['background_mm']:.2f} | {summary_report['domain_mean_rain']['analysis_mm']:.2f} | {summary_report['domain_mean_rain']['analysis_mm'] - summary_report['domain_mean_rain']['background_mm']:+.2f} |",
         f"| Mean Absolute Increment | -- | {summary_report['domain_mean_rain']['increment_abs_mean_mm']:.2f} mm/day | -- |",
@@ -771,7 +793,7 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
             "",
             "## Withheld Gauge Verification (Independent Stations)",
             "",
-            "| Metric | Background Prior | Analysis (`gfs_twostep_l100`) | Improvement |",
+            f"| Metric | Background Prior | Analysis (`{arm_name}`) | Improvement |",
             "|:--|--:|--:|--:|",
             f"| CRPS (mm/day) | {eval_m['background']['crps']:.3f} | {eval_m['analysis']['crps']:.3f} | {eval_m['crps_gain_mm']:+.3f} ({eval_m['crps_gain_percent']:+.1f}%) |",
             f"| RMSE (mm/day) | {eval_m['background']['rmse']:.3f} | {eval_m['analysis']['rmse']:.3f} | {eval_m['background']['rmse'] - eval_m['analysis']['rmse']:+.3f} |",
@@ -781,29 +803,31 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
 
     # 4. Comparative plot against baseline gfs_joint_base if available
     base_key = "meanfield_gfs_joint_base"
-    if base_key in data:
-        print("[gfs_twostep_l100] found gfs_joint_base in dump; generating comparative diagnostics ...")
+    if base_key in data and arm_name != "gfs_joint_base":
+        print(f"[{arm_name}] found gfs_joint_base in dump; generating comparative diagnostics ...")
         base_mean = np.asarray(data[base_key], dtype=float)
-        base_period_mean = np.nanmean(base_mean, axis=0)
-        twostep_period_mean = np.nanmean(an_mean, axis=0)
-        diff_field = twostep_period_mean - base_period_mean
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            base_period_mean = np.nanmean(base_mean, axis=0)
+            cand_period_mean = np.nanmean(an_mean, axis=0)
+        diff_field = cand_period_mean - base_period_mean
 
         fig_comp, ax_comp = plt.subplots(1, 3, figsize=(18, 5.5), constrained_layout=True)
-        max_rain = max(15.0, float(np.nanpercentile(np.concatenate([base_period_mean[valid], twostep_period_mean[valid]]), 99)))
+        max_rain = max(15.0, float(np.nanpercentile(np.concatenate([base_period_mean[valid], cand_period_mean[valid]]), 99)))
         diff_max = max(2.0, float(np.nanpercentile(np.abs(diff_field[valid]), 98.5)))
 
         im_a = ax_comp[0].imshow(np.where(valid, base_period_mean, np.nan), origin="lower", extent=extent, cmap="viridis", vmin=0, vmax=max_rain)
         plt.colorbar(im_a, ax=ax_comp[0], orientation="horizontal", shrink=0.75, pad=0.04).set_label("Precipitation (mm/day)", fontsize=9)
-        ax_comp[0].set_title("A. Baseline: gfs_joint_base\n(Joint flow guidance)", fontsize=10, weight="bold")
+        ax_comp[0].set_title("A. Baseline: gfs_joint_base\n(Standard joint guidance)", fontsize=10, weight="bold")
 
-        im_b = ax_comp[1].imshow(np.where(valid, twostep_period_mean, np.nan), origin="lower", extent=extent, cmap="viridis", vmin=0, vmax=max_rain)
+        im_b = ax_comp[1].imshow(np.where(valid, cand_period_mean, np.nan), origin="lower", extent=extent, cmap="viridis", vmin=0, vmax=max_rain)
         add_gauge_markers(ax_comp[1], station_lon, station_lat, np.nanmean(gauge_mm, axis=0), assim_idx, eval_idx, vmin=0, vmax=max_rain)
         plt.colorbar(im_b, ax=ax_comp[1], orientation="horizontal", shrink=0.75, pad=0.04).set_label("Precipitation (mm/day)", fontsize=9)
-        ax_comp[1].set_title(f"B. Candidate: {ARM_NAME}\n(IMERG flow + 100 km gauge EnSRF)", fontsize=10, weight="bold")
+        ax_comp[1].set_title(f"B. Candidate: {arm_name}", fontsize=10, weight="bold")
 
         im_c = ax_comp[2].imshow(np.where(valid, diff_field, np.nan), origin="lower", extent=extent, cmap="RdBu_r", vmin=-diff_max, vmax=diff_max)
-        plt.colorbar(im_c, ax=ax_comp[2], orientation="horizontal", shrink=0.75, pad=0.04).set_label("Difference (Twostep − Joint, mm/day)", fontsize=9)
-        ax_comp[2].set_title("C. Difference: Twostep − Joint Base\nRed = Twostep wetter, Blue = Joint wetter", fontsize=10, weight="bold")
+        plt.colorbar(im_c, ax=ax_comp[2], orientation="horizontal", shrink=0.75, pad=0.04).set_label(f"Difference ({arm_name} − Baseline, mm/day)", fontsize=9)
+        ax_comp[2].set_title(f"C. Difference: {arm_name} − Joint Base\nRed = {arm_name} wetter, Blue = Baseline wetter", fontsize=10, weight="bold")
 
         for ax in ax_comp:
             ax.set_xlim(extent[0], extent[1])
@@ -812,10 +836,10 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
             ax.set_ylabel("Latitude (°N)", fontsize=8)
             ax.grid(True, linestyle=":", alpha=0.3, color="gray")
 
-        fig_comp.suptitle("Comparative Analysis: Two-Step EnSRF vs Joint Guidance Baseline (Period Mean)", fontsize=12, weight="bold", y=1.02)
-        comp_out = out_dir / "spatial_comparison_vs_joint_base.png"
+        fig_comp.suptitle(f"Comparative Analysis: {arm_name} vs Joint Guidance Baseline (Period Mean)", fontsize=12, weight="bold", y=1.02)
+        comp_out = out_dir / f"spatial_comparison_{arm_name}_vs_joint_base.png"
         fig_comp.savefig(comp_out, dpi=200, bbox_inches="tight")
-        fig_comp.savefig(out_dir / "spatial_comparison_vs_joint_base.pdf", bbox_inches="tight")
+        fig_comp.savefig(out_dir / f"spatial_comparison_{arm_name}_vs_joint_base.pdf", bbox_inches="tight")
         plt.close(fig_comp)
         print(f"[plot] wrote {comp_out}")
 
@@ -823,8 +847,8 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
         md_lines += [
             "",
             "## Comparison against Frozen Baseline (`gfs_joint_base`)",
-            f"- Spatial Comparison Figure: `spatial_comparison_vs_joint_base.png` / `.pdf`",
-            f"- Mean Absolute Difference (|Twostep − Joint|): {float(np.nanmean(np.abs(diff_field[valid]))):.2f} mm/day",
+            f"- Spatial Comparison Figure: `{comp_out.name}`",
+            f"- Mean Absolute Difference (|{arm_name} − Joint Base|): {float(np.nanmean(np.abs(diff_field[valid]))):.2f} mm/day",
         ]
 
     md_lines += [
@@ -834,9 +858,9 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
         f"- Daily Evolution Maps: `spatial_maps/spatial_day_*.png` ({n_days} daily figures)",
     ]
 
-    md_path = out_dir / f"{ARM_NAME}_summary.md"
+    md_path = out_dir / f"{arm_name}_summary.md"
     md_path.write_text("\n".join(md_lines) + "\n")
-    print(f"[gfs_twostep_l100] wrote Markdown summary: {md_path}")
+    print(f"[{arm_name}] wrote Markdown summary: {md_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -846,23 +870,25 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    out_dir = Path(args.out_dir)
+    arm_name = args.arm
+    default_dir = f"runs/graphflow_g0_multimesh/{ARM_NAME}_da"
+    out_dir = Path(args.out_dir) if args.out_dir != default_dir or arm_name == ARM_NAME else Path(f"runs/graphflow_g0_multimesh/{arm_name}_da")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dump_path = Path(args.dump) if args.dump else out_dir / f"{ARM_NAME}_fold{args.fold}.npz"
-    report_path = Path(args.report) if args.report else out_dir / f"{ARM_NAME}_fold{args.fold}.json"
+    dump_path = Path(args.dump) if args.dump else out_dir / f"{arm_name}_fold{args.fold}.npz"
+    report_path = Path(args.report) if args.report else out_dir / f"{arm_name}_fold{args.fold}.json"
 
     should_run_da = args.run_da or (not args.plot_only and not dump_path.exists())
 
     if should_run_da:
-        print(f"[gfs_twostep_l100] running targeted DA pipeline -> {dump_path}")
+        print(f"[{arm_name}] running targeted DA pipeline -> {dump_path}")
         run_targeted_da(args, dump_path=dump_path, report_path=report_path)
     else:
-        print(f"[gfs_twostep_l100] skipping DA run; using existing dump: {dump_path}")
+        print(f"[{arm_name}] skipping DA run; using existing dump: {dump_path}")
 
     # Generate spatial diagnostic maps
-    generate_spatial_diagnostics(dump_path=dump_path, out_dir=out_dir)
-    print(f"[gfs_twostep_l100] all spatial diagnostics successfully created under {out_dir}")
+    generate_spatial_diagnostics(dump_path=dump_path, out_dir=out_dir, arm_name=arm_name)
+    print(f"[{arm_name}] all spatial diagnostics successfully created under {out_dir}")
 
 
 if __name__ == "__main__":
