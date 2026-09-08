@@ -33,6 +33,14 @@ GRAPH_BACKGROUND = "background"
 DEFAULT_CPC_DA = "v2_simul_s04_ig010"
 DEFAULT_GRAPH_DA = "graphflow_g0_multimesh_frozen_da"
 DISTANCE_EDGES_KM = np.asarray([0, 25, 50, 100, 150, 250, np.inf], float)
+# These fields were added after the original BMD-only CPCv2 May-2022 archive
+# was written. Their defaults preserve the original single-network behaviour,
+# so an absent key in that immutable archive is semantically identical to the
+# explicit GraphFlow value. Do not add DA-tuning fields here.
+LEGACY_SPEC_DEFAULTS = {
+    "secondary_source_prefix": "BWDB_",
+    "secondary_r_multiplier": 1.0,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +76,8 @@ def _method_spec(report: dict, method: str) -> dict:
     spec = dict(report["variants"][method]["spec"])
     spec.pop("name", None)
     spec.pop("note", None)
+    for key, value in LEGACY_SPEC_DEFAULTS.items():
+        spec.setdefault(key, value)
     return spec
 
 
@@ -101,11 +111,17 @@ def validate_pairing(cpc: list[dict], graph: list[dict], cpc_method: str, graph_
                 cpc_fold["dump"][key], graph_fold["dump"][key],
                 f"fold {cpc_fold['fold']} {key}", atol=1.0e-6,
             )
-        if _method_spec(cpc_fold["report"], cpc_method) != _method_spec(
-            graph_fold["report"], graph_method
-        ):
+        cpc_spec = _method_spec(cpc_fold["report"], cpc_method)
+        graph_spec = _method_spec(graph_fold["report"], graph_method)
+        differences = {
+            key: {"cpcv2": cpc_spec.get(key), "graphflow": graph_spec.get(key)}
+            for key in sorted(set(cpc_spec) | set(graph_spec))
+            if cpc_spec.get(key) != graph_spec.get(key)
+        }
+        if differences:
             raise ValueError(
-                f"fold {cpc_fold['fold']}: CPCv2 and GraphFlow DA settings differ"
+                f"fold {cpc_fold['fold']}: CPCv2 and GraphFlow DA settings differ: "
+                f"{json.dumps(differences, sort_keys=True)}"
             )
 
 
