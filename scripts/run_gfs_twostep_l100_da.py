@@ -30,6 +30,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+import warnings
 
 import matplotlib
 
@@ -326,7 +327,10 @@ def plot_single_spatial_diagnostic(
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
 
     # Color scale limits
-    fields_to_check = [f for f in (bg_mean, an_mean, imerg) if f is not None]
+    fields_to_check = [
+        f for f in (bg_mean, an_mean, imerg)
+        if f is not None and f.shape == valid_mask.shape
+    ]
     rain_max = max(
         15.0,
         float(np.nanpercentile(np.concatenate([f[valid_mask] for f in fields_to_check]), 99))
@@ -594,7 +598,20 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
 
     bg_mean = np.asarray(data[bg_key], dtype=float)
     an_mean = np.asarray(data[an_key], dtype=float)
-    imerg = np.asarray(data["raw_imerg_mm"], dtype=float) if "raw_imerg_mm" in data else None
+
+    # Regrid IMERG if on coarse S04 footprints
+    raw_imerg = np.asarray(data["raw_imerg_mm"], dtype=float) if "raw_imerg_mm" in data else None
+    if raw_imerg is not None and raw_imerg.ndim == 3:
+        target_h, target_w = len(grid_lat), len(grid_lon)
+        if raw_imerg.shape[1:] != (target_h, target_w):
+            scale_lat = max(1, -(-target_h // raw_imerg.shape[1]))
+            scale_lon = max(1, -(-target_w // raw_imerg.shape[2]))
+            imerg_regrid = np.repeat(np.repeat(raw_imerg, scale_lat, axis=1), scale_lon, axis=2)
+            imerg = imerg_regrid[:, :target_h, :target_w]
+        else:
+            imerg = raw_imerg
+    else:
+        imerg = None
 
     # Check for spread fields
     bg_std = np.asarray(data["stdfield_background"], dtype=float) if "stdfield_background" in data else None
@@ -603,8 +620,10 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
     # Station extractions
     bg_station = np.asarray(data["station_background"], dtype=float) if "station_background" in data else None
     an_station = np.asarray(data[f"station_{ARM_NAME}"], dtype=float) if f"station_{ARM_NAME}" in data else None
-    bg_stn_mean = np.nanmean(bg_station, axis=1) if bg_station is not None else None
-    an_stn_mean = np.nanmean(an_station, axis=1) if an_station is not None else None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        bg_stn_mean = np.nanmean(bg_station, axis=1) if bg_station is not None else None
+        an_stn_mean = np.nanmean(an_station, axis=1) if an_station is not None else None
 
     plots_dir = out_dir / "spatial_maps"
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -612,16 +631,27 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
     # 1. Multi-day Period Mean Plot
     print("[gfs_twostep_l100] plotting 10-day period mean spatial diagnostics ...")
     period_label = f"Period Mean: {times[0]} to {times[-1]} ({n_days} days)"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        bg_period_mean = np.nanmean(bg_mean, axis=0)
+        an_period_mean = np.nanmean(an_mean, axis=0)
+        imerg_period_mean = np.nanmean(imerg, axis=0) if imerg is not None else None
+        bg_std_period_mean = np.nanmean(bg_std, axis=0) if bg_std is not None else None
+        an_std_period_mean = np.nanmean(an_std, axis=0) if an_std is not None else None
+        gauge_period_mean = np.nanmean(gauge_mm, axis=0)
+        bg_stn_period_mean = np.nanmean(bg_stn_mean, axis=0) if bg_stn_mean is not None else None
+        an_stn_period_mean = np.nanmean(an_stn_mean, axis=0) if an_stn_mean is not None else None
+
     plot_single_spatial_diagnostic(
         date_label=period_label,
-        bg_mean=np.nanmean(bg_mean, axis=0),
-        an_mean=np.nanmean(an_mean, axis=0),
-        imerg=np.nanmean(imerg, axis=0) if imerg is not None else None,
-        bg_std=np.nanmean(bg_std, axis=0) if bg_std is not None else None,
-        an_std=np.nanmean(an_std, axis=0) if an_std is not None else None,
-        gauge_vals=np.nanmean(gauge_mm, axis=0),
-        bg_station_mean=np.nanmean(bg_stn_mean, axis=0) if bg_stn_mean is not None else None,
-        an_station_mean=np.nanmean(an_stn_mean, axis=0) if an_stn_mean is not None else None,
+        bg_mean=bg_period_mean,
+        an_mean=an_period_mean,
+        imerg=imerg_period_mean,
+        bg_std=bg_std_period_mean,
+        an_std=an_std_period_mean,
+        gauge_vals=gauge_period_mean,
+        bg_station_mean=bg_stn_period_mean,
+        an_station_mean=an_stn_period_mean,
         extent=extent,
         valid_mask=valid,
         station_lon=station_lon,
@@ -634,14 +664,14 @@ def generate_spatial_diagnostics(dump_path: Path, out_dir: Path) -> None:
     # Also save as PDF for publication quality
     plot_single_spatial_diagnostic(
         date_label=period_label,
-        bg_mean=np.nanmean(bg_mean, axis=0),
-        an_mean=np.nanmean(an_mean, axis=0),
-        imerg=np.nanmean(imerg, axis=0) if imerg is not None else None,
-        bg_std=np.nanmean(bg_std, axis=0) if bg_std is not None else None,
-        an_std=np.nanmean(an_std, axis=0) if an_std is not None else None,
-        gauge_vals=np.nanmean(gauge_mm, axis=0),
-        bg_station_mean=np.nanmean(bg_stn_mean, axis=0) if bg_stn_mean is not None else None,
-        an_station_mean=np.nanmean(an_stn_mean, axis=0) if an_stn_mean is not None else None,
+        bg_mean=bg_period_mean,
+        an_mean=an_period_mean,
+        imerg=imerg_period_mean,
+        bg_std=bg_std_period_mean,
+        an_std=an_std_period_mean,
+        gauge_vals=gauge_period_mean,
+        bg_station_mean=bg_stn_period_mean,
+        an_station_mean=an_stn_period_mean,
         extent=extent,
         valid_mask=valid,
         station_lon=station_lon,
