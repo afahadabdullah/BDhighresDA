@@ -1,0 +1,1521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}html,body{margin:0}body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Score-Based DA on a Graph</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+:root{
+  --paper:#e8ecf1;
+  --surface:#f6f8fb;
+  --surface-2:#dde3ec;
+  --sunk:#dfe5ed;
+  --ink:#101720;
+  --ink-2:#3a4654;
+  --ink-3:#6b7885;
+  --line:#c3ccd8;
+  --line-soft:#d5dce6;
+  --mesh:#3b5ea8;
+  --cond:#16776f;
+  --insitu:#b0650e;
+  --sat:#84497f;
+  --alert:#b03c2c;
+  --focus:#1d6fb8;
+  --display:"Instrument Serif",Georgia,"Times New Roman",serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --r:4px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0a0f15; --surface:#131b24; --surface-2:#1c2632; --sunk:#0d141b;
+    --ink:#e6edf4; --ink-2:#aebccb; --ink-3:#77858f; --line:#2a3742; --line-soft:#212d37;
+    --mesh:#88a7e6; --cond:#4cc3b7; --insitu:#e0a04b; --sat:#c689c1; --alert:#e57460; --focus:#6fb6ec;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0a0f15; --surface:#131b24; --surface-2:#1c2632; --sunk:#0d141b;
+  --ink:#e6edf4; --ink-2:#aebccb; --ink-3:#77858f; --line:#2a3742; --line-soft:#212d37;
+  --mesh:#88a7e6; --cond:#4cc3b7; --insitu:#e0a04b; --sat:#c689c1; --alert:#e57460; --focus:#6fb6ec;
+}
+
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:20px;padding-block:0}
+h1,h2,h3{text-wrap:balance;margin:0}
+p{margin:0}
+a{color:var(--focus)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+header.bar{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--paper) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line-soft)}
+.bar-in{max-width:1080px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{font-family:var(--display);font-size:20px;line-height:1}
+.bar nav{display:flex;gap:14px;flex-wrap:wrap;margin-left:auto}
+.bar nav a{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);text-decoration:none;padding:3px 0;border-bottom:1px solid transparent}
+.bar nav a:hover{color:var(--ink);border-bottom-color:var(--ink-3)}
+
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+h1{font-family:var(--display);font-size:clamp(42px,7vw,78px);line-height:.99;letter-spacing:-.01em;font-weight:400}
+h2{font-family:var(--display);font-size:clamp(28px,4.1vw,41px);line-height:1.07;font-weight:400}
+h3{font-family:var(--body);font-size:15px;font-weight:600}
+.lede{font-size:clamp(17px,2.1vw,20px);line-height:1.5;color:var(--ink-2);max-width:60ch}
+.prose{max-width:66ch;color:var(--ink-2)}
+strong{color:var(--ink);font-weight:600}
+code,.m{font-family:var(--mono);font-size:.88em}
+.m{color:var(--ink)}
+
+section{padding-block:64px;border-top:1px solid var(--line-soft)}
+section:first-of-type{border-top:0}
+.sec-head{display:flex;gap:18px;align-items:baseline;margin-bottom:8px}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding-top:6px;white-space:nowrap}
+.stack{display:flex;flex-direction:column;gap:26px}
+.stack-s{display:flex;flex-direction:column;gap:12px}
+
+.hero{padding-block:52px 56px}
+.strip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.frame{display:flex;flex-direction:column;gap:6px}
+.frame canvas{width:100%;height:auto;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line-soft);display:block}
+.frame .cap{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:.03em}
+.note{font-size:13.5px;line-height:1.5;color:var(--ink-3);border-left:2px solid var(--line);padding-left:14px;max-width:72ch}
+
+.roles{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+.role{background:var(--surface);padding:20px 18px;display:flex;flex-direction:column;gap:8px}
+.role .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase}
+.role h3{font-size:16px}
+.role p{font-size:14px;line-height:1.5;color:var(--ink-2)}
+.role .who{font-family:var(--mono);font-size:12px;color:var(--ink);margin-top:auto;padding-top:8px;border-top:1px dashed var(--line)}
+.r-a .tag{color:var(--mesh)} .r-b .tag{color:var(--cond)} .r-c .tag{color:var(--insitu)}
+
+figure{margin:0}
+figure svg{width:100%;height:auto;display:block;color:var(--ink-2)}
+figcaption{font-size:13px;color:var(--ink-3);margin-top:10px;max-width:70ch;line-height:1.5}
+.svg-scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--line-soft);padding:14px}
+.edge{stroke:var(--ink-3);stroke-width:1.4;fill:none}
+.edge-lab{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px}
+.bx rect{fill:var(--surface-2);stroke:var(--line);stroke-width:1.2}
+.bx text{fill:var(--ink);font-family:var(--body);font-size:13px;font-weight:600}
+.bx text.sub{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px;font-weight:400}
+
+.readout{background:var(--surface);border:1px solid var(--line-soft);border-left:3px solid var(--focus);padding:12px 14px;font-size:14px;line-height:1.5;color:var(--ink-2);min-height:64px}
+.readout b{color:var(--ink);font-weight:600}
+
+.panel{background:var(--surface);border:1px solid var(--line-soft)}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.panel-body{padding:16px}
+.split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:20px}
+.split-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.split-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+
+.stage{position:relative;width:100%;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line);touch-action:none;cursor:grab}
+.stage:active{cursor:grabbing}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.mini{display:flex;flex-direction:column;gap:6px}
+.mini canvas{width:100%;height:auto;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line-soft);display:block}
+.mini .cap{font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+
+.ctl{display:flex;flex-direction:column;gap:14px}
+.ctl-row{display:flex;flex-direction:column;gap:6px}
+.ctl-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.ctl-label .val{color:var(--ink);letter-spacing:.02em;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--focus);background:transparent}
+.btn{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;background:var(--surface-2);color:var(--ink);border:1px solid var(--line);padding:8px 12px;cursor:pointer;border-radius:var(--r)}
+.btn:hover{border-color:var(--ink-3)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;width:fit-content;max-width:100%;flex-wrap:wrap}
+.seg button{font-family:var(--mono);font-size:11px;padding:6px 10px;background:var(--surface);color:var(--ink-3);border:0;border-right:1px solid var(--line);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.chk{display:flex;align-items:center;gap:9px;font-size:13.5px;cursor:pointer;user-select:none}
+.chk input{accent-color:var(--focus);width:15px;height:15px}
+.chk .sw{width:10px;height:10px;border-radius:50%;flex:none}
+
+.stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+.stat{background:var(--surface);padding:11px 12px;display:flex;flex-direction:column;gap:2px}
+.stat .k{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);line-height:1.3}
+.stat .v{font-family:var(--mono);font-size:19px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--ink)}
+.stat .u{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.stat.hl .v{color:var(--focus)}
+
+.eq{font-family:var(--mono);font-size:13.5px;line-height:1.8;background:var(--sunk);border:1px solid var(--line-soft);padding:12px 14px;overflow-x:auto;white-space:nowrap;color:var(--ink)}
+.eq .c{color:var(--ink-3)}
+.eq-list{display:flex;flex-direction:column;gap:8px}
+
+.cbar{display:flex;flex-direction:column;gap:4px}
+.cbar .bar{height:9px;border:1px solid var(--line-soft)}
+.cbar .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+
+table.data{width:100%;border-collapse:collapse;font-size:13.5px}
+table.data th,table.data td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.data th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:400}
+table.data td:first-child{white-space:nowrap;font-weight:600;color:var(--ink)}
+.tscroll{overflow-x:auto}
+.pill{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border:1px solid currentColor;border-radius:999px;display:inline-block;white-space:nowrap}
+.p-ok{color:var(--cond)} .p-warn{color:var(--insitu)} .p-no{color:var(--alert)}
+
+footer{border-top:1px solid var(--line-soft);padding-block:36px 52px;color:var(--ink-3);font-size:13px}
+footer .refs{display:flex;flex-direction:column;gap:5px;margin-top:12px;font-family:var(--mono);font-size:11.5px;line-height:1.5}
+
+@media (max-width:860px){
+  .split,.split-2,.split-3,.roles{grid-template-columns:1fr}
+  .strip{grid-template-columns:repeat(5,1fr);gap:5px}
+  .stat-grid{grid-template-columns:1fr}
+  section{padding-block:46px}
+}
+</style>
+
+<header class="bar">
+  <div class="bar-in">
+    <span class="brand">Score-Based DA on a Graph</span>
+    <nav>
+      <a href="#why">Why a graph</a>
+      <a href="#mesh">The mesh</a>
+      <a href="#arch">Architecture</a>
+      <a href="#diff">Diffusion</a>
+      <a href="#da">Assimilation</a>
+      <a href="#cycle">Cycling</a>
+      <a href="#versus">Which design</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section class="hero">
+  <div class="stack">
+    <div class="stack-s">
+      <span class="eyebrow">Diffusion prior · graph backbone · observation-space guidance</span>
+      <h1>The state is a graph.<br>The prior is a denoiser.</h1>
+      <p class="lede">Swap the convolutional backbone for message passing on a mesh, and data assimilation stops being a gridded problem. Observations become nodes. The observation operator becomes an encoder. And localisation stops being a tunable radius — it becomes the network's receptive field.</p>
+    </div>
+
+    <div class="stack-s">
+      <div class="strip" id="heroStrip"></div>
+      <div class="cbar">
+        <div class="bar" id="heroCbar"></div>
+        <div class="ticks"><span>−3σ anomaly</span><span>0</span><span>+3σ anomaly</span></div>
+      </div>
+      <p class="note">One ensemble member on a 3-refined icosahedral mesh, at five points along the EDM noise schedule. At <span class="m">σ = 80</span> the mesh carries isotropic noise; at <span class="m">σ → 0</span> it carries a weather field. <strong>Every field on this page is generated in your browser from a schematic global pattern — it illustrates the mechanism, it is not model output.</strong> The architecture numbers quoted throughout are the published ones.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 01 WHY A GRAPH ===== -->
+<section id="why">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Why leave the grid</h2></div>
+  <div class="stack">
+    <p class="prose">A convolutional prior on a regular latitude–longitude grid is a good fit for a small rectangular domain — that is exactly what a U-Net over a 128×128 patch is for. Take the same idea global and three things break at once, and all three are fixed by the same move.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>The same sphere, two discretisations</span><span class="m">drag either globe to rotate</span></div>
+      <div class="panel-body">
+        <div class="split-2">
+          <div class="mini"><canvas id="cvLatLon" width="480" height="480"></canvas><span class="cap">Regular 10° lat–lon grid — cells collapse at the poles</span></div>
+          <div class="mini"><canvas id="cvIco" width="480" height="480"></canvas><span class="cap">3-refined icosahedral mesh — near-uniform cells everywhere</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="roles">
+      <div class="role r-a">
+        <span class="tag">Geometry</span>
+        <h3>A convolution is not the same size twice</h3>
+        <p>On a lat–lon grid a 3×3 kernel spans ~300 km at the equator and ~15 km at 85°N. The network spends capacity learning that the same operator means different physics at different latitudes, and the poles are oversampled to the point of instability.</p>
+        <span class="who">mesh cells within ~10% of each other</span>
+      </div>
+      <div class="role r-b">
+        <span class="tag">Range</span>
+        <h3>Long-range coupling in few hops</h3>
+        <p>A convolutional stack reaches far only by stacking layers or downsampling. A <em>multi-mesh</em> carries the edges of every refinement level at once, so a single message-passing round moves information both one cell and a quarter of the globe.</p>
+        <span class="who">GraphCast: meshes M0 … M6 superimposed</span>
+      </div>
+      <div class="role r-c">
+        <span class="tag">Observations</span>
+        <h3>Data that never sat on a grid</h3>
+        <p>A radiosonde profile, a satellite swath, a buoy — none of them land on cell centres. On a grid you interpolate and lose the error structure. On a graph the observation <em>is</em> a node, with its own features, its own error, and edges to the mesh.</p>
+        <span class="who">GraphDOP: obs nodes as the primary input</span>
+      </div>
+    </div>
+
+    <p class="note"><strong>The companion to this page</strong> works the other way round: <a href="https://claude.ai/code/artifact/1925134c-3f1b-4efd-9a67-c63088d84ec9">SURMA-Flow</a> — a rectified-flow U-Net on a fixed 128×128 grid over one country, guided by rain gauges and satellite footprints. Same posterior, same score-guidance algebra, different state representation. Section 07 below puts the two designs side by side and says which one to build when.</p>
+  </div>
+</section>
+
+<!-- ===== 02 THE MESH ===== -->
+<section id="mesh">
+  <div class="sec-head"><span class="sec-num">02</span><h2>The mesh, and how far a message travels</h2></div>
+  <div class="stack">
+    <p class="prose">This is the most consequential thing to understand about graph-based DA, and it is invisible in the equations. <strong>Click any node.</strong> The highlight shows every node reachable in <span class="m">K</span> hops — and because the guidance gradient is backpropagated through exactly <span class="m">K</span> message-passing rounds, that highlighted set is the <em>entire region a single observation can influence</em>. Localisation is not a covariance radius you tune. It is the architecture.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>Mesh explorer · drag to rotate · click a node</span><span class="m" id="meshLabel">level 3 · multi-mesh</span></div>
+      <div class="panel-body">
+        <div class="split">
+          <div class="stage" id="stageMesh"><canvas id="cvMesh" width="560" height="560"></canvas></div>
+          <div class="ctl">
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Mesh refinement</span></span>
+              <div class="seg" role="group" aria-label="Mesh refinement level">
+                <button data-lvl="1" aria-pressed="false">level 1</button>
+                <button data-lvl="2" aria-pressed="false">level 2</button>
+                <button data-lvl="3" aria-pressed="true">level 3</button>
+              </div>
+            </div>
+            <label class="chk"><input type="checkbox" id="cbMulti" checked><span class="sw" style="background:var(--mesh)"></span>Multi-mesh — carry the coarser levels' edges too</label>
+            <div class="ctl-row">
+              <label class="ctl-label" for="kSlider"><span>Message-passing rounds K</span><span class="val" id="kVal">6</span></label>
+              <input type="range" id="kSlider" min="1" max="16" step="1" value="6">
+            </div>
+            <div class="stat-grid">
+              <div class="stat"><span class="k">Mesh nodes</span><span class="v" id="stNodes">—</span><span class="u">on the sphere</span></div>
+              <div class="stat"><span class="k">Edges</span><span class="v" id="stEdges">—</span><span class="u">mean degree <span id="stDeg">—</span></span></div>
+              <div class="stat hl"><span class="k">Reached in K hops</span><span class="v" id="stReach">—</span><span class="u">share of the globe one node sees</span></div>
+            </div>
+            <div class="readout" id="meshOut"><b>Click a node</b> to trace its K-hop neighbourhood. With the multi-mesh off, reach grows roughly like the cell size times K; with it on, a handful of hops crosses the planet.</div>
+            <p class="note" style="font-size:12.5px;margin:0">Real systems are far denser than this: GraphCast's finest mesh has 40,962 nodes; GenCast runs a 5-refined mesh of <strong>10,242 nodes and 61,440 edges</strong>, with 16 processor blocks. Its attention is deliberately restricted to a 16-hop mesh neighbourhood — a localisation choice written into the architecture.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 03 ARCHITECTURE ===== -->
+<section id="arch">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Encoder, processor, decoder</h2></div>
+  <div class="stack">
+    <p class="prose">The backbone has three parts and only the middle one is deep. The encoder maps whatever you have — grid cells, observation reports, or both — onto the mesh through bipartite edges. The processor does all the work on the mesh, where the geometry is uniform. The decoder reads the mesh back out wherever you want an answer, which need not be where the inputs were.</p>
+
+    <figure>
+      <div class="svg-scroll">
+        <svg viewBox="0 0 1020 400" role="img" aria-label="Encoder maps grid and observation nodes onto an icosahedral mesh; a processor of K message-passing blocks runs on the mesh; a decoder maps back to the output grid. The noise level conditions every block through conditional layer norm.">
+          <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker></defs>
+
+          <g class="edge" marker-end="url(#a3)" style="color:var(--ink-3)">
+            <path d="M186,150 L246,178"/>
+            <path d="M186,262 L246,206"/>
+            <path d="M406,192 L462,192"/>
+            <path d="M700,192 L760,192"/>
+            <path d="M530,96 L530,140"/>
+          </g>
+          <g class="edge-lab">
+            <text x="188" y="136">grid → mesh edges</text>
+            <text x="188" y="292">obs → mesh edges</text>
+            <text x="412" y="180">v, e</text>
+            <text x="706" y="180">v'</text>
+            <text x="544" y="120">conditional LayerNorm(log σ)</text>
+          </g>
+
+          <g class="bx">
+            <rect x="24" y="112" width="162" height="76" rx="3"/>
+            <text x="105" y="140" text-anchor="middle">Grid / state</text>
+            <text class="sub" x="105" y="160" text-anchor="middle">x_σ, forcings,</text>
+            <text class="sub" x="105" y="176" text-anchor="middle">previous analysis</text>
+          </g>
+          <g class="bx">
+            <rect x="24" y="224" width="162" height="76" rx="3"/>
+            <text x="105" y="252" text-anchor="middle">Observation nodes</text>
+            <text class="sub" x="105" y="272" text-anchor="middle">lat, lon, time, channel,</text>
+            <text class="sub" x="105" y="288" text-anchor="middle">instrument, error</text>
+          </g>
+          <g class="bx">
+            <rect x="246" y="150" width="160" height="86" rx="3"/>
+            <text x="326" y="180" text-anchor="middle">Encoder</text>
+            <text class="sub" x="326" y="200" text-anchor="middle">one round of bipartite</text>
+            <text class="sub" x="326" y="216" text-anchor="middle">message passing</text>
+          </g>
+          <g class="bx">
+            <rect x="462" y="140" width="238" height="106" rx="3"/>
+            <text x="581" y="172" text-anchor="middle">Processor  ×K</text>
+            <text class="sub" x="581" y="194" text-anchor="middle">mesh message passing, or</text>
+            <text class="sub" x="581" y="210" text-anchor="middle">attention over a K-hop</text>
+            <text class="sub" x="581" y="226" text-anchor="middle">neighbourhood · 512-d, 16 blocks</text>
+          </g>
+          <g class="bx">
+            <rect x="760" y="150" width="160" height="86" rx="3"/>
+            <text x="840" y="180" text-anchor="middle">Decoder</text>
+            <text class="sub" x="840" y="200" text-anchor="middle">mesh → output grid</text>
+            <text class="sub" x="840" y="216" text-anchor="middle">or → obs locations</text>
+          </g>
+          <g class="bx">
+            <rect x="418" y="48" width="224" height="48" rx="3"/>
+            <text x="530" y="70" text-anchor="middle" font-size="12.5">Noise level σ</text>
+            <text class="sub" x="530" y="88" text-anchor="middle">32 Fourier features → MLP → 16-d</text>
+          </g>
+
+          <g class="edge" style="color:var(--insitu)">
+            <path d="M840,246 C840,330 470,352 326,310" stroke-dasharray="5 4" style="stroke:var(--insitu)" marker-end="url(#a3)"/>
+          </g>
+          <text class="edge-lab" x="560" y="348" text-anchor="middle" style="fill:var(--insitu)">decode to obs locations = the observation operator H, learned and differentiable</text>
+        </svg>
+      </div>
+      <figcaption>The dashed path is what makes this architecture worth the trouble for DA: if the decoder can read the mesh out at arbitrary points, then <span class="m">H</span> is not a separate interpolation step bolted on afterwards — it is the same machinery, already differentiable.</figcaption>
+    </figure>
+
+    <div class="split">
+      <div class="eq-list">
+        <div class="eq"><span class="c">one message-passing round</span><br>e'<sub>ij</sub> = MLP<sub>e</sub>( [ e<sub>ij</sub> , v<sub>i</sub> , v<sub>j</sub> ] )<br>a<sub>j</sub>&nbsp;&nbsp;&nbsp;= Σ<sub>i ∈ N(j)</sub> e'<sub>ij</sub><br>v'<sub>j</sub>&nbsp;&nbsp;= v<sub>j</sub> + MLP<sub>v</sub>( [ v<sub>j</sub> , a<sub>j</sub> ] )</div>
+        <div class="eq"><span class="c">edge features are geometry, not learned position</span><br>e<sub>ij</sub> = [ &nbsp;length ,&nbsp; displacement in the local frame&nbsp; ]</div>
+      </div>
+      <div class="stack-s">
+        <h3>Three details that are easy to skip and expensive to get wrong</h3>
+        <p class="prose" style="font-size:14.5px"><strong>Edges carry geometry.</strong> Relative displacement in a local frame at the receiving node, not absolute coordinates — that is what makes the same learned operator valid at the equator and over Antarctica.</p>
+        <p class="prose" style="font-size:14.5px"><strong>The noise level conditions everything.</strong> GenCast replaces every layer-norm with a <em>conditional</em> layer-norm driven by an embedding of <span class="m">log σ</span>. A denoiser that does not know how noisy its input is cannot possibly return the right correction.</p>
+        <p class="prose" style="font-size:14.5px"><strong>Sample the noise on the sphere, not on the grid.</strong> Drawing i.i.d. noise per lat–lon cell puts enormous power at the poles. Sampling isotropically on the sphere gives a flat spherical-harmonic spectrum, which is what "white noise" is supposed to mean on a globe.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 04 DIFFUSION ===== -->
+<section id="diff">
+  <div class="sec-head"><span class="sec-num">04</span><h2>The prior: a denoiser, read as a score</h2></div>
+  <div class="stack">
+    <p class="prose">Training is the ordinary denoising objective. Corrupt a real field with noise of a randomly drawn level <span class="m">σ</span>, and ask the network to recover it. Nothing about assimilation enters here. What makes the trained denoiser useful afterwards is one identity: <strong>a denoiser is a score function in disguise.</strong></p>
+
+    <div class="panel">
+      <div class="panel-head"><span>Noise schedule explorer · EDM preconditioning</span><span class="m" id="sigLabel">σ = 3.69 · step 10 / 20</span></div>
+      <div class="panel-body stack">
+        <div class="split-3">
+          <div class="mini"><canvas id="cvNoisy" width="360" height="360"></canvas><span class="cap">c_in · x_σ — what the network sees</span></div>
+          <div class="mini"><canvas id="cvDen" width="360" height="360"></canvas><span class="cap">D_θ(x_σ ; σ) — the denoised estimate</span></div>
+          <div class="stack-s">
+            <figure><svg id="schedChart" viewBox="0 0 400 200" role="img" aria-label="EDM sigma schedule falling from 80 to near zero over 20 steps on a log axis, with the current step marked."></svg></figure>
+          </div>
+        </div>
+        <div class="ctl-row">
+          <label class="ctl-label" for="sigSlider"><span>Denoising step</span><span class="val" id="sigVal">10 / 20</span></label>
+          <input type="range" id="sigSlider" min="0" max="20" step="1" value="10">
+        </div>
+        <div class="split">
+          <div class="eq-list">
+            <div class="eq"><span class="c">forward</span>&nbsp;&nbsp;x<sub>σ</sub> = x + σ·ε ,&nbsp; ε ~ N(0, I) on the sphere<br><span class="c">loss</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;λ(σ) ‖ D<sub>θ</sub>(x<sub>σ</sub> ; σ, c) − x ‖²</div>
+            <div class="eq"><span class="c">Tweedie / the identity that matters</span><br>∇<sub>x</sub> log p<sub>σ</sub>(x<sub>σ</sub>) = ( D<sub>θ</sub>(x<sub>σ</sub> ; σ) − x<sub>σ</sub> ) / σ²</div>
+            <div class="eq"><span class="c">Karras schedule, ρ = 7</span><br>σ<sub>i</sub> = ( σ<sub>max</sub><sup>1/ρ</sup> + <sup>i</sup>/<sub>n−1</sub> ( σ<sub>min</sub><sup>1/ρ</sup> − σ<sub>max</sub><sup>1/ρ</sup> ) )<sup>ρ</sup></div>
+          </div>
+          <div class="stack-s">
+            <h3>Why the schedule is so front-loaded</h3>
+            <p class="prose" style="font-size:14.5px">Most of the 20 steps are spent at small <span class="m">σ</span>. Above <span class="m">σ ≈ 10</span> the state is essentially noise and the denoiser is just sketching the largest scales; the schedule races through that and then slows down where the field's detail is actually decided.</p>
+            <p class="prose" style="font-size:14.5px">This is also why observations barely matter early. Their weight is set by how much of the state is signal, and at <span class="m">σ = 80</span> almost none of it is. Section 05 plots that directly.</p>
+            <p class="note" style="font-size:12.5px">GenCast: <span class="m">σ_data = 1</span>, Karras preconditioning, 20 denoising steps for 39 network evaluations per 12-hour forecast step, a second-order solver with stochastic churn, 1° grid, 50 members, trained on ERA5 1979–2018.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 05 ASSIMILATION ===== -->
+<section id="da">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Assimilation: add a second score</h2></div>
+  <div class="stack">
+    <p class="prose">Bayes' rule in score form is one line, and it is the whole method. The gradient of the log-posterior is the gradient of the log-prior plus the gradient of the log-likelihood. The trained denoiser supplies the first term for free. The second term is where the observations live — and evaluating it means differentiating the observation mismatch <em>back through every message-passing block</em>.</p>
+
+    <div class="eq-list" style="max-width:none">
+      <div class="eq"><span class="c">posterior score</span>&nbsp;&nbsp;∇ log p(x<sub>σ</sub> | y)&nbsp; = &nbsp;∇ log p<sub>σ</sub>(x<sub>σ</sub>)&nbsp; + &nbsp;∇ log p(y | x<sub>σ</sub>)<br><span class="c">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the frozen GNN&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the observations</span></div>
+      <div class="eq"><span class="c">tractable approximation (DPS / SDA)</span><br>p(y | x<sub>σ</sub>) &nbsp;≈&nbsp; N( &nbsp;y &nbsp;|&nbsp; H( D<sub>θ</sub>(x<sub>σ</sub> ; σ) ) ,&nbsp; Σ(σ) &nbsp;) ,&nbsp;&nbsp;&nbsp;&nbsp;Σ(σ) = R + γ σ² I</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span>Guided sampler on the mesh · 8 members · drag to rotate</span><span class="m" id="daLabel">σ = 3.69 · step 10 / 20</span></div>
+      <div class="panel-body">
+        <div class="split">
+          <div class="stack-s">
+            <div class="stage" id="stageDa"><canvas id="cvDa" width="560" height="560"></canvas></div>
+            <div class="seg" role="group" aria-label="Field to display">
+              <button data-dv="state" aria-pressed="false">c_in·x_σ</button>
+              <button data-dv="den" aria-pressed="true">D_θ — analysis estimate</button>
+              <button data-dv="inc" aria-pressed="false">increment</button>
+              <button data-dv="sd" aria-pressed="false">ensemble SD</button>
+            </div>
+          </div>
+
+          <div class="ctl">
+            <div class="ctl-row">
+              <label class="ctl-label" for="daStep"><span>Denoising step</span><span class="val" id="daStepVal">10 / 20</span></label>
+              <input type="range" id="daStep" min="0" max="20" step="1" value="10">
+              <div class="btn-row">
+                <button class="btn primary" id="btnRunDa">▶ Run σ<sub>max</sub> → 0</button>
+                <button class="btn" id="btnReseedDa">New draw</button>
+              </div>
+            </div>
+
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Observation networks</span></span>
+              <label class="chk"><input type="checkbox" id="cbInsitu" checked><span class="sw" style="background:var(--insitu)"></span>Surface &amp; sonde — dense in the NH, sparse at sea</label>
+              <label class="chk"><input type="checkbox" id="cbSat" checked><span class="sw" style="background:var(--sat)"></span>Satellite swaths — polar-orbiting tracks</label>
+              <label class="chk"><input type="checkbox" id="cbObsOver" checked><span class="sw" style="background:var(--ink-3)"></span>Show observation nodes and their mesh edges</label>
+            </div>
+
+            <div class="ctl-row">
+              <label class="ctl-label" for="kSlider2"><span>Message-passing rounds K — the reach of one observation</span><span class="val" id="kVal2">6</span></label>
+              <input type="range" id="kSlider2" min="1" max="16" step="1" value="6">
+            </div>
+
+            <div class="stat-grid">
+              <div class="stat hl"><span class="k">Observation authority R/Σ(σ)</span><span class="v" id="stAuth2">—</span><span class="u">0 = ignored, 1 = full weight</span></div>
+              <div class="stat"><span class="k">Increment applied</span><span class="v" id="stAlpha2">—</span><span class="u">fraction of the total nudge</span></div>
+              <div class="stat"><span class="k">Mesh nodes touched</span><span class="v" id="stTouched">—</span><span class="u">share reachable from any obs</span></div>
+            </div>
+
+            <figure>
+              <svg id="authChart" viewBox="0 0 420 170" role="img" aria-label="Observation authority rising from near zero at high noise to one as sigma approaches zero, with the current step marked."></svg>
+              <figcaption style="margin-top:6px">Authority against step number, not against σ — which is why it looks like a wall rather than a ramp. Fifteen of the twenty steps happen before the observations have any real say.</figcaption>
+            </figure>
+
+            <div class="stat-grid" style="grid-template-columns:1fr">
+              <div class="stat"><span class="k">RMSE at assimilated observations — <em>fit, not skill</em></span><span class="v" id="stFit2">—</span><span class="u">normalised units, in-situ nodes</span></div>
+              <div class="stat hl"><span class="k">RMSE at withheld observations — the evidence</span><span class="v" id="stHold2">—</span><span class="u">every 5th in-situ node, never in the likelihood</span></div>
+              <div class="stat"><span class="k">Spread / RMSE at withheld observations</span><span class="v" id="stRatio2">—</span><span class="u">&lt;1 under-dispersed</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="split-3">
+      <div class="panel"><div class="panel-head"><span>Route A — guidance</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">Keep the prior frozen and differentiate the Gaussian mismatch through it (diffusion posterior sampling). Nothing is retrained, any observation operator works, and a new instrument is a new node type rather than a new model.</p>
+        <p class="prose" style="font-size:14px;margin:0">The costs are real: two to three times the evaluations per step, a backward pass through all K blocks held in memory, and a likelihood that is only approximately right at intermediate σ. <span class="m">γ</span> and the guidance scale are tuning knobs that quietly change the method.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>Route B — replay</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">Where observations are direct measurements of state components, the observed entries can be overwritten at each denoising step with a correctly-noised draw of the observation, and the prior fills in the rest. No gradient, no <span class="m">γ</span>.</p>
+        <p class="prose" style="font-size:14px;margin:0">It needs <span class="m">H</span> to be a projection, which real satellite radiances are not, and it tends to leave seams between observed and unobserved regions. Most practical systems mix the two.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>Route C — measurement-aware</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">A newer line of work changes the <em>forward</em> process so it interpolates between state space and measurement space, putting the observations into the training objective rather than bolting them on at sampling time. The likelihood score is then analytic for linear <span class="m">H</span>.</p>
+        <p class="prose" style="font-size:14px;margin:0">It removes the DPS approximation and the guidance-scale tuning, at the price of a prior that is no longer observation-agnostic — retrain when the observing system changes.</p>
+      </div></div>
+    </div>
+
+    <p class="note"><strong>Where the graph earns its keep:</strong> in route A the gradient can only travel as far as the network's receptive field. Turn <span class="m">K</span> down to 1 above and the increments become isolated dots at the observations; turn it up and they spread into coherent structures. On a grid you would impose that with a localisation radius and a covariance model. Here you get it — for better and for worse — from the mesh connectivity and the block count.</p>
+  </div>
+</section>
+
+<!-- ===== 06 CYCLING + LIMITS ===== -->
+<section id="cycle">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Cycling, and what has to be checked</h2></div>
+  <div class="stack">
+    <p class="prose">One analysis is not data assimilation. The point is the cycle: the analysis ensemble becomes the initial condition, the model propagates it, spread grows, the next batch of observations pulls it back. A diffusion model on a graph can do both halves with the same backbone — the forecast step is the same denoiser conditioned on the previous state instead of on observations.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>Six cycles · schematic</span><span class="m">error and spread, normalised units</span></div>
+      <div class="panel-body stack">
+        <figure><svg id="cycleChart" viewBox="0 0 960 260" role="img" aria-label="Ensemble error and spread sawtooth across six assimilation cycles: both grow during each forecast and drop at each analysis."></svg>
+          <figcaption>Each sawtooth is one window. The gap between the error line and the spread line is the calibration problem: a filter whose spread sits below its error is overconfident, and a diffusion prior guided by an approximate likelihood has two independent ways to end up there.</figcaption>
+        </figure>
+        <div class="split-2">
+          <div class="stack-s">
+            <h3>Making it four-dimensional</h3>
+            <p class="prose" style="font-size:14.5px">The clean version is not to filter at all. Give the graph a time axis — nodes at several valid times, edges between consecutive ones — and learn a score over the whole trajectory. Observations anywhere in the window then guide a single sample of the entire window, which is the generative analogue of 4D-Var, without a tangent-linear or adjoint model.</p>
+            <p class="prose" style="font-size:14.5px">The price is the obvious one: the state you are denoising is now the window, not the step, and both memory and the backward pass scale with it.</p>
+          </div>
+          <div class="stack-s">
+            <h3>The circularity to declare</h3>
+            <p class="prose" style="font-size:14.5px">Almost every diffusion prior in this space is trained on reanalysis — itself the output of a conventional assimilation system. So the prior has already absorbed the observation types, the bias corrections and the error assumptions of that system.</p>
+            <p class="prose" style="font-size:14.5px">That is not disqualifying, but it means agreement with reanalysis is not verification, in exactly the way that agreement with a training target never is. It is also the main argument for models trained directly on observations.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr><th>What to check</th><th>Why it bites here specifically</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Withheld observations</td><td>The only independent score. Withhold whole instruments and whole regions, not random points — random withholding leaves a neighbour inside the receptive field doing the work.</td><td><span class="pill p-ok">Verification</span></td></tr>
+          <tr><td>Spread / error ratio</td><td>Guidance is mode-seeking and the likelihood is approximate; both shrink spread. Check it on withheld observations, per region, not globally.</td><td><span class="pill p-ok">Verification</span></td></tr>
+          <tr><td>Receptive-field reach</td><td>If K hops cannot reach the data-sparse interior of the Southern Ocean, no amount of guidance-scale tuning will constrain it. Measure the reach, do not assume it.</td><td><span class="pill p-warn">Diagnostic</span></td></tr>
+          <tr><td>Fit at assimilated obs</td><td>Expected to be close by construction, and closer still as γ falls. Informative about the error model, silent about skill.</td><td><span class="pill p-warn">Assimilated fit</span></td></tr>
+          <tr><td>Agreement with reanalysis</td><td>The prior was trained on it. Structural agreement, not truth.</td><td><span class="pill p-no">Training family</span></td></tr>
+          <tr><td>Spectra and balance</td><td>A generative prior produces realistic-looking texture whether or not it is in the right place, and guidance can inject increments that no physical balance would allow.</td><td><span class="pill p-warn">Diagnostic</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 07 WHICH DESIGN ===== -->
+<section id="versus">
+  <div class="sec-head"><span class="sec-num">07</span><h2>So which one should you build?</h2></div>
+  <div class="stack">
+    <p class="prose">The <a href="https://claude.ai/code/artifact/1925134c-3f1b-4efd-9a67-c63088d84ec9">companion page</a> describes a different design point for the same posterior: <strong>SURMA-Flow</strong> — a conditional <em>rectified-flow</em> U-Net on a fixed regional grid, guided by gauges and satellite footprints. It is not a smaller version of a graph diffusion model, and it is not strictly worse. On some axes it is clearly better, and the reasons are specific enough to check.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>The one that is not a matter of taste — how much of the trajectory the observations can act on</span></div>
+      <div class="panel-body stack">
+        <div class="split">
+          <figure>
+            <svg id="cmpChart" viewBox="0 0 620 250" role="img" aria-label="Observation authority against fraction of the sampling trajectory: the rectified-flow path rises above one half at about 28 percent of the path, the EDM diffusion path not until about 70 percent."></svg>
+            <figcaption style="margin-top:6px">Authority <span class="m">R / Σ</span> against position along the trajectory, both methods on one axis. Shaded where the observations carry more than half weight.</figcaption>
+          </figure>
+          <div class="stack-s">
+            <div class="stat-grid" style="grid-template-columns:1fr 1fr">
+              <div class="stat hl"><span class="k">Rectified flow · steps where obs carry &gt;½ weight</span><span class="v" id="cmpFlow">—</span><span class="u">of 50 Heun steps</span></div>
+              <div class="stat"><span class="k">EDM diffusion · steps where obs carry &gt;½ weight</span><span class="v" id="cmpDiff">—</span><span class="u">of 20 denoising steps</span></div>
+            </div>
+            <p class="prose" style="font-size:14.5px">With the linear interpolant, the likelihood variance is <span class="m">R + Γ(1−t)²/t²</span>, which reaches <span class="m">R</span> exactly at <span class="m">t = 1</span> and is already small by the middle of the path. With EDM noise levels running from <span class="m">σ = 80</span>, <span class="m">R + γσ²</span> stays enormous until very late: most of the denoising budget is spent where the observations cannot bite, so the increment has to be delivered in a handful of steps.</p>
+            <p class="note" style="font-size:12.5px">Be precise about what this shows: it is a property of the <em>schedule and noise parameterisation</em>, not of flow-versus-diffusion in the abstract. You can re-tune <span class="m">γ</span>, or compress the σ schedule, and move the blue curve left. The point is that the bounded interpolant gives you this for free, while <span class="m">σ_max = 80</span> was chosen for generative sample quality, not for assimilation.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span>Pick the job, not the architecture</span><span class="m" id="scenLabel">regional, dense gauges</span></div>
+      <div class="panel-body stack">
+        <div class="seg" role="group" aria-label="Scenario">
+          <button data-scen="0" aria-pressed="true">Regional, dense gauges</button>
+          <button data-scen="1" aria-pressed="false">Global, all observing systems</button>
+          <button data-scen="2" aria-pressed="false">Off-grid / irregular obs</button>
+          <button data-scen="3" aria-pressed="false">One GPU, must defend it</button>
+        </div>
+        <div class="split-2" id="scenOut"></div>
+      </div>
+    </div>
+
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr><th>Axis</th><th>Rectified-flow U-Net (SURMA-Flow)</th><th>Graph diffusion (GenCast-class)</th><th>Edge</th></tr></thead>
+        <tbody>
+          <tr><td>Observation operator</td><td>Exact and physical — bilinear to a point, exact 8×8 block mean to a footprint. Nothing to train, nothing to mis-train.</td><td>A learned graph decoder. Far more flexible, handles radiances and heterogeneous instruments, but it is another component that can be wrong and is hard to audit.</td><td><span class="pill p-ok">Flow, on auditability</span></td></tr>
+          <tr><td>Localisation</td><td>An explicit, reportable number: 6 cells ≈ 33 km, set against a measured ~146 km variogram range, and labelled in the code as an approximation.</td><td>Implicit in K hops and mesh connectivity. Structurally elegant, but you cannot change it without retraining, and it is easy not to notice what it is.</td><td><span class="pill p-ok">Flow, on control</span></td></tr>
+          <tr><td>Prior anchoring</td><td>Predicts the standardised residual from CPC, so a zero residual reproduces the coarse analysis. The generative prior has a floor it cannot fall through.</td><td>Free-running over the full state. More expressive, and correspondingly more able to invent structure that no observation contradicts.</td><td><span class="pill p-ok">Flow, on safety</span></td></tr>
+          <tr><td>Guidance budget</td><td>Observations carry real weight over most of the path — see the chart above.</td><td>Most of the schedule sits at noise levels where the likelihood is effectively switched off.</td><td><span class="pill p-ok">Flow</span></td></tr>
+          <tr><td>Cost per analysis</td><td>A 4-level U-Net on 128×128, 30 members, one GH200. Guided sampling is 2–3× unguided.</td><td>16 blocks over ~10<sup>4</sup> mesh nodes, 50 members; the DPS backward pass holds every block. A different class of machine.</td><td><span class="pill p-ok">Flow</span></td></tr>
+          <tr><td>Geometry</td><td>One rectangular domain on a regular grid. The convolution is uniform because the domain is small, not because the discretisation is good.</td><td>Near-uniform cells on the whole sphere, no polar pathology, adaptive refinement possible.</td><td><span class="pill p-no">Graph, decisively</span></td></tr>
+          <tr><td>Heterogeneous observations</td><td>Each stream needs its own hand-built operator and error model. Adding an instrument is engineering work.</td><td>A new instrument is a new node type with its own features. This is the whole design.</td><td><span class="pill p-no">Graph</span></td></tr>
+          <tr><td>Long-range coupling</td><td>Bounded by the receptive field of a small U-Net — fine for one country, hopeless for teleconnections.</td><td>A multi-mesh crosses the planet in a few hops.</td><td><span class="pill p-no">Graph</span></td></tr>
+          <tr><td>Cycling and forecasting</td><td>Single-time analysis. Propagation is somebody else's model.</td><td>The same backbone forecasts and analyses, and extends naturally to a 4D window.</td><td><span class="pill p-no">Graph</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note"><strong>The one-sentence answer.</strong> For a bounded domain with a handful of well-understood observation types, where the analysis has to be defended station by station and the compute is one node, the rectified-flow design wins on every axis that matters — exact operators, a prior anchored to a coarse analysis, a localisation you can quote, and observations that act over most of the trajectory. Scale the domain to the sphere, or the observing system to everything that reports, and every one of those advantages turns into a limitation.</p>
+  </div>
+</section>
+
+<footer>
+  <div>Score-based data assimilation with a graph-network diffusion prior — a companion explainer. Architecture figures quoted from the published GenCast and GraphCast descriptions; the DA formulation follows the score-based / diffusion-posterior-sampling line. Fields, meshes and observation networks on this page are schematic and generated in the browser.</div>
+  <div class="refs">
+    <span>Price et al. 2024 — GenCast: diffusion-based ensemble forecasting for medium-range weather (arXiv:2312.15796)</span>
+    <span>Lam et al. 2023 — GraphCast: learning skilful medium-range global weather forecasting</span>
+    <span>Karras et al. 2022 — Elucidating the design space of diffusion-based generative models</span>
+    <span>Rozet &amp; Louppe 2023 — Score-based data assimilation (NeurIPS)</span>
+    <span>Chung et al. 2023 — Diffusion posterior sampling for general noisy inverse problems</span>
+    <span>Alexe et al. 2024 — GraphDOP: forecasts learnt and initialised directly from observations (arXiv:2412.15687)</span>
+  </div>
+</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ======================= geometry: icosahedral mesh ======================= */
+function buildIco(maxLevel){
+  const t = (1 + Math.sqrt(5)) / 2;
+  let verts = [
+    [-1,t,0],[1,t,0],[-1,-t,0],[1,-t,0],
+    [0,-1,t],[0,1,t],[0,-1,-t],[0,1,-t],
+    [t,0,-1],[t,0,1],[-t,0,-1],[-t,0,1]
+  ].map(v => { const n = Math.hypot(v[0],v[1],v[2]); return [v[0]/n, v[1]/n, v[2]/n]; });
+  let faces = [
+    [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]
+  ];
+  const edgesByLevel = [];
+  const collect = fs => {
+    const set = new Set(), out = [];
+    for (const f of fs) for (let k = 0; k < 3; k++){
+      const a = f[k], b = f[(k+1)%3], key = a < b ? a+'_'+b : b+'_'+a;
+      if (!set.has(key)){ set.add(key); out.push([Math.min(a,b), Math.max(a,b)]); }
+    }
+    return out;
+  };
+  edgesByLevel.push(collect(faces));
+  for (let L = 1; L <= maxLevel; L++){
+    const cache = new Map(), nf = [];
+    const mid = (a, b) => {
+      const key = a < b ? a+'_'+b : b+'_'+a;
+      if (cache.has(key)) return cache.get(key);
+      const p = [verts[a][0]+verts[b][0], verts[a][1]+verts[b][1], verts[a][2]+verts[b][2]];
+      const n = Math.hypot(p[0],p[1],p[2]);
+      verts.push([p[0]/n, p[1]/n, p[2]/n]);
+      const idx = verts.length - 1; cache.set(key, idx); return idx;
+    };
+    for (const [a,b,c] of faces){
+      const ab = mid(a,b), bc = mid(b,c), ca = mid(c,a);
+      nf.push([a,ab,ca],[b,bc,ab],[c,ca,bc],[ab,bc,ca]);
+    }
+    faces = nf;
+    edgesByLevel.push(collect(faces));
+  }
+  return { verts, edgesByLevel, faces };
+}
+const ICO = buildIco(3);
+const NV_LEVEL = [12, 42, 162, 642];
+
+function activeEdges(level, multi){
+  if (!multi) return ICO.edgesByLevel[level];
+  const out = [];
+  for (let L = 0; L <= level; L++) for (const e of ICO.edgesByLevel[L]) out.push(e);
+  return out;
+}
+function buildAdj(level, multi){
+  const n = NV_LEVEL[level], adj = Array.from({length: n}, () => []);
+  for (const [a,b] of activeEdges(level, multi)){
+    if (a < n && b < n){ adj[a].push(b); adj[b].push(a); }
+  }
+  return adj;
+}
+function bfs(adj, src, K){
+  const d = new Int16Array(adj.length).fill(-1);
+  d[src] = 0; let frontier = [src];
+  for (let k = 1; k <= K; k++){
+    const nxt = [];
+    for (const v of frontier) for (const w of adj[v]) if (d[w] < 0){ d[w] = k; nxt.push(w); }
+    frontier = nxt;
+    if (!frontier.length) break;
+  }
+  return d;
+}
+
+/* ======================= shared state ======================= */
+const S = {
+  level: 3, multi: true, K: 6,
+  step: 10, nSteps: 20,
+  insitu: true, sat: true, obsOver: true,
+  daView: 'den', picked: -1,
+  yaw: 0.55, pitch: 0.38,
+  seed: 5
+};
+let ADJ = buildAdj(S.level, S.multi);
+let NV = NV_LEVEL[S.level];
+
+/* ======================= schematic global field ======================= */
+function rng(seed){ let s = (seed >>> 0) || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+function randDir(r){
+  const z = r() * 2 - 1, a = r() * Math.PI * 2, s = Math.sqrt(Math.max(0, 1 - z*z));
+  return [s * Math.cos(a), z, s * Math.sin(a)];
+}
+const dot = (a,b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+
+function makeCentres(seed, n, amp, tight){
+  const r = rng(seed), out = [];
+  for (let i = 0; i < n; i++) out.push({ u: randDir(r), a: (r()*2-1) * amp, k: tight * (0.6 + r()) });
+  return out;
+}
+const TRUTH_C = makeCentres(21, 9, 1.25, 4.0);
+function truthAt(p){
+  let v = 1.0 * Math.sin(2.4 * Math.asin(Math.max(-1, Math.min(1, p[1]))));
+  for (const c of TRUTH_C) v += c.a * Math.exp(c.k * (dot(p, c.u) - 1));
+  return v;
+}
+const NMEM = 8;
+let TRUTH = null, PRIOR = [], NOISE = [];
+function buildFields(seed){
+  TRUTH = new Float32Array(NV_LEVEL[3]);
+  for (let i = 0; i < TRUTH.length; i++) TRUTH[i] = truthAt(ICO.verts[i]);
+  PRIOR = []; NOISE = [];
+  // A real background ensemble shares most of its error: the members are not independent
+  // draws around truth, or the ensemble mean would be far better than any member.
+  const shared = makeCentres(seed * 17 + 91, 6, 0.62, 2.2);
+  for (let m = 0; m < NMEM; m++){
+    const ec = makeCentres(seed * 131 + m * 29 + 3, 7, 0.52, 2.6);
+    const f = new Float32Array(TRUTH.length);
+    for (let i = 0; i < f.length; i++){
+      const p = ICO.verts[i];
+      let e = 0;
+      for (const c of shared) e += c.a * Math.exp(c.k * (dot(p, c.u) - 1));
+      for (const c of ec) e += c.a * Math.exp(c.k * (dot(p, c.u) - 1));
+      f[i] = TRUTH[i] + e;
+    }
+    PRIOR.push(f);
+    const r = rng(seed * 977 + m * 61 + 7), z = new Float32Array(f.length);
+    for (let i = 0; i < z.length; i++){
+      const u = Math.max(1e-7, r()), v = r();
+      z[i] = Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+    }
+    NOISE.push(z);
+  }
+}
+
+/* ======================= observations ======================= */
+const OBS = [];
+function buildObs(){
+  OBS.length = 0;
+  const r = rng(4242);
+  // in-situ: clumped, dense in the northern mid-latitudes, sparse at sea
+  let tries = 0;
+  while (OBS.filter(o => o.kind !== 'sat').length < 78 && tries < 8000){
+    tries++;
+    const p = randDir(r);
+    const lat = Math.asin(p[1]) * 180 / Math.PI, lon = Math.atan2(p[2], p[0]);
+    const land = 0.10
+      + 0.80 * Math.exp(-(((lat - 46) / 20) ** 2)) * (0.30 + 0.70 * (0.5 + 0.5 * Math.cos(2.0 * lon - 0.9)))
+      + 0.30 * Math.exp(-(((lat + 22) / 14) ** 2)) * (0.25 + 0.75 * (0.5 + 0.5 * Math.cos(1.4 * lon + 2.1)));
+    if (r() > land) continue;
+    const sonde = r() < 0.28;
+    OBS.push({ p, kind: sonde ? 'sonde' : 'surf', sig: sonde ? 0.15 : 0.22, w: sonde ? 1.8 : 1.0 });
+  }
+  // satellite: polar-orbiting tracks, each a great circle inclined ~98 degrees
+  for (let orbit = 0; orbit < 7; orbit++){
+    const lon0 = orbit * (Math.PI * 2 / 7) + 0.3, inc = 98 * Math.PI / 180;
+    for (let s = 0; s < 26; s++){
+      const th = (s / 26) * Math.PI * 2;
+      const x0 = Math.cos(th), y0 = Math.sin(th) * Math.cos(inc), z0 = Math.sin(th) * Math.sin(inc);
+      const p = [x0 * Math.cos(lon0) - z0 * Math.sin(lon0), y0, x0 * Math.sin(lon0) + z0 * Math.cos(lon0)];
+      OBS.push({ p, kind: 'sat', sig: 0.38, w: 0.33 });
+    }
+  }
+  // anchor each observation to its nearest mesh node, and mark the withheld fold
+  let n = 0;
+  OBS.forEach((o, i) => {
+    let best = -1, bd = -2;
+    for (let v = 0; v < NV_LEVEL[3]; v++){ const d = dot(o.p, ICO.verts[v]); if (d > bd){ bd = d; best = v; } }
+    o.node = best;
+    o.truth = truthAt(o.p);
+    if (o.kind !== 'sat'){ o.withheld = (n % 5 === 0); n++; } else o.withheld = false;
+  });
+  const g = rng(99);
+  OBS.forEach(o => {
+    const u = Math.max(1e-7, g()), v = g();
+    o.y = o.truth + o.sig * Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+  });
+}
+const obsActive = o => (o.kind === 'sat' ? S.sat : S.insitu);
+const obsAssim  = o => obsActive(o) && !o.withheld;
+
+/* ======================= noise schedule + authority ======================= */
+const SIG_MAX = 80, SIG_MIN = 0.03, RHO = 7, R_OBS = 0.04, GAMMA = 0.05;
+function sigmaAt(i){
+  const n = S.nSteps;
+  if (i >= n) return 0;
+  const a = Math.pow(SIG_MAX, 1/RHO), b = Math.pow(SIG_MIN, 1/RHO);
+  return Math.pow(a + (i / (n - 1)) * (b - a), RHO);
+}
+const authority = sig => R_OBS / (R_OBS + GAMMA * sig * sig);
+const ALPHA = (() => {
+  const a = new Float64Array(21); let acc = 0;
+  for (let i = 1; i <= 20; i++){ acc += authority(sigmaAt(i)); a[i] = acc; }
+  for (let i = 0; i <= 20; i++) a[i] /= (acc || 1);
+  return a;
+})();
+
+/* ======================= the increment, spread over the graph ======================= */
+let INC = [], TOUCHED = 0;
+function buildIncrements(){
+  INC = [];
+  const n = NV, decay = 0.72;
+  // hop-distance field from every active observation anchor, capped at K
+  const anchors = OBS.filter(obsAssim).filter(o => o.node < n);
+  const reach = new Uint8Array(n);
+  // hop distances depend only on the anchor and K, never on the member — compute once
+  const DIST = anchors.map(o => {
+    const d = bfs(ADJ, o.node, S.K);
+    for (let i = 0; i < n; i++) if (d[i] >= 0) reach[i] = 1;
+    return d;
+  });
+  for (let m = 0; m < NMEM; m++){
+    const num = new Float64Array(n), den = new Float64Array(n);
+    const pr = PRIOR[m];
+    const pert = rng(1500 + m * 37);
+    anchors.forEach((o, oi) => {
+      const u = Math.max(1e-7, pert()), v = pert();
+      const yPert = o.y + o.sig * Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+      const d = yPert - pr[o.node];
+      const dist = DIST[oi];
+      for (let i = 0; i < n; i++){
+        if (dist[i] < 0) continue;
+        const w = o.w * Math.pow(decay, dist[i]);
+        num[i] += w * d; den[i] += w;
+      }
+    });
+    const inc = new Float32Array(n);
+    for (let i = 0; i < n; i++){
+      if (den[i] <= 0) continue;
+      const conf = den[i] / (den[i] + 0.18);
+      inc[i] = 0.85 * conf * (num[i] / den[i]);
+    }
+    INC.push(inc);
+  }
+  let c = 0; for (let i = 0; i < n; i++) if (reach[i]) c++;
+  TOUCHED = n ? c / n : 0;
+}
+function analysisOf(m, alpha){
+  const f = new Float32Array(NV), pr = PRIOR[m], inc = INC[m];
+  for (let i = 0; i < NV; i++) f[i] = pr[i] + (inc ? alpha * inc[i] : 0);
+  return f;
+}
+
+/* ======================= colour ======================= */
+const DIVS = [
+  [-3.0,[ 32, 62,110]], [-1.6,[ 62,118,176]], [-0.6,[150,192,216]],
+  [ 0.0,[243,244,242]],
+  [ 0.6,[240,196,146]], [ 1.6,[214,124, 72]], [3.0,[150, 44, 40]]
+];
+function divColor(v){
+  if (v <= DIVS[0][0]) return DIVS[0][1];
+  for (let i = 1; i < DIVS.length; i++){
+    if (v <= DIVS[i][0]){
+      const [a, ca] = DIVS[i-1], [b, cb] = DIVS[i], f = (v - a) / (b - a);
+      return [ca[0]+(cb[0]-ca[0])*f, ca[1]+(cb[1]-ca[1])*f, ca[2]+(cb[2]-ca[2])*f];
+    }
+  }
+  return DIVS[DIVS.length-1][1];
+}
+const MAGS = [[0,[243,244,242]],[0.35,[178,205,214]],[0.8,[ 90,140,180]],[1.5,[ 58, 78,140]],[2.6,[ 40, 40, 80]]];
+function magColor(v){
+  v = Math.abs(v);
+  if (v <= MAGS[0][0]) return MAGS[0][1];
+  for (let i = 1; i < MAGS.length; i++){
+    if (v <= MAGS[i][0]){
+      const [a, ca] = MAGS[i-1], [b, cb] = MAGS[i], f = (v - a) / (b - a);
+      return [ca[0]+(cb[0]-ca[0])*f, ca[1]+(cb[1]-ca[1])*f, ca[2]+(cb[2]-ca[2])*f];
+    }
+  }
+  return MAGS[MAGS.length-1][1];
+}
+const rgb = c => `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+function cssVar(n, fb){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  return v || fb;
+}
+function divBarCss(){
+  const st = [];
+  for (let p = 0; p <= 24; p++){ const v = -3 + (p/24)*6; st.push(`${rgb(divColor(v))} ${(p/24*100).toFixed(1)}%`); }
+  return `linear-gradient(to right, ${st.join(',')})`;
+}
+
+/* ======================= globe rendering ======================= */
+function rotate(p){
+  const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw);
+  const x = p[0]*cy + p[2]*sy, z = -p[0]*sy + p[2]*cy, y0 = p[1];
+  const cp = Math.cos(S.pitch), sp = Math.sin(S.pitch);
+  return [x, y0*cp - z*sp, y0*sp + z*cp];
+}
+function project(p, cx, cy, R){
+  const q = rotate(p);
+  return { x: cx + q[0]*R, y: cy - q[1]*R, z: q[2] };
+}
+
+function drawSphereBase(ctx, W, cx, cy, R){
+  ctx.clearRect(0, 0, W, W);
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.2832);
+  ctx.fillStyle = cssVar('--sunk', '#dfe5ed'); ctx.fill();
+  ctx.strokeStyle = cssVar('--line', '#c3ccd8'); ctx.lineWidth = 1; ctx.stroke();
+}
+function drawGraticule(ctx, cx, cy, R, step, alpha){
+  ctx.strokeStyle = cssVar('--line', '#c3ccd8');
+  ctx.globalAlpha = alpha; ctx.lineWidth = 1;
+  const d2r = Math.PI / 180;
+  for (let lat = -90 + step; lat < 90; lat += step){
+    ctx.beginPath(); let started = false;
+    for (let lon = 0; lon <= 360; lon += 3){
+      const a = lat*d2r, b = lon*d2r;
+      const p = [Math.cos(a)*Math.cos(b), Math.sin(a), Math.cos(a)*Math.sin(b)];
+      const s = project(p, cx, cy, R);
+      if (s.z > 0){ if (!started){ ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y); }
+      else started = false;
+    }
+    ctx.stroke();
+  }
+  for (let lon = 0; lon < 360; lon += step){
+    ctx.beginPath(); let started = false;
+    for (let lat = -90; lat <= 90; lat += 3){
+      const a = lat*d2r, b = lon*d2r;
+      const p = [Math.cos(a)*Math.cos(b), Math.sin(a), Math.cos(a)*Math.sin(b)];
+      const s = project(p, cx, cy, R);
+      if (s.z > 0){ if (!started){ ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y); }
+      else started = false;
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGlobe(cv, opts){
+  const o = Object.assign({
+    field: null, mode: 'div', level: S.level, multi: S.multi,
+    edges: true, nodes: true, nodeScale: 1, edgeAlpha: 0.30,
+    highlight: null, obs: false, graticule: 0
+  }, opts || {});
+  const ctx = cv.getContext('2d'), W = cv.width;
+  const cx = W/2, cy = W/2, R = W*0.44;
+  drawSphereBase(ctx, W, cx, cy, R);
+  if (o.graticule) drawGraticule(ctx, cx, cy, R, o.graticule, 0.65);
+
+  const n = NV_LEVEL[o.level];
+  const P = new Array(n);
+  for (let i = 0; i < n; i++) P[i] = project(ICO.verts[i], cx, cy, R);
+
+  if (o.edges){
+    ctx.lineWidth = 0.8;
+    const ec = cssVar('--mesh', '#3b5ea8');
+    for (const [a,b] of activeEdges(o.level, o.multi)){
+      if (a >= n || b >= n) continue;
+      const pa = P[a], pb = P[b];
+      if (pa.z <= 0.02 || pb.z <= 0.02) continue;
+      ctx.globalAlpha = o.edgeAlpha * Math.min(pa.z, pb.z);
+      ctx.strokeStyle = ec;
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (o.nodes){
+    const order = [];
+    for (let i = 0; i < n; i++) if (P[i].z > 0) order.push(i);
+    order.sort((a,b) => P[a].z - P[b].z);
+    for (const i of order){
+      const p = P[i];
+      const v = o.field ? o.field[i] : 0;
+      const c = o.mode === 'mag' ? magColor(v) : divColor(v);
+      // size a node to its share of the sphere, so every refinement level reads the same
+      const cellR = 0.5 * Math.sqrt(4 / n);
+      let rad = cellR * R * o.nodeScale * (0.62 + 0.38 * p.z);
+      let alpha = 0.58 + 0.42 * p.z;
+      if (o.highlight){
+        const h = o.highlight[i];
+        if (h < 0){ alpha *= 0.16; rad *= 0.7; }
+        else { rad *= 1.25 + 0.3 * (1 - h / Math.max(1, S.K)); }
+      }
+      ctx.globalAlpha = alpha;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, 6.2832);
+      ctx.fillStyle = rgb(c); ctx.fill();
+      if (o.highlight && o.highlight[i] === 0){
+        ctx.globalAlpha = 1; ctx.lineWidth = 2;
+        ctx.strokeStyle = cssVar('--focus', '#1d6fb8'); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (o.obs){
+    const ci = cssVar('--insitu', '#b0650e'), cs = cssVar('--sat', '#84497f');
+    for (const ob of OBS){
+      if (!obsActive(ob)) continue;
+      const s = project(ob.p, cx, cy, R);
+      if (s.z <= 0.02) continue;
+      ctx.globalAlpha = 0.30 + 0.55 * s.z;
+      if (ob.node < n){
+        const a = P[ob.node];
+        ctx.strokeStyle = ob.kind === 'sat' ? cs : ci;
+        ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(a.x, a.y); ctx.stroke();
+      }
+      ctx.globalAlpha = 0.45 + 0.55 * s.z;
+      const r = 2.9 * (W/560) * (0.6 + 0.4*s.z);
+      ctx.beginPath();
+      if (ob.kind === 'sat'){ ctx.rect(s.x - r, s.y - r, 2*r, 2*r); ctx.fillStyle = cs; }
+      else if (ob.kind === 'sonde'){
+        ctx.moveTo(s.x, s.y - r*1.4); ctx.lineTo(s.x + r*1.4, s.y);
+        ctx.lineTo(s.x, s.y + r*1.4); ctx.lineTo(s.x - r*1.4, s.y); ctx.closePath();
+        ctx.fillStyle = ci;
+      } else { ctx.arc(s.x, s.y, r, 0, 6.2832); ctx.fillStyle = ci; }
+      if (ob.withheld){ ctx.strokeStyle = cssVar('--ink', '#101720'); ctx.lineWidth = 1.4; ctx.stroke(); }
+      else ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+  return { cx, cy, R, P, n };
+}
+
+/* ======================= hero ======================= */
+function buildHero(){
+  const host = document.getElementById('heroStrip'); host.textContent = '';
+  const steps = [0, 6, 12, 16, 20];
+  const yaw = S.yaw, pitch = S.pitch;
+  S.yaw = 0.6; S.pitch = 0.35;
+  steps.forEach(i => {
+    const d = document.createElement('div'); d.className = 'frame';
+    const cv = document.createElement('canvas'); cv.width = 300; cv.height = 300;
+    const cap = document.createElement('span'); cap.className = 'cap';
+    const sig = sigmaAt(i);
+    cap.textContent = i >= 20 ? 'σ → 0 · analysis'
+      : `σ = ${sig >= 10 ? sig.toFixed(0) : sig >= 0.1 ? sig.toFixed(2) : sig.toFixed(3)}`;
+    d.append(cv, cap); host.appendChild(d);
+    const f = new Float32Array(NV_LEVEL[3]), an = analysisOf(0, ALPHA[i]);
+    const cin = 1 / Math.sqrt(sig*sig + 1);
+    for (let k = 0; k < f.length; k++) f[k] = (an[k] + sig * NOISE[0][k]) * cin;
+    drawGlobe(cv, { field: f, level: 3, multi: true, edges: true, edgeAlpha: 0.16, nodeScale: 1.0 });
+  });
+  S.yaw = yaw; S.pitch = pitch;
+  document.getElementById('heroCbar').style.background = divBarCss();
+}
+
+/* ======================= 01 grid vs mesh ======================= */
+function drawCompare(){
+  const a = document.getElementById('cvLatLon'), b = document.getElementById('cvIco');
+  const ctxA = a.getContext('2d'), W = a.width, cx = W/2, cy = W/2, R = W*0.44;
+  drawSphereBase(ctxA, W, cx, cy, R);
+  drawGraticule(ctxA, cx, cy, R, 10, 0.9);
+  const d2r = Math.PI/180;
+  for (let lat = -80; lat <= 80; lat += 10) for (let lon = 0; lon < 360; lon += 10){
+    const p = [Math.cos(lat*d2r)*Math.cos(lon*d2r), Math.sin(lat*d2r), Math.cos(lat*d2r)*Math.sin(lon*d2r)];
+    const s = project(p, cx, cy, R);
+    if (s.z <= 0.02) continue;
+    ctxA.globalAlpha = 0.35 + 0.65*s.z;
+    ctxA.beginPath(); ctxA.arc(s.x, s.y, 2.3*(W/480)*(0.55+0.45*s.z), 0, 6.2832);
+    ctxA.fillStyle = cssVar('--ink-3', '#6b7885'); ctxA.fill();
+  }
+  ctxA.globalAlpha = 1;
+  drawGlobe(b, { field: TRUTH, level: 3, multi: false, edges: true, edgeAlpha: 0.5, nodeScale: 0.62 });
+}
+
+/* ======================= 02 mesh explorer ======================= */
+let meshHL = null;
+function drawMesh(){
+  const cv = document.getElementById('cvMesh');
+  const fld = new Float32Array(NV);
+  for (let i = 0; i < NV; i++) fld[i] = TRUTH[i];
+  const g = drawGlobe(cv, {
+    field: fld, level: S.level, multi: S.multi,
+    edges: true, edgeAlpha: 0.42, nodeScale: 0.58, highlight: meshHL
+  });
+  cv._geom = g;
+
+  const eds = activeEdges(S.level, S.multi).filter(([a,b]) => a < NV && b < NV);
+  document.getElementById('stNodes').textContent = NV.toLocaleString();
+  document.getElementById('stEdges').textContent = eds.length.toLocaleString();
+  document.getElementById('stDeg').textContent = (2 * eds.length / NV).toFixed(1);
+  const src = S.picked >= 0 && S.picked < NV ? S.picked : 0;
+  const d = bfs(ADJ, src, S.K);
+  let c = 0; for (let i = 0; i < NV; i++) if (d[i] >= 0) c++;
+  document.getElementById('stReach').textContent = (100 * c / NV).toFixed(0) + '%';
+  document.getElementById('meshLabel').textContent = `level ${S.level} · ${S.multi ? 'multi-mesh' : 'single level'}`;
+  document.getElementById('stTouched').textContent = (100 * TOUCHED).toFixed(0) + '%';
+}
+function pickNode(cv, ev){
+  const g = cv._geom; if (!g) return;
+  const r = cv.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (cv.width / r.width);
+  const y = (ev.clientY - r.top) * (cv.height / r.height);
+  let best = -1, bd = 1e9;
+  for (let i = 0; i < g.n; i++){
+    const p = g.P[i]; if (p.z <= 0) continue;
+    const dd = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (dd < bd){ bd = dd; best = i; }
+  }
+  if (best < 0 || bd > 900) return;
+  S.picked = best;
+  meshHL = bfs(ADJ, best, S.K);
+  let c = 0; for (let i = 0; i < NV; i++) if (meshHL[i] >= 0) c++;
+  const lat = Math.asin(ICO.verts[best][1]) * 180 / Math.PI;
+  const lon = Math.atan2(ICO.verts[best][2], ICO.verts[best][0]) * 180 / Math.PI;
+  document.getElementById('meshOut').innerHTML =
+    `<b>Node ${best}</b> at ${lat.toFixed(0)}°, ${lon.toFixed(0)}° reaches <b>${c} of ${NV} nodes</b> (${(100*c/NV).toFixed(0)}%) in ${S.K} hops` +
+    `${S.multi ? ' with the coarse-level edges carrying most of the distance' : ' — single-level edges only, so reach grows one cell at a time'}.` +
+    ` An observation anchored here can influence exactly that set and nothing outside it.`;
+  drawMesh();
+}
+
+/* ======================= 04 diffusion panels ======================= */
+function drawDiffusion(){
+  const i = S.step, sig = sigmaAt(i), alpha = ALPHA[i];
+  const an = analysisOf(0, alpha);
+  const cin = 1 / Math.sqrt(sig*sig + 1);
+  const noisy = new Float32Array(NV), den = new Float32Array(NV);
+  for (let k = 0; k < NV; k++){
+    noisy[k] = (an[k] + sig * NOISE[0][k]) * cin;
+    den[k] = an[k];
+  }
+  drawGlobe(document.getElementById('cvNoisy'), { field: noisy, edges: true, edgeAlpha: 0.12, nodeScale: 1.0 });
+  drawGlobe(document.getElementById('cvDen'),   { field: den,   edges: true, edgeAlpha: 0.12, nodeScale: 1.0 });
+  const txt = `σ = ${sig >= 10 ? sig.toFixed(0) : sig >= 0.1 ? sig.toFixed(2) : sig.toFixed(3)} · step ${i} / 20`;
+  document.getElementById('sigLabel').textContent = txt;
+  document.getElementById('daLabel').textContent = txt;
+  document.getElementById('sigVal').textContent = `${i} / 20`;
+  document.getElementById('daStepVal').textContent = `${i} / 20`;
+  document.getElementById('sigSlider').value = i;
+  document.getElementById('daStep').value = i;
+  markSched();
+}
+
+/* ======================= charts ======================= */
+function svgAdd(svg, tag, at){
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  let st = '';
+  for (const k in at){
+    const v = at[k];
+    if ((k === 'fill' || k === 'stroke' || k === 'font-family') && String(v).indexOf('var(') >= 0) st += k + ':' + v + ';';
+    else e.setAttribute(k, v);
+  }
+  if (st) e.setAttribute('style', st);
+  svg.appendChild(e); return e;
+}
+function schedChart(){
+  const svg = document.getElementById('schedChart'); svg.textContent = '';
+  const W = 400, H = 200, L = 44, Rr = 10, T = 14, B = 30;
+  const lo = Math.log10(SIG_MIN), hi = Math.log10(SIG_MAX);
+  const px = i => L + (i / 20) * (W - L - Rr);
+  const py = s => H - B - ((Math.log10(Math.max(SIG_MIN, s)) - lo) / (hi - lo)) * (H - B - T);
+  [0.03, 0.3, 3, 30].forEach(s => {
+    svgAdd(svg, 'line', { x1: L, y1: py(s), x2: W - Rr, y2: py(s), stroke: 'var(--line-soft)', 'stroke-width': 1 });
+    svgAdd(svg, 'text', { x: L - 6, y: py(s) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = String(s);
+  });
+  [0, 5, 10, 15, 20].forEach(i => {
+    svgAdd(svg, 'text', { x: px(i), y: H - 10, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = String(i);
+  });
+  let d = '';
+  for (let i = 0; i <= 19; i++) d += (i ? ' L' : 'M') + px(i) + ',' + py(sigmaAt(i));
+  svgAdd(svg, 'path', { d, fill: 'none', stroke: 'var(--mesh)', 'stroke-width': 2 });
+  for (let i = 0; i <= 19; i++)
+    svgAdd(svg, 'circle', { cx: px(i), cy: py(sigmaAt(i)), r: 2.4, fill: 'var(--mesh)' });
+  const m = svgAdd(svg, 'line', { id: 'schedMark', x1: px(S.step), y1: T, x2: px(S.step), y2: H - B, stroke: 'var(--focus)', 'stroke-width': 1.6 });
+  m.setAttribute('data-a', L); m.setAttribute('data-b', W - Rr);
+  svgAdd(svg, 'text', { x: W - Rr, y: T + 10, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = 'σ, log scale, vs step';
+}
+function markSched(){
+  [['schedMark', 20], ['authMark', 20]].forEach(([id, n]) => {
+    const m = document.getElementById(id); if (!m) return;
+    const a = +m.getAttribute('data-a'), b = +m.getAttribute('data-b');
+    const x = a + (S.step / n) * (b - a);
+    m.setAttribute('x1', x); m.setAttribute('x2', x);
+  });
+}
+function authChart(){
+  const svg = document.getElementById('authChart'); svg.textContent = '';
+  const W = 420, H = 170, L = 40, Rr = 12, T = 14, B = 30;
+  const px = i => L + (i / 20) * (W - L - Rr), py = v => H - B - v * (H - B - T);
+  [0, 0.5, 1].forEach(v => {
+    svgAdd(svg, 'line', { x1: L, y1: py(v), x2: W - Rr, y2: py(v), stroke: 'var(--line-soft)', 'stroke-width': 1 });
+    svgAdd(svg, 'text', { x: L - 6, y: py(v) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = v.toFixed(1);
+  });
+  [0, 5, 10, 15, 20].forEach(i => {
+    svgAdd(svg, 'text', { x: px(i), y: H - 10, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = String(i);
+  });
+  let d1 = '', d2 = '';
+  for (let i = 0; i <= 20; i++){
+    d1 += (i ? ' L' : 'M') + px(i) + ',' + py(authority(sigmaAt(i)));
+    d2 += (i ? ' L' : 'M') + px(i) + ',' + py(ALPHA[i]);
+  }
+  svgAdd(svg, 'path', { d: d1, fill: 'none', stroke: 'var(--insitu)', 'stroke-width': 2 });
+  svgAdd(svg, 'path', { d: d2, fill: 'none', stroke: 'var(--mesh)', 'stroke-width': 1.6, 'stroke-dasharray': '5 3' });
+  const m = svgAdd(svg, 'line', { id: 'authMark', x1: px(S.step), y1: T, x2: px(S.step), y2: H - B, stroke: 'var(--focus)', 'stroke-width': 1.6 });
+  m.setAttribute('data-a', L); m.setAttribute('data-b', W - Rr);
+  svgAdd(svg, 'text', { x: W - Rr, y: T + 10, 'text-anchor': 'end', fill: 'var(--insitu)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = 'R / Σ(σ)';
+  svgAdd(svg, 'text', { x: W - Rr, y: T + 24, 'text-anchor': 'end', fill: 'var(--mesh)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = 'cumulative increment';
+}
+function cycleChart(){
+  const svg = document.getElementById('cycleChart'); svg.textContent = '';
+  const W = 960, H = 260, L = 48, Rr = 14, T = 22, B = 44;
+  const nC = 6, per = 24;
+  const px = k => L + (k / (nC * per)) * (W - L - Rr);
+  const py = v => H - B - (v / 1.6) * (H - B - T);
+  [0, 0.4, 0.8, 1.2, 1.6].forEach(v => {
+    svgAdd(svg, 'line', { x1: L, y1: py(v), x2: W - Rr, y2: py(v), stroke: 'var(--line-soft)', 'stroke-width': 1 });
+    svgAdd(svg, 'text', { x: L - 6, y: py(v) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = v.toFixed(1);
+  });
+  let err = 1.05, spr = 0.78, de = '', ds = '';
+  for (let k = 0; k <= nC * per; k++){
+    const inCycle = k % per;
+    if (inCycle === 0 && k > 0){
+      err *= 0.46; spr *= 0.52;           // analysis: observations pull the ensemble back
+      svgAdd(svg, 'line', { x1: px(k), y1: T, x2: px(k), y2: H - B, stroke: 'var(--line)', 'stroke-width': 1, 'stroke-dasharray': '3 3' });
+      svgAdd(svg, 'text', { x: px(k), y: T - 6, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 9.5 }).textContent = 'analysis';
+    } else if (k > 0){
+      err = err + 0.055 * (1.35 - err) + 0.017;   // forecast: error grows toward saturation
+      spr = spr + 0.052 * (1.20 - spr) + 0.013;
+    }
+    de += (k ? ' L' : 'M') + px(k) + ',' + py(err);
+    ds += (k ? ' L' : 'M') + px(k) + ',' + py(spr);
+  }
+  svgAdd(svg, 'path', { d: de, fill: 'none', stroke: 'var(--alert)', 'stroke-width': 2 });
+  svgAdd(svg, 'path', { d: ds, fill: 'none', stroke: 'var(--mesh)', 'stroke-width': 2, 'stroke-dasharray': '6 4' });
+  svgAdd(svg, 'text', { x: W - Rr, y: T + 4, 'text-anchor': 'end', fill: 'var(--alert)', 'font-family': 'var(--mono)', 'font-size': 11 }).textContent = 'ensemble-mean error';
+  svgAdd(svg, 'text', { x: W - Rr, y: T + 20, 'text-anchor': 'end', fill: 'var(--mesh)', 'font-family': 'var(--mono)', 'font-size': 11 }).textContent = 'ensemble spread';
+  svgAdd(svg, 'text', { x: (L + W - Rr) / 2, y: H - 12, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10.5 }).textContent = 'forecast → analysis → forecast …   six windows';
+}
+
+/* ======================= 07 design comparison ======================= */
+const R_FLOW = 0.269 * 0.269, GAMMA_FLOW = 0.01, T_GATE = 0.10, N_FLOW = 50;
+function authFlow(t){
+  if (t < T_GATE) return 0;
+  const tt = Math.max(1e-4, t);
+  return R_FLOW / (R_FLOW + GAMMA_FLOW * (1 - tt) * (1 - tt) / (tt * tt));
+}
+function sigmaFrac(f){
+  const a = Math.pow(SIG_MAX, 1/RHO), b = Math.pow(SIG_MIN, 1/RHO);
+  return Math.pow(a + f * (b - a), RHO);
+}
+const authDiff = f => authority(sigmaFrac(f));
+
+function cmpChart(){
+  const svg = document.getElementById('cmpChart'); svg.textContent = '';
+  const W = 620, H = 250, L = 46, Rr = 14, T = 18, B = 46;
+  const px = f => L + f * (W - L - Rr), py = v => H - B - v * (H - B - T);
+
+  [0, 0.5, 1].forEach(v => {
+    svgAdd(svg, 'line', { x1: L, y1: py(v), x2: W - Rr, y2: py(v),
+      stroke: 'var(--line-soft)', 'stroke-width': v === 0.5 ? 1.4 : 1,
+      'stroke-dasharray': v === 0.5 ? '4 4' : '' });
+    svgAdd(svg, 'text', { x: L - 6, y: py(v) + 4, 'text-anchor': 'end',
+      fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = v.toFixed(1);
+  });
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    svgAdd(svg, 'text', { x: px(f), y: H - 26, 'text-anchor': 'middle',
+      fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 }).textContent = (f * 100).toFixed(0) + '%';
+  });
+  svgAdd(svg, 'text', { x: (L + W - Rr) / 2, y: H - 8, 'text-anchor': 'middle',
+    fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10.5 }).textContent = 'position along the sampling trajectory';
+
+  const cross = fn => { for (let i = 0; i <= 400; i++){ const f = i / 400; if (fn(f) >= 0.5) return f; } return 1; };
+  const xf = cross(authFlow), xd = cross(authDiff);
+
+  svgAdd(svg, 'rect', { x: px(xf), y: T, width: px(1) - px(xf), height: py(0) - T,
+    fill: 'var(--cond)', opacity: 0.12 });
+  svgAdd(svg, 'rect', { x: px(xd), y: T, width: px(1) - px(xd), height: py(0) - T,
+    fill: 'var(--mesh)', opacity: 0.14 });
+
+  let df = '', dd = '';
+  for (let i = 0; i <= 400; i++){
+    const f = i / 400;
+    df += (i ? ' L' : 'M') + px(f) + ',' + py(authFlow(f));
+    dd += (i ? ' L' : 'M') + px(f) + ',' + py(authDiff(f));
+  }
+  svgAdd(svg, 'path', { d: dd, fill: 'none', stroke: 'var(--mesh)', 'stroke-width': 2.2 });
+  svgAdd(svg, 'path', { d: df, fill: 'none', stroke: 'var(--cond)', 'stroke-width': 2.2 });
+
+  svgAdd(svg, 'text', { x: px(xf) + 5, y: py(0.90),
+    fill: 'var(--cond)', 'font-family': 'var(--mono)', 'font-size': 10.5 }).textContent =
+    `rectified flow — half weight at ${(xf * 100).toFixed(0)}%`;
+  svgAdd(svg, 'text', { x: px(xd) - 5, y: py(0.30), 'text-anchor': 'end',
+    fill: 'var(--mesh)', 'font-family': 'var(--mono)', 'font-size': 10.5 }).textContent =
+    `EDM diffusion — half weight at ${(xd * 100).toFixed(0)}%`;
+
+  let nf = 0; for (let i = 1; i <= N_FLOW; i++) if (authFlow(i / N_FLOW) >= 0.5) nf++;
+  let nd = 0; for (let i = 1; i <= 20; i++) if (authority(sigmaAt(i)) >= 0.5) nd++;
+  document.getElementById('cmpFlow').textContent = `${nf} / 50`;
+  document.getElementById('cmpDiff').textContent = `${nd} / 20`;
+}
+
+const SCEN = [
+  { label: 'regional, dense gauges',
+    pick: 'Rectified-flow U-Net', side: 'flow',
+    why: ['The observation operators are exact: bilinear to a gauge, an exact 8×8 block mean to a satellite footprint. Nothing about H has to be learned or trusted.',
+          'A residual target against the coarse analysis means the prior cannot drift far from a field that is already broadly right.',
+          'The localisation is a number you can put in a table and defend — and observations carry weight over most of the trajectory.'],
+    but: 'But the moment a second domain, a curved coastline at a different latitude, or a new instrument arrives, each of those is hand-built again.' },
+  { label: 'global, all observing systems',
+    pick: 'Graph diffusion', side: 'graph',
+    why: ['Near-uniform mesh cells remove the polar pathology that makes a global convolutional prior waste capacity and destabilise.',
+          'Radiances, sondes, aircraft, buoys and surface reports enter as node types in one graph rather than as five bespoke operators.',
+          'A multi-mesh couples hemispheres in a few hops, which no regional convolutional receptive field can do.'],
+    but: 'But you inherit a learned H you cannot audit, a localisation frozen into the architecture, and a machine budget an order of magnitude larger.' },
+  { label: 'off-grid / irregular observations',
+    pick: 'Graph diffusion', side: 'graph',
+    why: ['An observation that does not sit on a cell centre is a node, not an interpolation — its error structure survives intact.',
+          'The decoder reads the mesh out at arbitrary points, so comparing to an observation is the same machinery as producing output.',
+          'Adaptive refinement lets you put resolution where the data is instead of everywhere.'],
+    but: 'But if your observations happen to be a few dozen well-characterised point gauges, none of this buys anything a bilinear operator was not already doing correctly.' },
+  { label: 'one GPU, and it has to survive review',
+    pick: 'Rectified-flow U-Net', side: 'flow',
+    why: ['A 4-level U-Net at 128×128 trains on a single GH200; a GenCast-class model does not.',
+          'Every approximation has a name and a number — the spread length, the representativeness SD, the gate — so a reviewer can argue with each one separately.',
+          'Guided sampling costs 2–3× unguided, against a DPS backward pass that has to hold sixteen message-passing blocks for every member.'],
+    but: 'But "defensible" is not "general": the evidence you can produce is for one domain, one season, and one observing network.' }
+];
+function drawScen(k){
+  const s = SCEN[k], host = document.getElementById('scenOut');
+  const tone = s.side === 'flow' ? 'var(--cond)' : 'var(--mesh)';
+  host.innerHTML =
+    `<div class="stack-s">
+       <span class="eyebrow" style="color:${tone}">Recommended</span>
+       <h3 style="font-family:var(--display);font-size:26px;font-weight:400;line-height:1.1">${s.pick}</h3>
+       <div class="readout" style="border-left-color:${tone}">${s.but}</div>
+     </div>
+     <div class="stack-s">${s.why.map(w => `<p class="prose" style="font-size:14px;margin:0">— ${w}</p>`).join('')}</div>`;
+  document.getElementById('scenLabel').textContent = s.label;
+}
+
+/* ======================= 05 DA panel ======================= */
+function drawDa(){
+  const i = S.step, sig = sigmaAt(i), alpha = ALPHA[i];
+  let fld, mode = 'div';
+  if (S.daView === 'state'){
+    const an = analysisOf(0, alpha), cin = 1/Math.sqrt(sig*sig + 1);
+    fld = new Float32Array(NV);
+    for (let k = 0; k < NV; k++) fld[k] = (an[k] + sig * NOISE[0][k]) * cin;
+  } else if (S.daView === 'inc'){
+    fld = new Float32Array(NV);
+    const inc = INC[0];
+    for (let k = 0; k < NV; k++) fld[k] = inc ? alpha * inc[k] * 2.2 : 0;
+  } else if (S.daView === 'sd'){
+    const fs = []; for (let m = 0; m < NMEM; m++) fs.push(analysisOf(m, alpha));
+    fld = new Float32Array(NV);
+    for (let k = 0; k < NV; k++){
+      let s = 0, s2 = 0;
+      for (let m = 0; m < NMEM; m++){ s += fs[m][k]; s2 += fs[m][k]*fs[m][k]; }
+      const mu = s/NMEM;
+      fld[k] = Math.sqrt(Math.max(0, s2/NMEM - mu*mu)) * 1.6;
+    }
+    mode = 'mag';
+  } else {
+    fld = analysisOf(0, alpha);
+  }
+  const cv = document.getElementById('cvDa');
+  cv._geom = drawGlobe(cv, {
+    field: fld, mode, level: S.level, multi: S.multi,
+    edges: true, edgeAlpha: 0.16, nodeScale: 0.88, obs: S.obsOver
+  });
+  document.getElementById('stAuth2').textContent = authority(sig).toFixed(3);
+  document.getElementById('stAlpha2').textContent = (alpha * 100).toFixed(0) + '%';
+  markSched();
+}
+function scoreDa(){
+  const fs = []; for (let m = 0; m < NMEM; m++) fs.push(analysisOf(m, 1));
+  const stat = list => {
+    if (!list.length) return { rmse: NaN, ratio: NaN };
+    let se = 0, sp = 0;
+    for (const o of list){
+      const vals = fs.map(f => f[o.node]);
+      const mu = vals.reduce((a,b) => a+b, 0) / NMEM;
+      const va = vals.reduce((a,b) => a + (b-mu)**2, 0) / (NMEM - 1);
+      se += (mu - o.truth) ** 2; sp += va;
+    }
+    const rmse = Math.sqrt(se / list.length);
+    return { rmse, ratio: rmse > 0 ? Math.sqrt(sp / list.length) / rmse : 0 };
+  };
+  // compare like with like: the withheld fold is in-situ, so score the assimilated in-situ nodes
+  const a = stat(OBS.filter(o => obsAssim(o) && o.kind !== 'sat'));
+  const h = stat(OBS.filter(o => o.withheld && S.insitu));
+  const fmt = v => isFinite(v) ? v.toFixed(3) : '—';
+  document.getElementById('stFit2').textContent = fmt(a.rmse);
+  document.getElementById('stHold2').textContent = fmt(h.rmse);
+  document.getElementById('stRatio2').textContent = fmt(h.ratio);
+}
+
+/* ======================= orchestration ======================= */
+let raf = null;
+function redrawAll(){
+  if (raf) return;
+  raf = requestAnimationFrame(() => {
+    raf = null;
+    drawCompare(); drawMesh(); drawDiffusion(); drawDa();
+  });
+}
+function rebuildGraph(){
+  ADJ = buildAdj(S.level, S.multi);
+  NV = NV_LEVEL[S.level];
+  if (S.picked >= NV) S.picked = -1;
+  meshHL = S.picked >= 0 ? bfs(ADJ, S.picked, S.K) : null;
+  buildIncrements();
+  redrawAll(); scoreDa();
+}
+function setStep(i){
+  S.step = Math.max(0, Math.min(20, i));
+  drawDiffusion(); drawDa();
+}
+function attachDrag(el, onMove){
+  let down = false, lx = 0, ly = 0, moved = 0;
+  const start = e => { down = true; moved = 0; lx = e.clientX; ly = e.clientY; el.setPointerCapture?.(e.pointerId); };
+  const move = e => {
+    if (!down) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+    S.yaw += dx * 0.0075;
+    S.pitch = Math.max(-1.25, Math.min(1.25, S.pitch + dy * 0.0075));
+    onMove();
+  };
+  const end = () => { if (down){ down = false; redrawAll(); } };
+  el.addEventListener('pointerdown', start);
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('pointerleave', end);
+  return () => moved;
+}
+
+function init(){
+  buildFields(S.seed);
+  buildObs();
+  buildIncrements();
+  buildHero();
+  schedChart(); authChart(); cycleChart(); cmpChart(); drawScen(0);
+  redrawAll(); scoreDa();
+
+  document.querySelectorAll('[data-scen]').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-scen]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    drawScen(+b.dataset.scen);
+  }));
+
+  // section 01 globes drag
+  attachDrag(document.getElementById('cvLatLon'), () => drawCompare());
+  attachDrag(document.getElementById('cvIco'), () => drawCompare());
+
+  // mesh explorer
+  const meshMoved = attachDrag(document.getElementById('stageMesh'), () => drawMesh());
+  document.getElementById('cvMesh').addEventListener('click', e => { if (meshMoved() < 6) pickNode(e.currentTarget, e); });
+  document.querySelectorAll('[data-lvl]').forEach(b => b.addEventListener('click', () => {
+    S.level = +b.dataset.lvl;
+    document.querySelectorAll('[data-lvl]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    rebuildGraph();
+  }));
+  document.getElementById('cbMulti').addEventListener('change', e => { S.multi = e.target.checked; rebuildGraph(); });
+
+  const kA = document.getElementById('kSlider'), kB = document.getElementById('kSlider2');
+  const setK = v => {
+    S.K = +v; kA.value = S.K; kB.value = S.K;
+    document.getElementById('kVal').textContent = S.K;
+    document.getElementById('kVal2').textContent = S.K;
+    meshHL = S.picked >= 0 ? bfs(ADJ, S.picked, S.K) : null;
+    buildIncrements(); redrawAll(); scoreDa();
+  };
+  kA.addEventListener('input', e => setK(e.target.value));
+  kB.addEventListener('input', e => setK(e.target.value));
+
+  // diffusion + DA steps
+  document.getElementById('sigSlider').addEventListener('input', e => setStep(+e.target.value));
+  document.getElementById('daStep').addEventListener('input', e => setStep(+e.target.value));
+
+  // DA globe drag
+  attachDrag(document.getElementById('stageDa'), () => drawDa());
+
+  document.querySelectorAll('[data-dv]').forEach(b => b.addEventListener('click', () => {
+    S.daView = b.dataset.dv;
+    document.querySelectorAll('[data-dv]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    drawDa();
+  }));
+  document.getElementById('cbInsitu').addEventListener('change', e => { S.insitu = e.target.checked; buildIncrements(); redrawAll(); scoreDa(); });
+  document.getElementById('cbSat').addEventListener('change', e => { S.sat = e.target.checked; buildIncrements(); redrawAll(); scoreDa(); });
+  document.getElementById('cbObsOver').addEventListener('change', e => { S.obsOver = e.target.checked; drawDa(); });
+  document.getElementById('btnReseedDa').addEventListener('click', () => {
+    S.seed = (S.seed * 7 + 11) % 9973;
+    buildFields(S.seed); buildIncrements(); buildHero(); redrawAll(); scoreDa();
+  });
+
+  let running = false, rafRun = null;
+  const btn = document.getElementById('btnRunDa');
+  btn.addEventListener('click', () => {
+    if (running){ running = false; cancelAnimationFrame(rafRun); btn.innerHTML = '▶ Run σ<sub>max</sub> → 0'; return; }
+    running = true; btn.textContent = '■ Stop'; S.step = 0;
+    let last = performance.now(), acc = 0;
+    const tick = now => {
+      acc += now - last; last = now;
+      while (acc > 190 && S.step < 20){ S.step++; acc -= 190; }
+      setStep(S.step);
+      if (S.step >= 20){ running = false; btn.innerHTML = '▶ Run σ<sub>max</sub> → 0'; return; }
+      rafRun = requestAnimationFrame(tick);
+    };
+    rafRun = requestAnimationFrame(tick);
+  });
+
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const repaint = () => { buildHero(); redrawAll(); document.getElementById('heroCbar').style.background = divBarCss(); };
+  if (mq.addEventListener) mq.addEventListener('change', repaint);
+}
+init();
+</script>
+
+</body>
+</html>

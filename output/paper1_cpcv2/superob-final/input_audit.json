@@ -1,0 +1,135 @@
+{
+  "root": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024",
+  "required": [
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2021_may_sep.npz",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2021_may_sep.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/preparation_manifest.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/holdout/fold0.txt",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/superob_eval_0.25.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2022_may_sep.npz",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2022_may_sep.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/preparation_manifest.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/holdout/fold0.txt",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/superob_eval_0.25.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2023_may_sep.npz",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2023_may_sep.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/preparation_manifest.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/holdout/fold0.txt",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/superob_eval_0.25.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2024_may_jun.npz",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2024_may_jun.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/preparation_manifest.json",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/holdout/fold0.txt",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/superob_eval_0.25.json",
+      "present": false
+    }
+  ],
+  "production_stores": [
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/gridded/2021_may_sep.zarr",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/gridded/2022_may_sep.zarr",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/gridded/2023_may_sep.zarr",
+      "present": false
+    },
+    {
+      "path": "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/gridded/2024_may_jun.zarr",
+      "present": false
+    }
+  ],
+  "profile": "superob-final",
+  "method": "dense_s6_bwdb_r4",
+  "periods": [
+    "2021_may_sep",
+    "2022_may_sep",
+    "2023_may_sep",
+    "2024_may_jun"
+  ],
+  "contract_sha256": "c151d0bcb6e07ae6395113f746281289ea2ea731f84a99545d7c84e87fbaea23",
+  "status": "missing_inputs",
+  "missing": [
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2021_may_sep.npz",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2021_may_sep.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/preparation_manifest.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/holdout/fold0.txt",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2021_may_sep/superob_eval_0.25.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2022_may_sep.npz",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2022_may_sep.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/preparation_manifest.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/holdout/fold0.txt",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/superob_eval_0.25.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2023_may_sep.npz",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2023_may_sep.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/preparation_manifest.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/holdout/fold0.txt",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2023_may_sep/superob_eval_0.25.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2024_may_jun.npz",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/evaluation/2024_may_jun.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/preparation_manifest.json",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/holdout/fold0.txt",
+    "/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/BDhighresDA/data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2024_may_jun/superob_eval_0.25.json"
+  ]
+}

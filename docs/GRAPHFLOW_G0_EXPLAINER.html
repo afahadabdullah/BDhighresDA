@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}html,body{margin:0}body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>SURMA-GraphFlow G0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+:root{
+  --paper:#eaeaf0;
+  --surface:#f7f7fb;
+  --surface-2:#dedee8;
+  --sunk:#e1e1ea;
+  --ink:#13131c;
+  --ink-2:#3e3e4e;
+  --ink-3:#6e6e80;
+  --line:#c6c6d4;
+  --line-soft:#d8d8e3;
+  --mesh:#3b5ea8;
+  --cond:#16776f;
+  --insitu:#b0650e;
+  --sat:#84497f;
+  --alert:#b03c2c;
+  --focus:#1d6fb8;
+  --s1:#7b92cd;
+  --s2:#4a63ae;
+  --s4:#6b4f9e;
+  --s8:#8a4a86;
+  --display:"Instrument Serif",Georgia,"Times New Roman",serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --r:4px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0b0b11; --surface:#15151e; --surface-2:#1f1f2b; --sunk:#101018;
+    --ink:#eaeaf2; --ink-2:#b6b6c6; --ink-3:#80808f; --line:#2d2d3a; --line-soft:#23232e;
+    --mesh:#88a7e6; --cond:#4cc3b7; --insitu:#e0a04b; --sat:#c689c1; --alert:#e57460; --focus:#6fb6ec;
+    --s1:#9db1e0; --s2:#7b93d8; --s4:#a486d6; --s8:#c689c1;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0b0b11; --surface:#15151e; --surface-2:#1f1f2b; --sunk:#101018;
+  --ink:#eaeaf2; --ink-2:#b6b6c6; --ink-3:#80808f; --line:#2d2d3a; --line-soft:#23232e;
+  --mesh:#88a7e6; --cond:#4cc3b7; --insitu:#e0a04b; --sat:#c689c1; --alert:#e57460; --focus:#6fb6ec;
+  --s1:#9db1e0; --s2:#7b93d8; --s4:#a486d6; --s8:#c689c1;
+}
+
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:20px;padding-block:0}
+h1,h2,h3{text-wrap:balance;margin:0}
+p{margin:0}
+a{color:var(--focus)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+header.bar{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--paper) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line-soft)}
+.bar-in{max-width:1080px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{font-family:var(--display);font-size:20px;line-height:1}
+.bar nav{display:flex;gap:14px;flex-wrap:wrap;margin-left:auto}
+.bar nav a{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);text-decoration:none;padding:3px 0;border-bottom:1px solid transparent}
+.bar nav a:hover{color:var(--ink);border-bottom-color:var(--ink-3)}
+
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+h1{font-family:var(--display);font-size:clamp(42px,7vw,78px);line-height:.99;letter-spacing:-.01em;font-weight:400}
+h2{font-family:var(--display);font-size:clamp(28px,4.1vw,41px);line-height:1.07;font-weight:400}
+h3{font-family:var(--body);font-size:15px;font-weight:600}
+.lede{font-size:clamp(17px,2.1vw,20px);line-height:1.5;color:var(--ink-2);max-width:62ch}
+.prose{max-width:66ch;color:var(--ink-2)}
+strong{color:var(--ink);font-weight:600}
+code,.m{font-family:var(--mono);font-size:.88em}
+.m{color:var(--ink)}
+
+section{padding-block:64px;border-top:1px solid var(--line-soft)}
+section:first-of-type{border-top:0}
+.sec-head{display:flex;gap:18px;align-items:baseline;margin-bottom:8px}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding-top:6px;white-space:nowrap}
+.stack{display:flex;flex-direction:column;gap:26px}
+.stack-s{display:flex;flex-direction:column;gap:12px}
+.stack-s > .pill{align-self:flex-start}
+
+.hero{padding-block:52px 56px}
+.strip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.frame{display:flex;flex-direction:column;gap:6px}
+.frame canvas{width:100%;height:auto;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line-soft);display:block}
+.frame .cap{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:.02em}
+.note{font-size:13.5px;line-height:1.5;color:var(--ink-3);border-left:2px solid var(--line);padding-left:14px;max-width:74ch}
+.warn{border-left-color:var(--alert)}
+
+figure{margin:0}
+figure svg{width:100%;height:auto;display:block;color:var(--ink-2)}
+figcaption{font-size:13px;color:var(--ink-3);margin-top:10px;max-width:70ch;line-height:1.5}
+.svg-scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--line-soft);padding:14px}
+.edge{stroke:var(--ink-3);stroke-width:1.4;fill:none}
+.edge-lab{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px}
+.bx rect{fill:var(--surface-2);stroke:var(--line);stroke-width:1.2}
+.bx text{fill:var(--ink);font-family:var(--body);font-size:13px;font-weight:600}
+.bx text.sub{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px;font-weight:400}
+
+.readout{background:var(--surface);border:1px solid var(--line-soft);border-left:3px solid var(--focus);padding:12px 14px;font-size:14px;line-height:1.5;color:var(--ink-2);min-height:64px}
+.readout b{color:var(--ink);font-weight:600}
+
+.panel{background:var(--surface);border:1px solid var(--line-soft)}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.panel-body{padding:16px}
+.split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:20px}
+.split-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.split-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+
+.stage{position:relative;width:100%;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line);cursor:crosshair}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+.ctl{display:flex;flex-direction:column;gap:14px}
+.ctl-row{display:flex;flex-direction:column;gap:6px}
+.ctl-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.ctl-label .val{color:var(--ink);letter-spacing:.02em;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--focus);background:transparent}
+.chk{display:flex;align-items:center;gap:9px;font-size:13.5px;cursor:pointer;user-select:none}
+.chk input{accent-color:var(--focus);width:15px;height:15px}
+.chk .sw{width:11px;height:11px;flex:none;border-radius:2px}
+.chk .ct{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;width:fit-content;max-width:100%;flex-wrap:wrap}
+.seg button{font-family:var(--mono);font-size:11px;padding:6px 10px;background:var(--surface);color:var(--ink-3);border:0;border-right:1px solid var(--line);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+
+.stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+.stat{background:var(--surface);padding:11px 12px;display:flex;flex-direction:column;gap:2px}
+.stat .k{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);line-height:1.3}
+.stat .v{font-family:var(--mono);font-size:19px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--ink)}
+.stat .u{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.stat.hl .v{color:var(--focus)}
+
+.eq{font-family:var(--mono);font-size:13px;line-height:1.8;background:var(--sunk);border:1px solid var(--line-soft);padding:12px 14px;overflow-x:auto;white-space:nowrap;color:var(--ink)}
+.eq .c{color:var(--ink-3)}
+.eq-list{display:flex;flex-direction:column;gap:8px}
+
+table.data{width:100%;border-collapse:collapse;font-size:13.5px}
+table.data th,table.data td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.data th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:400}
+table.data td:first-child{white-space:nowrap;font-weight:600;color:var(--ink)}
+table.data td.num{font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tscroll{overflow-x:auto}
+.pill{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border:1px solid currentColor;border-radius:999px;display:inline-block;white-space:nowrap}
+.p-ok{color:var(--cond)} .p-warn{color:var(--insitu)} .p-no{color:var(--alert)} .p-info{color:var(--mesh)}
+
+.frozen-list{display:flex;flex-direction:column;gap:0;border:1px solid var(--line-soft);background:var(--line-soft)}
+.frozen-list div{background:var(--surface);padding:9px 12px;font-size:13.5px;color:var(--ink-2);display:flex;gap:10px;align-items:baseline}
+.frozen-list div + div{margin-top:1px}
+.frozen-list .mk{font-family:var(--mono);font-size:11px;flex:none;width:14px}
+.frozen-list .keep .mk{color:var(--cond)}
+.frozen-list .chg .mk{color:var(--alert)}
+
+.arms{display:flex;flex-direction:column;gap:16px}
+.arm-group{display:flex;flex-direction:column;gap:7px}
+.arm-group .gl{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-family:var(--mono);font-size:11px;padding:4px 8px;background:var(--surface-2);color:var(--ink-2);border:1px solid transparent;border-radius:var(--r);cursor:pointer;white-space:nowrap}
+.chip:hover{border-color:var(--ink-3)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.chip.base{border-color:var(--ink-3);font-weight:600}
+.chip.promoted{border-color:var(--focus);color:var(--focus)}
+.chip.promoted[aria-pressed="true"]{background:var(--focus);color:#fff;border-color:var(--focus)}
+
+footer{border-top:1px solid var(--line-soft);padding-block:36px 52px;color:var(--ink-3);font-size:13px}
+footer .refs{display:flex;flex-direction:column;gap:5px;margin-top:12px;font-family:var(--mono);font-size:11.5px;line-height:1.5}
+
+@media (max-width:860px){
+  .split,.split-2,.split-3{grid-template-columns:1fr}
+  .strip{grid-template-columns:repeat(5,1fr);gap:5px}
+  .stat-grid{grid-template-columns:1fr}
+  section{padding-block:46px}
+}
+</style>
+
+<header class="bar">
+  <div class="bar-in">
+    <span class="brand">SURMA&#8209;GraphFlow G0</span>
+    <nav>
+      <a href="#what">What it changes</a>
+      <a href="#mesh">The multimesh</a>
+      <a href="#block">Message block</a>
+      <a href="#cost">Cost</a>
+      <a href="#result">The finding</a>
+      <a href="#status">Status</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section class="hero">
+  <div class="stack">
+    <div class="stack-s">
+      <span class="eyebrow">graphflow_g0_multimesh · experimental backbone · not in the BRISHTI-05 production lineage</span>
+      <h1>One variable,<br>changed on purpose.</h1>
+      <p class="lede">G0 is not a graph weather model. It is eight rounds of message passing inserted <em>inside</em> the existing CPCv2 U-Net, at encoder level 2, on a 32×32 latent grid — zero-initialised so that at step zero it produces bit-identical output. Everything else in the system is frozen, which is the only reason the comparison means anything.</p>
+    </div>
+
+    <div class="stack-s">
+      <div class="strip" id="heroStrip"></div>
+      <p class="note">The real topology, built in your browser from the same construction rule as <span class="m">src/bdhires/models/multimesh.py</span>: at stride <span class="m">s</span> both endpoints lie on rows and columns that are multiples of <span class="m">s</span>, connected by <span class="m">(0,s)</span>, <span class="m">(s,0)</span>, <span class="m">(s,s)</span>, <span class="m">(s,−s)</span> and their reverses, with no periodic wrap and no self-edges. It reproduces the documented counts exactly: <strong>1,024 nodes and 10,176 directed edges.</strong></p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 01 WHAT IT CHANGES ===== -->
+<section id="what">
+  <div class="sec-head"><span class="sec-num">01</span><h2>What G0 changes — and everything it does not</h2></div>
+  <div class="stack">
+    <p class="prose">The scientific question is narrow and worth stating precisely: <strong>does explicit multiscale communication improve the learned precipitation prior and its observation-response structure, under the <em>same</em> generative data assimilation?</strong> Broader sensitivity on its own is not evidence of a better covariance — unphysical distant responses would count against the architecture, not for it.</p>
+
+    <figure>
+      <div class="svg-scroll">
+        <svg viewBox="0 0 1020 330" role="img" aria-label="The CPCv2 U-Net encoder pyramid with a multimesh graph processor inserted at encoder level 2, after all residual blocks and before both the downsample and the decoder skip.">
+          <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker></defs>
+          <g id="hookEdges" class="edge" style="color:var(--ink-3)"></g>
+          <g id="hookNodes"></g>
+          <g id="hookExtra"></g>
+        </svg>
+      </div>
+      <figcaption>A parameter-free identity hook exists at every encoder level in the baseline. G0 overrides it at level 2 only — after all residual blocks, attention and conditioning injections, and crucially <em>before</em> both the next downsample and the skip that level hands to the decoder, so the graph-modified representation reaches the decoder too.</figcaption>
+    </figure>
+
+    <div class="split-2">
+      <div class="stack-s">
+        <h3>Changed</h3>
+        <div class="frozen-list">
+          <div class="chg"><span class="mk">+</span><span>A <span class="m">MultimeshProcessor</span> at encoder level 2: 288 latent channels projected to a 256-dim hidden state, 8 residual message-passing blocks, projected back and <em>added</em> to the incoming latent field.</span></div>
+          <div class="chg"><span class="mk">+</span><span>Latent grid dimensions follow the input shape divided by four, not a hard-coded resolution — rectangular canvases still work.</span></div>
+          <div class="chg"><span class="mk">+</span><span>The output projection is zero-initialised, so identical U-Net weights give exactly the same initial output. The graph still executes; it is not a bypassed branch.</span></div>
+          <div class="chg"><span class="mk">+</span><span>3,906,080 parameters, a 6.8% increase.</span></div>
+        </div>
+      </div>
+      <div class="stack-s">
+        <h3>Frozen — and a test enforces it</h3>
+        <div class="frozen-list">
+          <div class="keep"><span class="mk">=</span><span>The rectified-flow equations, the score/velocity conversion, the likelihood, observation operators, Heun integration, perturbations and Langevin correctors. <span class="m">flow.py</span>, <span class="m">guidance.py</span>, <span class="m">observation.py</span>, <span class="m">sampler.py</span> untouched.</span></div>
+          <div class="keep"><span class="mk">=</span><span>The same packed Zarr and <span class="m">stats_cpc_v2.json</span>, CHIRPS target, square-root transforms, and the standardised residual against CPC.</span></div>
+          <div class="keep"><span class="mk">=</span><span>Seven dynamic channels, seven static, two seasonal. Training 1981–2018, validation 2019–2020, test 2021–2025. Batch 32, 150 epochs, EMA 0.9995, dropout 0.2, wet sampling, coarse consistency.</span></div>
+          <div class="keep"><span class="mk">=</span><span>BMD and IMERG never become learned inputs or graph nodes. They remain likelihood observations — which is what permits assimilation without retraining.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <p class="note">That last point separates G0 sharply from the graph-diffusion systems it superficially resembles. There, observations are nodes and the observation operator is learned. Here the graph sees <em>only static latent geometry</em> — <span class="m">[dx, dy, distance, level]</span> — and time and meteorological conditioning arrive through the CNN that surrounds it. No second time encoder, no duplicated feature stack, no wind-dependent topology.</p>
+  </div>
+</section>
+
+<!-- ===== 02 THE MULTIMESH ===== -->
+<section id="mesh">
+  <div class="sec-head"><span class="sec-num">02</span><h2>The multimesh, as actually constructed</h2></div>
+  <div class="stack">
+    <p class="prose">Four nested strides over the same 32×32 latent grid. Stride 1 connects every node to its eight neighbours; stride 8 connects a sparse skeleton with edges that jump eight latent cells at once. Because one latent cell here is four fine cells — <span class="m">0.2°</span>, about <strong>22 km</strong> — a single stride-8 hop carries information roughly <strong>178 km</strong>, and four of them cross the whole 710 km domain. That is the architectural argument in physical units: the CNN would need many layers to do the same.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>Multimesh explorer · click a node</span><span class="m" id="meshLabel">32 × 32 latent grid</span></div>
+      <div class="panel-body">
+        <div class="split">
+          <div class="stage" id="stageMesh"><canvas id="cvMesh" width="600" height="600"></canvas></div>
+          <div class="ctl">
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Stride levels in the graph</span><span class="val" id="edgeTotal">—</span></span>
+              <label class="chk"><input type="checkbox" data-s="1" checked><span class="sw" style="background:var(--s1)"></span>stride 1 — every node<span class="ct" id="ct1">—</span></label>
+              <label class="chk"><input type="checkbox" data-s="2" checked><span class="sw" style="background:var(--s2)"></span>stride 2<span class="ct" id="ct2">—</span></label>
+              <label class="chk"><input type="checkbox" data-s="4" checked><span class="sw" style="background:var(--s4)"></span>stride 4<span class="ct" id="ct4">—</span></label>
+              <label class="chk"><input type="checkbox" data-s="8" checked><span class="sw" style="background:var(--s8)"></span>stride 8 — one hop ≈ 178 km<span class="ct" id="ct8">—</span></label>
+              <label class="chk"><input type="checkbox" id="cbDiag" checked><span class="sw" style="background:var(--ink-3)"></span>diagonal edges</label>
+            </div>
+
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Draw</span></span>
+              <div class="seg" role="group" aria-label="What to draw">
+                <button data-draw="sel" aria-pressed="true">selected node only</button>
+                <button data-draw="all" aria-pressed="false">all edges</button>
+              </div>
+            </div>
+
+            <div class="ctl-row">
+              <label class="ctl-label" for="kBlocks"><span>Message-passing blocks</span><span class="val" id="kVal">3</span></label>
+              <input type="range" id="kBlocks" min="1" max="8" step="1" value="3">
+            </div>
+
+            <div class="stat-grid">
+              <div class="stat"><span class="k">Nodes</span><span class="v">1,024</span><span class="u">32 × 32 latent</span></div>
+              <div class="stat"><span class="k">Directed edges</span><span class="v" id="stEdges">—</span><span class="u">in-degree <span id="stDeg">—</span></span></div>
+              <div class="stat hl"><span class="k">Reached after K blocks</span><span class="v" id="stReach">—</span><span class="u">of the latent grid</span></div>
+            </div>
+
+            <div class="readout" id="meshOut"><b>Click a node.</b> Its incoming edges light up by stride level, and the shaded region is everything it can influence after K rounds of message passing — the receptive field the graph adds on top of the convolutional one.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr><th>Stride</th><th>Aligned nodes</th><th>Directed edges</th><th>One hop, latent cells</th><th>One hop, approx.</th></tr></thead>
+        <tbody id="strideTable"></tbody>
+      </table>
+    </div>
+    <p class="note">These are geometric scales, not calibrated physical support radii — the document is explicit about that. There is no learned coarsening and no geographical metric; the multimesh phase is anchored to the latent crop origin, which may matter for tiled or shifted inference.</p>
+  </div>
+</section>
+
+<!-- ===== 03 MESSAGE BLOCK ===== -->
+<section id="block">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Inside one message block</h2></div>
+  <div class="stack">
+    <p class="prose">Eight identical blocks, each a residual update. Two implementation decisions in here are the difference between a graph layer that fits in memory during guided assimilation and one that does not.</p>
+    <div class="split">
+      <div class="eq-list">
+        <div class="eq"><span class="c">normalise</span>&nbsp;&nbsp;h = LayerNorm(v)<br><span class="c">message</span>&nbsp;&nbsp;&nbsp;&nbsp;m<sub>e</sub> = MLP( W<sub>s</sub>h[src<sub>e</sub>] + W<sub>d</sub>h[dst<sub>e</sub>] + W<sub>g</sub>g<sub>e</sub> )<br><span class="c">aggregate</span>&nbsp;&nbsp;a<sub>j</sub> = ( Σ<sub>e : dst=j</sub> m<sub>e</sub> ) / deg(j)<br><span class="c">update</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;v' = v + MLP( [ h , a ] )</div>
+        <div class="eq"><span class="c">static edge features, never updated</span><br>g<sub>e</sub> = MLP( [ dx/s<sub>max</sub> , dy/s<sub>max</sub> , dist/s<sub>max</sub> , level/L ] )</div>
+      </div>
+      <div class="stack-s">
+        <h3>Why it is written that way</h3>
+        <p class="prose" style="font-size:14.5px"><strong>The first edge linear map is factored.</strong> A linear layer on the concatenation <span class="m">[v_src, v_dst, g]</span> would allocate a <span class="m">[B, E, 3D]</span> tensor — with E = 10,176 and D = 256 that is the memory wall. Projecting the three terms separately and <em>adding after the gather</em> is algebraically identical and never materialises it.</p>
+        <p class="prose" style="font-size:14.5px"><strong>Edge hidden states do not evolve.</strong> The geometry embedding is computed once and reused by all eight blocks. Nodes carry the state; edges carry only the static relation. That halves what the backward pass has to keep.</p>
+        <p class="prose" style="font-size:14.5px"><strong>Aggregation is a degree-normalised mean, accumulated in FP32</strong> even under BF16 autocast, and in FP64 when a double-precision gradient check is running. Incoming degree ranges from 3 at a corner to 32 in the interior, so an unnormalised sum would make the boundary a different operator from the middle.</p>
+      </div>
+    </div>
+    <p class="note">The topology itself is cached in a small per-processor LRU of at most four shape/topology/device combinations. It is deliberately absent from <span class="m">state_dict</span>, EMA and checkpoints, cleared when the model moves device, and a cache miss under <span class="m">inference_mode</span> builds normal tensors on purpose — so that a later guided call can save the same indices for the autograd backward pass.</p>
+  </div>
+</section>
+
+<!-- ===== 04 COST ===== -->
+<section id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>What it costs</h2></div>
+  <div class="stack">
+    <p class="prose">Measured at 128×128, batch 1, 16 conditioning channels, FP32 on a macOS ARM CPU with four threads — one warmup and three timed repeats, medians. Desktop timings are noisy and establish nothing about HPC throughput, but the <em>shape</em> of the result is the useful part.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>CPCv2 U-Net vs G0 256×8</span><span class="m">lower is better · ratio annotated</span></div>
+      <div class="panel-body stack">
+        <figure><svg id="costChart" viewBox="0 0 960 300" role="img" aria-label="Bar chart comparing CPCv2 U-Net and G0 timings: training step 1.36 times slower, unguided forward 1.12, three-step Heun 1.15, composite guided gradient 1.02."></svg></figure>
+        <div class="stat-grid">
+          <div class="stat"><span class="k">Parameters</span><span class="v">61.40 M</span><span class="u">from 57.49 M · +6.8%</span></div>
+          <div class="stat"><span class="k">Training primitive</span><span class="v">1.36×</span><span class="u">0.594 → 0.437 samples/s</span></div>
+          <div class="stat hl"><span class="k">Composite guided gradient</span><span class="v">1.02×</span><span class="u">the cost that DA actually pays</span></div>
+        </div>
+        <p class="prose" style="font-size:14.5px;max-width:none">The asymmetry is the point. Training gets 36% slower, but the <strong>guided gradient — the thing that runs thirty members across fifty Heun steps for every fold of every day</strong> — costs 2.1% more. The benchmark includes the real coarse-consistency loss and the existing physical gauge and block-average likelihood with component spreading, so it is not a toy measurement. Its synthetic error vector is a controlled cost benchmark, not an IMERG error calibration.</p>
+        <p class="note warn">CUDA performance and memory, batch 32, and 30-member DA have <strong>not</strong> been verified. The measured CPU guidance ratio is below the 1.5× engineering target, but a GPU OOM at batch 32 would be recorded explicitly rather than silently worked around by shrinking the batch.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 05 THE FINDING ===== -->
+<section id="result">
+  <div class="sec-head"><span class="sec-num">05</span><h2>A better prior did not give a better analysis</h2></div>
+  <div class="stack">
+    <p class="prose">The matched comparison ran four cases — CPCv2 background and DA, GraphFlow background and DA — over five identical spatial folds, 1–10 May 2022, 30 members, with the frozen <span class="m">v2_simul_s04_ig010</span> settings copied under new names so neither prior got a tuned advantage. The clean test is not which analysis scores better. It is <strong>the difference in within-model DA gain</strong>: does GraphFlow extract more useful information from the observations, or does it merely start from a better place?</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>The result, stated at the confidence the experiment supports</span></div>
+      <div class="panel-body stack">
+        <div class="split-3">
+          <div class="stack-s"><span class="pill p-ok">Better</span><h3>The background improved significantly</h3><p class="prose" style="font-size:14px;margin:0">The unguided GraphFlow prior beat the CPCv2 prior on the matched folds. Explicit multiscale communication did something for the learned field.</p></div>
+          <div class="stack-s"><span class="pill p-no">Worse</span><h3>The analysis was underdispersed</h3><p class="prose" style="font-size:14px;margin:0">A sharper prior with the same likelihood authority collapses further. Spread that the old contract was calibrated against is no longer there to give away.</p></div>
+          <div class="stack-s"><span class="pill p-warn">Less</span><h3>Smaller incremental DA benefit</h3><p class="prose" style="font-size:14px;margin:0">The unchanged CPCv2 guidance extracted <em>less</em> additional value from the same observations. The DA contract was tuned for the old prior, not this one.</p></div>
+        </div>
+        <p class="note">1–10 May 2022 is the existing development and selection window, which is exactly why it is excluded from the frozen production aggregates. This is a controlled diagnostic, not an independent confirmation, and no learned-checkpoint CRPS or RMSE gain is claimed anywhere in the repository.</p>
+      </div>
+    </div>
+
+    <p class="prose">Which is why the next step is not a better backbone but a better contract. A broad one-fold screen puts <strong>49 assimilation arms plus one common background</strong> around the frozen baseline, each changing a single named mechanism. Pick one to see what it does.</p>
+
+    <div class="panel">
+      <div class="panel-head"><span>The 49-arm screen · fold 0 · 2022-05-01…10 · 30 members</span><span class="m" id="armCount">49 arms</span></div>
+      <div class="panel-body stack">
+        <div class="arms" id="armsHost"></div>
+        <div class="readout" id="armOut"></div>
+        <p class="note warn">Seven or eight withheld stations on one fold. This screen can <strong>reject</strong> unstable or poorly calibrated arms and form a shortlist; it cannot establish improvement. At most three arms may be promoted, and those must be rerun unchanged on all five folds before any DA claim is made. Two arms already have dedicated runners and spatial diagnostics — they are highlighted above.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 06 STATUS ===== -->
+<section id="status">
+  <div class="sec-head"><span class="sec-num">06</span><h2>What is verified, and what is not</h2></div>
+  <div class="stack">
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr><th>Item</th><th>State</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Topology correctness</td><td>Deterministic, bidirectional, duplicate-free, non-wrapping; aligned coarse nodes, stride-1 reachability, degrees, multiple latent shapes, caching. <span class="m">tests/test_graphflow.py</span>: 36 passed, 1 CUDA test skipped.</td><td><span class="pill p-ok">Verified</span></td></tr>
+          <tr><td>Exact baseline equivalence</td><td>Zero-init graph outputs equal a baseline with <em>nonzero randomised weights throughout</em> — not a vacuous all-zero comparison. Disabled graph models load baseline state dicts strictly.</td><td><span class="pill p-ok">Verified</span></td></tr>
+          <tr><td>Guided autograd path</td><td>Real <span class="m">guidance_grad</span> through physical point and S04 block operators, residual decoding, per-component spreading, optional activation checkpointing. Graph projections receive finite gradients.</td><td><span class="pill p-ok">Verified</span></td></tr>
+          <tr><td>Full regression suite</td><td>448 passed, 2 skipped, 3 pre-existing failures in 95.48 s — the three reproduced on an untouched snapshot and recorded rather than patched to make the new backbone's report green.</td><td><span class="pill p-ok">Verified</span></td></tr>
+          <tr><td>Synthetic training</td><td>Reduced network, 2 members, 32×32 fields, 20 fixed mini-batches: loss 2.043306 → 1.254835, finite gradients, EMA updated, checkpoint round-tripped.</td><td><span class="pill p-warn">Engineering check only</span></td></tr>
+          <tr><td>Scientific skill</td><td>No learned-checkpoint rainfall CRPS or RMSE gain, and no improved physical observation-response structure, is claimed.</td><td><span class="pill p-no">Not claimed</span></td></tr>
+          <tr><td>CUDA cost and memory</td><td>Batch 32, 30-member DA and peak CUDA memory unverified. Run the real-data preflight before assuming the full training fits.</td><td><span class="pill p-no">Pending</span></td></tr>
+          <tr><td>Confirmatory DA</td><td>The matched real-observation folds and their pooled comparison remain pending on HPC. Architecture must not be chosen on the long test archive.</td><td><span class="pill p-no">Pending</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="split-2">
+      <div class="stack-s">
+        <h3>Known limitations of G0 specifically</h3>
+        <p class="prose" style="font-size:14.5px">It <strong>augments</strong> the U-Net and keeps its attention, so it is not compute-matched — some of any gain may be the extra 6.8% of parameters rather than the graph. There is no learned coarsening and no geographical metric; edges are latent-grid geometry. CUDA scatter reductions can differ from CPU at floating-point roundoff, so seed reproducibility is not a promise of cross-device bitwise identity.</p>
+      </div>
+      <div class="stack-s">
+        <h3>What comes after</h3>
+        <p class="prose" style="font-size:14.5px">G1 would replace the now-redundant attention at matched compute — which is the experiment that would actually separate "the graph helps" from "more parameters help". G2 would investigate atmospheric edge features instead of pure geometry. G3 would compare a different hierarchy. None of them are implemented, and none should start before the five-fold DA comparison closes.</p>
+      </div>
+    </div>
+
+    <p class="note">This page belongs to a set of three. The <a href="https://claude.ai/code/artifact/1925134c-3f1b-4efd-9a67-c63088d84ec9">SURMA-Flow explainer</a> covers the production rectified-flow U-Net and the score-guided DA that G0 leaves entirely untouched; the <a href="https://claude.ai/code/artifact/939db332-909a-4577-97b9-67eb0b09244c">graph-diffusion page</a> covers the very different design — global mesh, observations as nodes, a learned observation operator — that G0 is sometimes mistaken for.</p>
+  </div>
+</section>
+
+<footer>
+  <div>SURMA-GraphFlow G0 · internal identifier <span class="m">graphflow_g0_multimesh</span> · reference CPCv2 commit <span class="m">d072bd3</span> · implementation and engineering checks 2026-09-07. An experimental backbone, not part of the frozen BRISHTI-05 production lineage unless separately validated and promoted. Its DA method name is <span class="m">graphflow_g0_multimesh_frozen_da</span>, never the historical production name.</div>
+  <div class="refs">
+    <span>src/bdhires/models/multimesh.py — topology and the mesh cache</span>
+    <span>src/bdhires/models/graph_processor.py — MessageBlock and MultimeshProcessor</span>
+    <span>src/bdhires/models/graphflow_unet.py — the level-2 encoder hook</span>
+    <span>src/bdhires/eval/graphflow.py — single-observation response diagnostics</span>
+    <span>scripts/graphflow_experiment.py — the 49-arm DA screen catalogue</span>
+    <span>docs/EXPERIMENT_graphflow_multimesh.md — the experiment record this page follows</span>
+  </div>
+</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   Faithful port of build_multimesh (src/bdhires/models/multimesh.py)
+   ============================================================ */
+const GH = 32, GW = 32, ALL_STRIDES = [1, 2, 4, 8];
+const LATENT_KM = 22.2;   // one level-2 latent cell: 4 fine cells at 0.05 deg
+
+function buildMultimesh(H, W, strides, diagonal){
+  const dirs = diagonal ? [[0,1],[1,0],[1,1],[1,-1]] : [[0,1],[1,0]];
+  const src = [], dst = [], lvl = [];
+  const perStride = {};
+  const maxLevel = Math.max(1, ALL_STRIDES.length - 1);
+  strides.forEach(s => {
+    const level = ALL_STRIDES.indexOf(s);
+    let count = 0;
+    for (const [dy, dx] of dirs){
+      for (let y = 0; y < H; y += s) for (let x = 0; x < W; x += s){
+        const y2 = y + dy * s, x2 = x + dx * s;
+        if (y2 < 0 || y2 >= H || x2 < 0 || x2 >= W) continue;
+        const a = y * W + x, b = y2 * W + x2;
+        src.push(a); dst.push(b); lvl.push(level);
+        src.push(b); dst.push(a); lvl.push(level);
+        count += 2;
+      }
+    }
+    perStride[s] = count;
+  });
+  const n = H * W;
+  const degree = new Int32Array(n);
+  for (const d of dst) degree[d]++;
+  const inAdj = Array.from({ length: n }, () => []);
+  const outAdj = Array.from({ length: n }, () => []);
+  for (let e = 0; e < src.length; e++){
+    inAdj[dst[e]].push(e);
+    outAdj[src[e]].push(dst[e]);
+  }
+  return { src, dst, lvl, degree, inAdj, outAdj, perStride, n, maxLevel };
+}
+
+const S = { strides: [1,2,4,8], diagonal: true, draw: 'sel', K: 3, picked: 32 * 16 + 16 };
+let MESH = buildMultimesh(GH, GW, S.strides, S.diagonal);
+
+function reachFrom(mesh, node, K){
+  const seen = new Int16Array(mesh.n).fill(-1);
+  seen[node] = 0;
+  let frontier = [node];
+  for (let k = 1; k <= K; k++){
+    const next = [];
+    for (const v of frontier) for (const w of mesh.outAdj[v]) if (seen[w] < 0){ seen[w] = k; next.push(w); }
+    frontier = next;
+    if (!frontier.length) break;
+  }
+  return seen;
+}
+
+/* ============================================================
+   Drawing
+   ============================================================ */
+function cssVar(n, fb){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  return v || fb;
+}
+const strideColor = s => cssVar('--s' + s, '#4a63ae');
+
+function drawMesh(cv, opts){
+  const o = Object.assign({ mesh: MESH, draw: 'sel', picked: -1, K: 8, dots: true, pad: 0.055 }, opts || {});
+  const ctx = cv.getContext('2d'), W = cv.width;
+  ctx.clearRect(0, 0, W, W);
+  const pad = W * o.pad, span = W - 2 * pad;
+  const step = span / (GW - 1);
+  const px = i => pad + (i % GW) * step;
+  const py = i => pad + Math.floor(i / GW) * step;
+  const mesh = o.mesh;
+
+  const reach = o.picked >= 0 ? reachFrom(mesh, o.picked, o.K) : null;
+
+  // shaded reach region
+  if (reach && o.draw === 'sel'){
+    ctx.fillStyle = cssVar('--focus', '#1d6fb8');
+    for (let i = 0; i < mesh.n; i++){
+      if (reach[i] < 0) continue;
+      ctx.globalAlpha = 0.10;
+      ctx.fillRect(px(i) - step / 2, py(i) - step / 2, step, step);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // edges
+  ctx.lineWidth = Math.max(0.6, W / 900);
+  if (o.draw === 'all'){
+    for (let e = 0; e < mesh.src.length; e += 2){   // one line per undirected pair
+      const a = mesh.src[e], b = mesh.dst[e];
+      ctx.strokeStyle = strideColor(ALL_STRIDES[mesh.lvl[e]]);
+      ctx.globalAlpha = mesh.lvl[e] === 0 ? 0.30 : 0.55;
+      ctx.beginPath(); ctx.moveTo(px(a), py(a)); ctx.lineTo(px(b), py(b)); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  } else if (o.picked >= 0){
+    ctx.lineWidth = Math.max(1.1, W / 460);
+    for (const e of mesh.inAdj[o.picked]){
+      const a = mesh.src[e], b = mesh.dst[e];
+      ctx.strokeStyle = strideColor(ALL_STRIDES[mesh.lvl[e]]);
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath(); ctx.moveTo(px(a), py(a)); ctx.lineTo(px(b), py(b)); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // nodes
+  if (o.dots){
+    const r = Math.max(1, step * 0.18);
+    ctx.fillStyle = cssVar('--ink-3', '#6e6e80');
+    for (let i = 0; i < mesh.n; i++){
+      ctx.globalAlpha = reach && reach[i] < 0 ? 0.22 : 0.55;
+      ctx.beginPath(); ctx.arc(px(i), py(i), r, 0, 6.2832); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // direct neighbours + the selected node
+  if (o.picked >= 0 && o.draw === 'sel'){
+    const r = Math.max(2, step * 0.30);
+    for (const e of mesh.inAdj[o.picked]){
+      const a = mesh.src[e];
+      ctx.fillStyle = strideColor(ALL_STRIDES[mesh.lvl[e]]);
+      ctx.beginPath(); ctx.arc(px(a), py(a), r, 0, 6.2832); ctx.fill();
+    }
+    ctx.fillStyle = cssVar('--focus', '#1d6fb8');
+    ctx.beginPath(); ctx.arc(px(o.picked), py(o.picked), Math.max(3, step * 0.44), 0, 6.2832); ctx.fill();
+    ctx.strokeStyle = cssVar('--surface', '#fff'); ctx.lineWidth = 1.6; ctx.stroke();
+  }
+}
+
+/* ============================================================
+   Hero strip — the four strides, then the union
+   ============================================================ */
+function buildHero(){
+  const host = document.getElementById('heroStrip'); host.textContent = '';
+  const panels = [[1], [2], [4], [8], [1,2,4,8]];
+  panels.forEach(strides => {
+    const d = document.createElement('div'); d.className = 'frame';
+    const cv = document.createElement('canvas'); cv.width = 320; cv.height = 320;
+    const cap = document.createElement('span'); cap.className = 'cap';
+    const m = buildMultimesh(GH, GW, strides, true);
+    cap.textContent = strides.length > 1
+      ? `all four · ${m.src.length.toLocaleString()} edges`
+      : `stride ${strides[0]} · ${m.src.length.toLocaleString()}`;
+    d.append(cv, cap); host.appendChild(d);
+    drawMesh(cv, { mesh: m, draw: 'all', picked: -1, dots: true });
+  });
+}
+
+/* ============================================================
+   01 — the level-2 hook diagram
+   ============================================================ */
+function buildHook(){
+  const NS = 'http://www.w3.org/2000/svg';
+  const edges = document.getElementById('hookEdges');
+  const nodes = document.getElementById('hookNodes');
+  const extra = document.getElementById('hookExtra');
+  [edges, nodes, extra].forEach(g => g.textContent = '');
+  const add = (parent, tag, at, txt) => {
+    const e = document.createElementNS(NS, tag);
+    let st = '';
+    for (const k in at){
+      const v = at[k];
+      if ((k === 'fill' || k === 'stroke' || k === 'font-family') && String(v).indexOf('var(') >= 0) st += k + ':' + v + ';';
+      else e.setAttribute(k, v);
+    }
+    if (st) e.setAttribute('style', st);
+    if (txt != null) e.textContent = txt;
+    parent.appendChild(e); return e;
+  };
+
+  const LV = [
+    { r: 128, c: 96,  y: 44 },
+    { r: 64,  c: 192, y: 104 },
+    { r: 32,  c: 288, y: 164 },
+    { r: 16,  c: 384, y: 224 }
+  ];
+  const W = 96, H = 44, x0 = 40, dx = 112;
+
+  LV.forEach((l, i) => {
+    const x = x0 + i * dx;
+    const g = add(nodes, 'g', { class: 'bx' });
+    add(g, 'rect', { x, y: l.y, width: W, height: H, rx: 3 });
+    add(g, 'text', { x: x + W/2, y: l.y + 19, 'text-anchor': 'middle', 'font-size': 12.5 }, `level ${i}`);
+    add(g, 'text', { x: x + W/2, y: l.y + 35, 'text-anchor': 'middle', class: 'sub' }, `${l.r}² · ${l.c} ch`);
+    if (i < LV.length - 1){
+      const n = LV[i + 1], nx = x0 + (i + 1) * dx;
+      add(edges, 'path', { d: `M${x + W},${l.y + H/2} L${nx - 5},${n.y + H/2}`, 'marker-end': 'url(#ar)' });
+    }
+  });
+
+  // the graph processor at level 2
+  const gx = x0 + 2 * dx, gy = LV[2].y;
+  const gp = add(extra, 'g', {});
+  add(gp, 'rect', { x: gx - 6, y: gy - 64, width: W + 12, height: 52, rx: 3,
+    style: 'fill:var(--surface-2);stroke:var(--mesh);stroke-width:2' });
+  add(gp, 'text', { x: gx + W/2, y: gy - 44, 'text-anchor': 'middle', 'font-size': 12,
+    style: 'fill:var(--mesh);font-family:var(--body);font-weight:600' }, 'multimesh');
+  add(gp, 'text', { x: gx + W/2, y: gy - 28, 'text-anchor': 'middle', 'font-size': 10.5,
+    style: 'fill:var(--mesh);font-family:var(--mono)' }, '8 blocks · 256 d');
+  add(gp, 'path', { d: `M${gx + W/2},${gy} L${gx + W/2},${gy - 8}`, 'marker-end': 'url(#ar)',
+    style: 'stroke:var(--mesh);fill:none;color:var(--mesh)', 'stroke-width': 1.6 });
+  add(gp, 'path', { d: `M${gx + W + 10},${gy - 38} C${gx + W + 40},${gy - 38} ${gx + W + 40},${gy + 20} ${gx + W + 8},${gy + 20}`,
+    'marker-end': 'url(#ar)', style: 'stroke:var(--mesh);fill:none;color:var(--mesh)', 'stroke-width': 1.6 });
+  add(extra, 'text', { x: gx + W + 48, y: gy - 10, class: 'edge-lab', style: 'fill:var(--mesh)' }, 'residual add, zero-init');
+
+  // decoder skips
+  LV.forEach((l, i) => {
+    const x = x0 + i * dx, sy = 300;
+    add(extra, 'path', {
+      d: `M${x + W/2},${l.y + H} L${x + W/2},${sy - 14}`,
+      style: 'stroke:var(--ink-3);fill:none;stroke-dasharray:4 4', 'stroke-width': 1,
+      'marker-end': 'url(#ar)'
+    });
+  });
+  add(extra, 'rect', { x: 28, y: 300, width: 4 * dx - 16 + W, height: 24, rx: 3,
+    style: 'fill:var(--surface-2);stroke:var(--line);stroke-width:1' });
+  add(extra, 'text', { x: 40, y: 316, class: 'edge-lab' }, 'decoder skips — level 2 carries the graph-modified representation');
+
+  add(extra, 'text', { x: 560, y: 60, class: 'edge-lab', style: 'fill:var(--ink-2)' },
+    'the hook fires after all ResBlocks, attention and conditioning at level 2,');
+  add(extra, 'text', { x: 560, y: 76, class: 'edge-lab', style: 'fill:var(--ink-2)' },
+    'before the next downsample and before the skip is saved');
+  add(extra, 'text', { x: 560, y: 104, class: 'edge-lab' },
+    'levels 0, 1 and 3 keep the parameter-free identity hook');
+  add(extra, 'text', { x: 560, y: 128, class: 'edge-lab' },
+    'latent grid = input ÷ 4 → 32 × 32 nodes at 128 × 128');
+}
+
+/* ============================================================
+   02 — explorer wiring
+   ============================================================ */
+function refreshMesh(){
+  MESH = buildMultimesh(GH, GW, S.strides, S.diagonal);
+  if (S.picked >= MESH.n) S.picked = -1;
+  const cv = document.getElementById('cvMesh');
+  drawMesh(cv, { mesh: MESH, draw: S.draw, picked: S.picked, K: S.K });
+
+  document.getElementById('stEdges').textContent = MESH.src.length.toLocaleString();
+  let lo = Infinity, hi = 0;
+  for (let i = 0; i < MESH.n; i++){ lo = Math.min(lo, MESH.degree[i]); hi = Math.max(hi, MESH.degree[i]); }
+  document.getElementById('stDeg').textContent = MESH.src.length ? `${lo}–${hi}` : '0';
+  document.getElementById('edgeTotal').textContent = MESH.src.length.toLocaleString() + ' directed';
+  ALL_STRIDES.forEach(s => {
+    document.getElementById('ct' + s).textContent = (MESH.perStride[s] || 0).toLocaleString();
+  });
+
+  if (S.picked >= 0){
+    const reach = reachFrom(MESH, S.picked, S.K);
+    let c = 0; for (let i = 0; i < MESH.n; i++) if (reach[i] >= 0) c++;
+    document.getElementById('stReach').textContent = (100 * c / MESH.n).toFixed(0) + '%';
+    const row = Math.floor(S.picked / GW), col = S.picked % GW;
+    const deg = MESH.degree[S.picked];
+    const byLevel = {};
+    for (const e of MESH.inAdj[S.picked]){
+      const s = ALL_STRIDES[MESH.lvl[e]];
+      byLevel[s] = (byLevel[s] || 0) + 1;
+    }
+    const parts = ALL_STRIDES.filter(s => byLevel[s]).map(s => `${byLevel[s]} at stride ${s}`);
+    document.getElementById('meshOut').innerHTML =
+      `<b>Latent node (${row}, ${col})</b> has an incoming degree of <b>${deg}</b>` +
+      (parts.length ? ` — ${parts.join(', ')}` : '') +
+      `. After <b>${S.K}</b> message-passing block${S.K === 1 ? '' : 's'} it reaches <b>${c} of ${MESH.n}</b> latent nodes ` +
+      `(${(100 * c / MESH.n).toFixed(0)}%). ` +
+      (S.strides.length
+        ? `One hop at the coarsest active stride (${Math.max(...S.strides)}) carries about ` +
+          `<b>${Math.round(Math.max(...S.strides) * LATENT_KM)} km</b>, against a domain roughly 710 km across.`
+        : 'With no stride levels enabled there are no edges at all.');
+  } else {
+    document.getElementById('stReach').textContent = '—';
+    document.getElementById('meshOut').innerHTML = '<b>Click a node</b> to trace its incoming edges and its reach after K blocks.';
+  }
+
+  const tb = document.getElementById('strideTable');
+  tb.innerHTML = ALL_STRIDES.map(s => {
+    const aligned = Math.ceil(GH / s) * Math.ceil(GW / s);
+    const on = S.strides.includes(s);
+    const full = buildMultimesh(GH, GW, [s], S.diagonal);
+    return `<tr style="${on ? '' : 'opacity:.45'}">
+      <td><span style="color:${strideColor(s)}">■</span> stride ${s}${on ? '' : ' <span class="pill" style="color:var(--ink-3)">off</span>'}</td>
+      <td class="num">${aligned.toLocaleString()}</td>
+      <td class="num">${full.src.length.toLocaleString()}</td>
+      <td class="num">${s}</td>
+      <td class="num">${Math.round(s * LATENT_KM)} km</td></tr>`;
+  }).join('');
+}
+
+function pickNode(ev){
+  const cv = document.getElementById('cvMesh');
+  const r = cv.getBoundingClientRect();
+  const x = (ev.clientX - r.left) / r.width * cv.width;
+  const y = (ev.clientY - r.top) / r.height * cv.height;
+  const pad = cv.width * 0.055, step = (cv.width - 2 * pad) / (GW - 1);
+  const col = Math.round((x - pad) / step), row = Math.round((y - pad) / step);
+  if (col < 0 || col >= GW || row < 0 || row >= GH) return;
+  S.picked = row * GW + col;
+  refreshMesh();
+}
+
+/* ============================================================
+   04 — cost chart
+   ============================================================ */
+const COST = [
+  { label: 'Forward + RF/coarse loss + backward', unet: 1682.9, g0: 2290.0 },
+  { label: 'One unguided forward',                unet: 558.8,  g0: 624.6 },
+  { label: 'Three-step Heun RF trajectory',       unet: 2674.1, g0: 3067.3 },
+  { label: 'Composite guided gradient',           unet: 2267.1, g0: 2315.0 }
+];
+function costChart(){
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('costChart'); svg.textContent = '';
+  const add = (tag, at, txt) => {
+    const e = document.createElementNS(NS, tag);
+    let st = '';
+    for (const k in at){
+      const v = at[k];
+      if ((k === 'fill' || k === 'stroke' || k === 'font-family') && String(v).indexOf('var(') >= 0) st += k + ':' + v + ';';
+      else e.setAttribute(k, v);
+    }
+    if (st) e.setAttribute('style', st);
+    if (txt != null) e.textContent = txt;
+    svg.appendChild(e); return e;
+  };
+  const W = 960, H = 300, L = 300, R = 92, T = 30, B = 34;
+  const max = 3200;
+  const px = v => L + (v / max) * (W - L - R);
+  const rowH = (H - T - B) / COST.length;
+
+  [0, 800, 1600, 2400, 3200].forEach(v => {
+    add('line', { x1: px(v), y1: T - 6, x2: px(v), y2: H - B, stroke: 'var(--line-soft)', 'stroke-width': 1 });
+    add('text', { x: px(v), y: H - B + 16, 'text-anchor': 'middle', fill: 'var(--ink-3)',
+      'font-family': 'var(--mono)', 'font-size': 10 }, String(v));
+  });
+  add('text', { x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', fill: 'var(--ink-3)',
+    'font-family': 'var(--mono)', 'font-size': 10.5 }, 'milliseconds, median of three timed repeats');
+
+  COST.forEach((d, i) => {
+    const y = T + i * rowH, bh = Math.min(15, rowH * 0.3);
+    add('text', { x: L - 14, y: y + rowH / 2 - 3, 'text-anchor': 'end', fill: 'var(--ink)',
+      'font-family': 'var(--body)', 'font-size': 12.5 }, d.label);
+    add('rect', { x: L, y: y + rowH / 2 - bh - 3, width: px(d.unet) - L, height: bh,
+      fill: 'var(--ink-3)', rx: 1 });
+    add('rect', { x: L, y: y + rowH / 2 + 1, width: px(d.g0) - L, height: bh,
+      fill: 'var(--mesh)', rx: 1 });
+    const ratio = d.g0 / d.unet;
+    add('text', { x: px(d.g0) + 8, y: y + rowH / 2 + 5, fill: ratio < 1.05 ? 'var(--cond)' : 'var(--ink-2)',
+      'font-family': 'var(--mono)', 'font-size': 11.5, 'font-weight': 600 }, `${ratio.toFixed(2)}×`);
+  });
+
+  add('rect', { x: L, y: 8, width: 11, height: 11, fill: 'var(--ink-3)', rx: 1 });
+  add('text', { x: L + 17, y: 18, fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10.5 }, 'CPCv2 U-Net');
+  add('rect', { x: L + 118, y: 8, width: 11, height: 11, fill: 'var(--mesh)', rx: 1 });
+  add('text', { x: L + 135, y: 18, fill: 'var(--mesh)', 'font-family': 'var(--mono)', 'font-size': 10.5 }, 'GraphFlow G0 256×8');
+}
+
+/* ============================================================
+   05 — the 49-arm screen catalogue
+   ============================================================ */
+const ARM_GROUPS = [
+  { title: 'Frozen baseline', arms: [
+    { n: 'gfs_joint_base', d: 'The current frozen GraphFlow DA contract, inherited unchanged from v2_simul_s04_ig010. Every other arm is scored against this one by paired CRPS.', base: true }
+  ]},
+  { title: 'Joint likelihood authority — both streams together', arms: [
+    { n: 'gfs_joint_w025', d: 'Gauge and IMERG likelihood weight 0.25. Quartering the authority of both streams is the blunt test of whether the analysis is over-fitting a now-sharper prior.' },
+    { n: 'gfs_joint_w050', d: 'Both weights 0.50.' },
+    { n: 'gfs_joint_w075', d: 'Both weights 0.75.' },
+    { n: 'gfs_joint_w125', d: 'Both weights 1.25 — pushing the other way, in case the sharper prior can absorb more observational pull.' }
+  ]},
+  { title: 'Per-stream authority — which source is doing the damage', arms: [
+    { n: 'gfs_joint_gw050', d: 'Gauge weight 0.50, IMERG fixed.' },
+    { n: 'gfs_joint_gw075', d: 'Gauge weight 0.75, IMERG fixed.' },
+    { n: 'gfs_joint_gw125', d: 'Gauge weight 1.25, IMERG fixed.' },
+    { n: 'gfs_joint_iw025', d: 'IMERG weight 0.25, gauges fixed.' },
+    { n: 'gfs_joint_iw050', d: 'IMERG weight 0.50, gauges fixed.' },
+    { n: 'gfs_joint_iw075', d: 'IMERG weight 0.75, gauges fixed.' },
+    { n: 'gfs_joint_iw125', d: 'IMERG weight 1.25, gauges fixed. Promoted: it has a dedicated runner and full 2D spatial diagnostics — background, satellite, analysis, increments, spread and station verification.', promoted: true }
+  ]},
+  { title: 'Prior inflation — the direct answer to under-dispersion', arms: [
+    { n: 'gfs_joint_t105', d: 'Prior temperature 1.05, likelihood fixed. Tempering widens the prior so observations pull members back where they exist and spread survives where they do not.' },
+    { n: 'gfs_joint_t110', d: 'Prior temperature 1.10.' },
+    { n: 'gfs_joint_t115', d: 'Prior temperature 1.15.' },
+    { n: 'gfs_joint_t125', d: 'Prior temperature 1.25 — the value the guided sampler config already defaults to for the U-Net prior.' },
+    { n: 'gfs_joint_t150', d: 'Prior temperature 1.50. Inflating in transformed space biases the mm-space mean high by Jensen, so this is the arm most likely to trade bias for spread.' }
+  ]},
+  { title: 'Temperature × authority interaction', arms: [
+    { n: 'gfs_joint_t110_w050', d: 'Temperature 1.10 with both weights 0.50.' },
+    { n: 'gfs_joint_t110_w075', d: 'Temperature 1.10 with both weights 0.75.' },
+    { n: 'gfs_joint_t125_w050', d: 'Temperature 1.25 with both weights 0.50.' },
+    { n: 'gfs_joint_t125_w075', d: 'Temperature 1.25 with both weights 0.75.' },
+    { n: 'gfs_joint_t150_w050', d: 'Temperature 1.50 with both weights 0.50.' },
+    { n: 'gfs_joint_t150_w075', d: 'Temperature 1.50 with both weights 0.75. The 3×2 grid exists because widening the prior and softening the likelihood are not independent knobs.' }
+  ]},
+  { title: 'Guidance gamma — softer early-time guidance', arms: [
+    { n: 'gfs_joint_gamma020', d: 'Both guidance gammas 0.02. Larger gamma inflates V(t) early, so observations bite later and less of the trajectory is spent collapsing spread.' },
+    { n: 'gfs_joint_gamma050', d: 'Both gammas 0.05.' },
+    { n: 'gfs_joint_gamma100', d: 'Both gammas 0.10.' },
+    { n: 'gfs_joint_gg020', d: 'Gauge gamma 0.02, IMERG gamma fixed.' },
+    { n: 'gfs_joint_ig020', d: 'IMERG gamma 0.02, gauge gamma fixed.' }
+  ]},
+  { title: 'Gauge footprint scale and robust cost', arms: [
+    { n: 'gfs_joint_s0',  d: 'Gauge gradient spread 0 cells — the unsmoothed diffusion-posterior gradient, which touches only the four bilinear cells and produces bullseyes.' },
+    { n: 'gfs_joint_s3',  d: 'Spread 3 cells, about 17 km.' },
+    { n: 'gfs_joint_s9',  d: 'Spread 9 cells, about 50 km.' },
+    { n: 'gfs_joint_s12', d: 'Spread 12 cells, about 66 km — the upper end of the range motivated by the ~146 km BMD variogram.' },
+    { n: 'gfs_joint_huber3', d: 'Robust joint likelihood, Huber delta 3, so a single wild innovation cannot dominate the gradient.' },
+    { n: 'gfs_joint_huber5', d: 'Robust joint likelihood, Huber delta 5.' }
+  ]},
+  { title: 'A genuinely different process — IMERG flow, then gauge EnSRF', arms: [
+    { n: 'gfs_twostep_l50',  d: 'IMERG-guided generative flow, then a localized serial EnSRF for the gauges at a 50 km Gaspari-Cohn radius.' },
+    { n: 'gfs_twostep_l100', d: 'Same, 100 km. Promoted: it has a dedicated runner and comparative spatial diagnostics against the baseline. This arm sidesteps the guidance approximation for gauges entirely — the areal observation stays in the flow, the point observation goes through a classical ensemble filter with an explicit localisation radius.', promoted: true },
+    { n: 'gfs_twostep_l150', d: 'Same, 150 km.' },
+    { n: 'gfs_twostep_l200', d: 'Same, 200 km.' },
+    { n: 'gfs_twostep_l300', d: 'Same, 300 km.' },
+    { n: 'gfs_twostep_t110_l100', d: 'Temperature 1.10, then IMERG flow and gauge EnSRF at 100 km.' },
+    { n: 'gfs_twostep_t110_l150', d: 'Temperature 1.10, EnSRF at 150 km.' },
+    { n: 'gfs_twostep_t110_l200', d: 'Temperature 1.10, EnSRF at 200 km.' }
+  ]},
+  { title: 'Stream and covariance controls', arms: [
+    { n: 'gfs_gauges_guided', d: 'Gauges only, guided flow, whole-gradient spreading at 6 cells. Isolates what the gauge stream contributes.' },
+    { n: 'gfs_imerg_guided',  d: 'IMERG only, guided flow. Isolates what the satellite stream contributes.' },
+    { n: 'gfs_gauge_ensrf_l50',  d: 'Gauges only through a classical EnSRF at 50 km — no generative guidance at all.' },
+    { n: 'gfs_gauge_ensrf_l100', d: 'Gauges-only EnSRF at 100 km.' },
+    { n: 'gfs_gauge_ensrf_l150', d: 'Gauges-only EnSRF at 150 km.' },
+    { n: 'gfs_gauge_ensrf_l200', d: 'Gauges-only EnSRF at 200 km.' },
+    { n: 'gfs_gauge_ensrf_l300', d: 'Gauges-only EnSRF at 300 km. Together with the guided controls these say whether the implied covariance of the flow is doing anything a localized ensemble filter would not.' }
+  ]}
+];
+function buildArms(){
+  const host = document.getElementById('armsHost');
+  host.textContent = '';
+  let total = 0;
+  ARM_GROUPS.forEach(g => {
+    total += g.arms.length;
+    const wrap = document.createElement('div'); wrap.className = 'arm-group';
+    const lab = document.createElement('span'); lab.className = 'gl'; lab.textContent = g.title;
+    const chips = document.createElement('div'); chips.className = 'chips';
+    g.arms.forEach(a => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (a.base ? ' base' : '') + (a.promoted ? ' promoted' : '');
+      b.textContent = a.n;
+      b.setAttribute('aria-pressed', String(a.base === true));
+      b.addEventListener('click', () => {
+        host.querySelectorAll('.chip').forEach(o => o.setAttribute('aria-pressed', 'false'));
+        b.setAttribute('aria-pressed', 'true');
+        showArm(a, g.title);
+      });
+      chips.appendChild(b);
+    });
+    wrap.append(lab, chips); host.appendChild(wrap);
+  });
+  document.getElementById('armCount').textContent = `${total} arms`;
+  showArm(ARM_GROUPS[0].arms[0], ARM_GROUPS[0].title);
+}
+function showArm(a, group){
+  const tag = a.base ? '<span class="pill p-info">baseline</span> '
+    : a.promoted ? '<span class="pill" style="color:var(--focus)">promoted</span> ' : '';
+  document.getElementById('armOut').innerHTML =
+    `${tag}<b>${a.n}</b> &nbsp;·&nbsp; <span style="color:var(--ink-3)">${group}</span><br>${a.d}`;
+}
+
+/* ============================================================
+   init
+   ============================================================ */
+function init(){
+  buildHero();
+  buildHook();
+  costChart();
+  buildArms();
+  refreshMesh();
+
+  document.querySelectorAll('[data-s]').forEach(cb => cb.addEventListener('change', () => {
+    const s = +cb.dataset.s;
+    S.strides = ALL_STRIDES.filter(v => {
+      const box = document.querySelector(`[data-s="${v}"]`);
+      return box && box.checked;
+    });
+    refreshMesh();
+  }));
+  document.getElementById('cbDiag').addEventListener('change', e => { S.diagonal = e.target.checked; refreshMesh(); });
+  document.querySelectorAll('[data-draw]').forEach(b => b.addEventListener('click', () => {
+    S.draw = b.dataset.draw;
+    document.querySelectorAll('[data-draw]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    refreshMesh();
+  }));
+  document.getElementById('kBlocks').addEventListener('input', e => {
+    S.K = +e.target.value;
+    document.getElementById('kVal').textContent = S.K;
+    refreshMesh();
+  });
+  document.getElementById('cvMesh').addEventListener('click', pickNode);
+
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', () => { buildHero(); refreshMesh(); costChart(); });
+}
+init();
+</script>
+
+</body>
+</html>

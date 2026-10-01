@@ -1,0 +1,1480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}html,body{margin:0}body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Inside SURMA-Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+:root{
+  --paper:#eaefed;
+  --surface:#f7faf9;
+  --surface-2:#dfe7e4;
+  --sunk:#e2e9e7;
+  --ink:#111a1b;
+  --ink-2:#3b4a4a;
+  --ink-3:#6d7d7c;
+  --line:#c5d1ce;
+  --line-soft:#d7e0dd;
+  --prior:#3b5ea8;
+  --cond:#16776f;
+  --gauge:#b0650e;
+  --sat:#84497f;
+  --alert:#b03c2c;
+  --focus:#1d6fb8;
+  --display:"Instrument Serif",Georgia,"Times New Roman",serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --r:4px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0c1213;
+    --surface:#141d1e;
+    --surface-2:#1d2829;
+    --sunk:#0f1718;
+    --ink:#e7efed;
+    --ink-2:#b2c1bf;
+    --ink-3:#7c8d8b;
+    --line:#2b3a3a;
+    --line-soft:#223030;
+    --prior:#88a7e6;
+    --cond:#4cc3b7;
+    --gauge:#e0a04b;
+    --sat:#c689c1;
+    --alert:#e57460;
+    --focus:#6fb6ec;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0c1213; --surface:#141d1e; --surface-2:#1d2829; --sunk:#0f1718;
+  --ink:#e7efed; --ink-2:#b2c1bf; --ink-3:#7c8d8b; --line:#2b3a3a; --line-soft:#223030;
+  --prior:#88a7e6; --cond:#4cc3b7; --gauge:#e0a04b; --sat:#c689c1; --alert:#e57460; --focus:#6fb6ec;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:20px;padding-block:0}
+h1,h2,h3{text-wrap:balance;margin:0}
+p{margin:0}
+a{color:var(--focus)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ---------- header ---------- */
+header.bar{
+  position:sticky;top:0;z-index:40;
+  background:color-mix(in srgb,var(--paper) 88%,transparent);
+  backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line-soft);
+}
+.bar-in{max-width:1080px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{font-family:var(--display);font-size:20px;line-height:1;letter-spacing:.01em}
+.bar nav{display:flex;gap:14px;flex-wrap:wrap;margin-left:auto}
+.bar nav a{
+  font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);text-decoration:none;padding:3px 0;border-bottom:1px solid transparent;
+}
+.bar nav a:hover{color:var(--ink);border-bottom-color:var(--ink-3)}
+
+/* ---------- type ---------- */
+.eyebrow{
+  font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);
+}
+h1{font-family:var(--display);font-size:clamp(44px,7.5vw,82px);line-height:.98;letter-spacing:-.01em;font-weight:400}
+h2{font-family:var(--display);font-size:clamp(29px,4.2vw,42px);line-height:1.06;font-weight:400}
+h3{font-family:var(--body);font-size:15px;font-weight:600;letter-spacing:.005em}
+.lede{font-size:clamp(17px,2.1vw,20px);line-height:1.5;color:var(--ink-2);max-width:60ch}
+.prose{max-width:66ch;color:var(--ink-2)}
+.prose + .prose{margin-top:14px}
+strong{color:var(--ink);font-weight:600}
+code,.m{font-family:var(--mono);font-size:.88em}
+.m{color:var(--ink)}
+
+section{padding-block:64px;border-top:1px solid var(--line-soft)}
+section:first-of-type{border-top:0}
+.sec-head{display:flex;gap:18px;align-items:baseline;margin-bottom:8px}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding-top:6px;white-space:nowrap}
+.stack{display:flex;flex-direction:column;gap:26px}
+.stack-s{display:flex;flex-direction:column;gap:12px}
+
+/* ---------- hero ---------- */
+.hero{padding-block:52px 56px}
+.hero-grid{display:flex;flex-direction:column;gap:30px}
+.strip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.frame{display:flex;flex-direction:column;gap:6px}
+.frame canvas{width:100%;height:auto;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line-soft);display:block}
+.frame .cap{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:.04em;display:flex;justify-content:space-between;gap:4px}
+.note{
+  font-size:13.5px;line-height:1.5;color:var(--ink-3);
+  border-left:2px solid var(--line);padding-left:14px;max-width:72ch;
+}
+
+/* ---------- role tiles ---------- */
+.roles{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+.role{background:var(--surface);padding:20px 18px;display:flex;flex-direction:column;gap:8px}
+.role .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase}
+.role h3{font-size:16px}
+.role p{font-size:14px;line-height:1.5;color:var(--ink-2)}
+.role .who{font-family:var(--mono);font-size:12px;color:var(--ink);margin-top:auto;padding-top:8px;border-top:1px dashed var(--line)}
+.r-learn .tag{color:var(--prior)} .r-cond .tag{color:var(--cond)} .r-assim .tag{color:var(--gauge)}
+
+/* ---------- figures ---------- */
+figure{margin:0}
+figure svg{width:100%;height:auto;display:block;color:var(--ink-2)}
+figcaption{font-size:13px;color:var(--ink-3);margin-top:10px;max-width:70ch;line-height:1.5}
+.svg-scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--line-soft);padding:14px}
+
+/* map nodes */
+.node{cursor:pointer}
+.node rect{fill:var(--surface-2);stroke:var(--line);stroke-width:1.2;transition:fill .15s,stroke .15s}
+.node text{fill:var(--ink);font-family:var(--body);font-size:13px;font-weight:600}
+.node text.sub{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px;font-weight:400}
+.node:hover rect,.node[data-on="1"] rect{fill:var(--surface);stroke:currentColor;stroke-width:2}
+.node[data-kind="cond"]{color:var(--cond)} .node[data-kind="prior"]{color:var(--prior)}
+.node[data-kind="gauge"]{color:var(--gauge)} .node[data-kind="sat"]{color:var(--sat)}
+.node[data-kind="out"]{color:var(--ink)}
+.edge{stroke:var(--ink-3);stroke-width:1.4;fill:none}
+.edge-lab{fill:var(--ink-3);font-family:var(--mono);font-size:10.5px}
+.lvl{cursor:pointer}
+.lvl rect{fill:var(--surface-2);stroke:var(--line);stroke-width:1.2}
+.lvl:hover rect,.lvl[data-on="1"] rect{fill:var(--surface);stroke:var(--prior);stroke-width:2}
+.lvl text{fill:var(--ink);font-family:var(--mono);font-size:11px}
+
+.readout{
+  background:var(--surface);border:1px solid var(--line-soft);border-left:3px solid var(--focus);
+  padding:12px 14px;font-size:14px;line-height:1.5;color:var(--ink-2);min-height:76px;
+}
+.readout b{color:var(--ink);font-weight:600}
+
+/* ---------- instrument panels ---------- */
+.panel{background:var(--surface);border:1px solid var(--line-soft)}
+.panel-head{
+  display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:10px 14px;border-bottom:1px solid var(--line-soft);
+  font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
+}
+.panel-body{padding:16px}
+.split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:20px}
+.split-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.split-4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+
+.stage{position:relative;width:100%;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line)}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.mini{display:flex;flex-direction:column;gap:6px}
+.mini canvas{width:100%;height:auto;aspect-ratio:1;background:var(--sunk);border:1px solid var(--line-soft);display:block}
+.mini .cap{font-family:var(--mono);font-size:10px;color:var(--ink-3);letter-spacing:.03em}
+
+.ctl{display:flex;flex-direction:column;gap:14px}
+.ctl-row{display:flex;flex-direction:column;gap:6px}
+.ctl-label{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  display:flex;justify-content:space-between;gap:8px;align-items:baseline;
+}
+.ctl-label .val{color:var(--ink);letter-spacing:.02em;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--focus);background:transparent}
+.btn{
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
+  background:var(--surface-2);color:var(--ink);border:1px solid var(--line);
+  padding:8px 12px;cursor:pointer;border-radius:var(--r);
+}
+.btn:hover{border-color:var(--ink-3)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;width:fit-content;max-width:100%;flex-wrap:wrap}
+.seg button{
+  font-family:var(--mono);font-size:11px;padding:6px 10px;background:var(--surface);
+  color:var(--ink-3);border:0;border-right:1px solid var(--line);cursor:pointer;
+}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.chk{display:flex;align-items:center;gap:9px;font-size:13.5px;cursor:pointer;user-select:none}
+.chk input{accent-color:var(--focus);width:15px;height:15px}
+.chk .sw{width:10px;height:10px;border-radius:50%;flex:none}
+
+.stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft)}
+.stat{background:var(--surface);padding:11px 12px;display:flex;flex-direction:column;gap:2px}
+.stat .k{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);line-height:1.3}
+.stat .v{font-family:var(--mono);font-size:19px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--ink)}
+.stat .u{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.stat.hl .v{color:var(--focus)}
+
+.eq{
+  font-family:var(--mono);font-size:13.5px;line-height:1.75;
+  background:var(--sunk);border:1px solid var(--line-soft);padding:12px 14px;
+  overflow-x:auto;white-space:nowrap;color:var(--ink);
+}
+.eq .c{color:var(--ink-3)}
+.eq-list{display:flex;flex-direction:column;gap:8px}
+
+.cbar{display:flex;flex-direction:column;gap:4px}
+.cbar .bar{height:9px;border:1px solid var(--line-soft)}
+.cbar .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+
+table.data{width:100%;border-collapse:collapse;font-size:13.5px}
+table.data th,table.data td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.data th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:400}
+table.data td:first-child{white-space:nowrap;font-weight:600;color:var(--ink)}
+.tscroll{overflow-x:auto}
+.pill{
+  font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:2px 7px;border:1px solid currentColor;border-radius:999px;display:inline-block;white-space:nowrap;
+}
+.p-ok{color:var(--cond)} .p-warn{color:var(--gauge)} .p-no{color:var(--alert)}
+
+footer{border-top:1px solid var(--line-soft);padding-block:36px 52px;color:var(--ink-3);font-size:13px}
+footer .refs{display:flex;flex-direction:column;gap:5px;margin-top:12px;font-family:var(--mono);font-size:11.5px;line-height:1.5}
+
+@media (max-width:860px){
+  .split{grid-template-columns:1fr}
+  .roles{grid-template-columns:1fr}
+  .split-3{grid-template-columns:1fr}
+  .split-4{grid-template-columns:repeat(2,1fr)}
+  .strip{grid-template-columns:repeat(5,1fr);gap:5px}
+  .frame .cap{flex-direction:column;gap:0}
+  .stat-grid{grid-template-columns:1fr}
+  section{padding-block:46px}
+}
+</style>
+
+<header class="bar">
+  <div class="bar-in">
+    <span class="brand">Inside SURMA&#8209;Flow</span>
+    <nav>
+      <a href="#map">Map</a>
+      <a href="#path">The path</a>
+      <a href="#net">The network</a>
+      <a href="#assim">Assimilation</a>
+      <a href="#ens">Ensemble</a>
+      <a href="#evidence">Evidence</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="hero-grid">
+    <div class="stack-s">
+      <span class="eyebrow">SURMA&#8209;Flow v1.0 &nbsp;·&nbsp; BRISHTI&#8209;05 &nbsp;·&nbsp; 0.05° Bangladesh daily rainfall</span>
+      <h1>A rainfall field,<br>assembled from noise.</h1>
+      <p class="lede">A rectified-flow U-Net learns what 5&nbsp;km daily rainfall over Bangladesh <em>looks like</em>. At analysis time its weights are frozen — rain gauges and satellite footprints steer the sampling trajectory instead, by pushing on the velocity field the network returns.</p>
+    </div>
+
+    <div class="stack-s">
+      <div class="strip" id="heroStrip"></div>
+      <div class="cbar">
+        <div class="bar" id="heroCbar"></div>
+        <div class="ticks"><span>dry</span><span>1</span><span>5</span><span>10</span><span>25</span><span>50</span><span>100 mm/day</span></div>
+      </div>
+      <p class="note">One member of the ensemble, drawn at five points along the interpolation path <span class="m">x<sub>t</sub> = t·x<sub>1</sub> + (1−t)·x<sub>0</sub></span>. At <span class="m">t = 0</span> it is Gaussian noise; at <span class="m">t = 1</span> it is a rainfall field. Every field on this page is generated in your browser on the real 128×128, 0.05° analysis grid, from a schematic monsoon pattern — <strong>it illustrates the mechanism, it is not model output.</strong> The settings quoted throughout are the production ones.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ROLES ============ -->
+<section id="roles">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>Three kinds of data, three different jobs</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">Most confusion about this system comes from collapsing these together. A dataset here is <em>either</em> what the network learned from, <em>or</em> what conditions it, <em>or</em> what the assimilation pushes against — never two at once. That separation is what makes the withheld-gauge scores mean anything.</p>
+    <div class="roles">
+      <div class="role r-learn">
+        <span class="tag">Learn</span>
+        <h3>The prior is trained on CHIRPS</h3>
+        <p>Flow matching on 1981–2018 daily CHIRPS at 0.05°, 128×128 crops. This teaches the network the <em>distribution</em> of plausible fine-scale rainfall: intensity statistics, spatial texture, where structure sits relative to terrain.</p>
+        <span class="who">CHIRPS 0.05° · 1981–2018</span>
+      </div>
+      <div class="role r-cond">
+        <span class="tag">Condition</span>
+        <h3>CPC and ERA5 set the situation</h3>
+        <p>Seven dynamic channels plus terrain and season enter the network on every forward pass. The target is the standardised <em>residual</em> from CPC, so a zero residual reproduces the coarse analysis and the flow supplies the 5&nbsp;km correction.</p>
+        <span class="who">CPC 0.5° · ERA5 tcwv, cape, u10, v10, msl</span>
+      </div>
+      <div class="role r-assim">
+        <span class="tag">Assimilate</span>
+        <h3>BMD and IMERG enter only at sampling</h3>
+        <p>Never a training target, never a conditioning channel. They appear once, inside a Gaussian likelihood, whose gradient bends the sampling trajectory. The network's weights never see them.</p>
+        <span class="who">~35 BMD gauges · IMERG S04 (0.4°)</span>
+      </div>
+    </div>
+    <p class="note"><strong>Why it matters:</strong> CPC conditioned the prior and is the residual baseline, so agreement with CPC is not verification. CHIRPS is the training target, so agreement with CHIRPS is training-family agreement. IMERG was assimilated, so agreement with IMERG is observation adherence. Only a BMD station that was <em>held out</em> of the likelihood is independent evidence.</p>
+  </div>
+</section>
+
+<!-- ============ MAP ============ -->
+<section id="map">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>The whole system, one diagram</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">Everything below is an expansion of one of these boxes. <strong>Click a box</strong> to see what it does and where on this page it happens.</p>
+
+    <figure>
+      <div class="svg-scroll">
+        <svg id="mapSvg" viewBox="0 0 1040 500" role="img" aria-label="Data flow: CPC and ERA5 condition a U-Net; a noise draw is integrated to a rainfall field over 50 steps; BMD gauges and IMERG enter through an observation likelihood whose gradient is added to the velocity.">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- edges (drawn first) -->
+          <g class="edge" marker-end="url(#ah)" style="color:var(--ink-3)">
+            <path d="M528,76 L528,100"/>
+            <path d="M214,180 L262,180"/>
+            <path d="M372,182 L418,176"/>
+            <path d="M632,176 L698,182"/>
+            <path d="M528,244 L528,300"/>
+            <path d="M458,412 L458,399"/>
+            <path d="M617,412 L617,399"/>
+            <path d="M670,310 L742,228"/>
+            <path d="M854,184 L878,184"/>
+            <path d="M760,222 L760,470 L320,470 L320,228"/>
+          </g>
+          <g class="edge-lab">
+            <text x="540" y="93">conditions all 4 resolutions</text>
+            <text x="222" y="170">t = 0</text>
+            <text x="378" y="207">x<tspan baseline-shift="sub" font-size="8">t</tspan> , t</text>
+            <text x="636" y="164">u<tspan baseline-shift="sub" font-size="8">θ</tspan></text>
+            <text x="536" y="276">x̂₁ = x<tspan baseline-shift="sub" font-size="8">t</tspan> + (1−t)·u</text>
+            <text x="702" y="442">y — a separate perturbed</text>
+            <text x="702" y="456">draw for every member</text>
+            <text x="678" y="266">Δu = ((1−t)/t)·∇ log p(y | x<tspan baseline-shift="sub" font-size="8">t</tspan>)</text>
+            <text x="530" y="488" text-anchor="middle">50 Heun steps + 2 Langevin correctors &nbsp;·&nbsp; t : 0 → 1</text>
+          </g>
+
+          <!-- nodes -->
+          <g class="node" data-kind="cond" data-node="cond" tabindex="0">
+            <rect x="400" y="16" width="256" height="60" rx="3"/>
+            <text x="528" y="40" text-anchor="middle">CPC 0.5° + ERA5 + terrain</text>
+            <text class="sub" x="528" y="59" text-anchor="middle">7 dynamic ch · static · sin/cos day-of-year</text>
+          </g>
+          <g class="node" data-kind="prior" data-node="noise" tabindex="0">
+            <rect x="24" y="150" width="190" height="60" rx="3"/>
+            <text x="119" y="174" text-anchor="middle">x₀ ~ N(0, I)</text>
+            <text class="sub" x="119" y="193" text-anchor="middle">one draw per member</text>
+          </g>
+          <g class="node" data-kind="prior" data-node="xt" tabindex="0">
+            <rect x="266" y="146" width="106" height="82" rx="3"/>
+            <text x="319" y="180" text-anchor="middle">x<tspan baseline-shift="sub" font-size="9">t</tspan></text>
+            <text class="sub" x="319" y="204" text-anchor="middle">state at time t</text>
+          </g>
+          <g class="node" data-kind="prior" data-node="unet" tabindex="0">
+            <rect x="418" y="100" width="214" height="144" rx="3"/>
+            <text x="525" y="136" text-anchor="middle">U-Net</text>
+            <text class="sub" x="525" y="158" text-anchor="middle" font-size="12">u<tspan baseline-shift="sub" font-size="9">θ</tspan>( x<tspan baseline-shift="sub" font-size="9">t</tspan> , t , c )</text>
+            <text class="sub" x="525" y="180" text-anchor="middle">96 base ch · mult 1, 2, 3, 4</text>
+            <text class="sub" x="525" y="196" text-anchor="middle">attention at 32² and 16²</text>
+            <text class="sub" x="525" y="220" text-anchor="middle">FROZEN at analysis time</text>
+          </g>
+          <g class="node" data-kind="gauge" data-node="lik" tabindex="0">
+            <rect x="418" y="300" width="252" height="96" rx="3"/>
+            <text x="544" y="330" text-anchor="middle">Observation likelihood</text>
+            <text class="sub" x="544" y="352" text-anchor="middle">N( y | H(x̂₁),  V(t) )</text>
+            <text class="sub" x="544" y="372" text-anchor="middle">V(t) = R + Γ(1−t)²/t²</text>
+          </g>
+          <g class="node" data-kind="gauge" data-node="bmd" tabindex="0">
+            <rect x="392" y="414" width="132" height="46" rx="3"/>
+            <text x="458" y="434" text-anchor="middle" font-size="12">BMD gauges</text>
+            <text class="sub" x="458" y="451" text-anchor="middle">bilinear H</text>
+          </g>
+          <g class="node" data-kind="sat" data-node="imerg" tabindex="0">
+            <rect x="544" y="414" width="146" height="46" rx="3"/>
+            <text x="617" y="434" text-anchor="middle" font-size="12">IMERG S04</text>
+            <text class="sub" x="617" y="451" text-anchor="middle">exact 8×8 block mean</text>
+          </g>
+          <g class="node" data-kind="prior" data-node="comb" tabindex="0">
+            <rect x="704" y="146" width="150" height="82" rx="3"/>
+            <text x="779" y="178" text-anchor="middle">u + Δu</text>
+            <text class="sub" x="779" y="200" text-anchor="middle">guided velocity</text>
+          </g>
+          <g class="node" data-kind="out" data-node="out" tabindex="0">
+            <rect x="878" y="130" width="140" height="114" rx="3"/>
+            <text x="948" y="166" text-anchor="middle">x₁</text>
+            <text class="sub" x="948" y="190" text-anchor="middle">30 members</text>
+            <text class="sub" x="948" y="208" text-anchor="middle">mm/day, 0.05°</text>
+            <text class="sub" x="948" y="226" text-anchor="middle">BRISHTI-05</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The frozen network is evaluated twice per Heun step. Observations never change its weights; they change the velocity it is asked to follow.</figcaption>
+    </figure>
+
+    <div class="readout" id="mapOut" role="status" aria-live="polite">
+      <b>Pick a box.</b> Each one is expanded in a section below, with the real production setting attached to it.
+    </div>
+  </div>
+</section>
+
+<!-- ============ PATH ============ -->
+<section id="path">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>What the network is actually asked to learn</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">Rectified flow builds a straight line in field space between a noise draw <span class="m">x₀</span> and a real rainfall field <span class="m">x₁</span>, and asks the network for one thing: <strong>the constant velocity along that line</strong>, <span class="m">u = x₁ − x₀</span>, given only the point <span class="m">x<sub>t</sub></span> you are standing on, the time <span class="m">t</span>, and the conditioning. Drag <span class="m">t</span> and watch the four panels — <em>the same t drives the sampler in section 05.</em></p>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span>Interpolant explorer · sqrt-transformed space</span>
+        <span class="m" id="pathTLabel">t = 0.55</span>
+      </div>
+      <div class="panel-body stack">
+        <div class="split-4">
+          <div class="mini"><canvas id="cvX0" width="128" height="128"></canvas><span class="cap">x₀ — noise draw</span></div>
+          <div class="mini"><canvas id="cvXt" width="128" height="128"></canvas><span class="cap" id="capXt">x_t — where you are</span></div>
+          <div class="mini"><canvas id="cvX1" width="128" height="128"></canvas><span class="cap">x₁ — the target field</span></div>
+          <div class="mini"><canvas id="cvU" width="128" height="128"></canvas><span class="cap">u = x₁ − x₀ — the label</span></div>
+        </div>
+
+        <div class="ctl-row">
+          <label class="ctl-label" for="tSlider"><span>Interpolation time t</span><span class="val" id="tVal">0.55</span></label>
+          <input type="range" id="tSlider" min="0" max="1" step="0.01" value="0.55">
+        </div>
+
+        <div class="split">
+          <div class="eq-list">
+            <div class="eq"><span class="c">forward path</span>&nbsp;&nbsp;x_t = t·x₁ + (1−t)·x₀<br><span class="c">training loss</span>&nbsp;&nbsp;‖ u_θ(x_t, t, c) − (x₁ − x₀) ‖²</div>
+            <div class="eq"><span class="c">denoised estimate</span>&nbsp;&nbsp;x̂₁ = x_t + (1−t)·u<br><span class="c">noise estimate</span>&nbsp;&nbsp;&nbsp;&nbsp;x̂₀ = x_t − t·u<br><span class="c">score</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;∇ log p_t(x_t) = −x̂₀ / (1−t)</div>
+            <div class="eq"><span class="c">and therefore</span>&nbsp;&nbsp;Δu = ((1−t)/t) · Δ(score)</div>
+          </div>
+          <div class="stack-s">
+            <h3>Why this algebra is the whole trick</h3>
+            <p class="prose" style="font-size:14.5px">A velocity network and a score network are the same object in different clothes. Because the interpolant is linear and <span class="m">x₀</span> is Gaussian, you can convert between them exactly — no extra training, no second model.</p>
+            <p class="prose" style="font-size:14.5px">So the score-based data assimilation of Rozet &amp; Louppe and Manshausen et al. transfers directly: work out how much the observations want to change the <em>score</em>, multiply by <span class="m">(1−t)/t</span>, and add it to the <em>velocity</em>. One trained network does downscaling and assimilation both.</p>
+            <div class="eq" id="pathNums"></div>
+          </div>
+        </div>
+        <p class="note">Training draws <span class="m">t</span> from a logit-normal density (<span class="m">t = sigmoid(z)</span>, <span class="m">z ~ N(0,1)</span>), which concentrates samples near <span class="m">t = 0.5</span> where the velocity field is hardest to learn. Conditioning dropout is 0 in the production configuration, so this checkpoint has no unconditional branch to spare and classifier-free guidance stays at <span class="m">w = 1</span>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ NETWORK ============ -->
+<section id="net">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>The network that returns the velocity</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">An ADM-style U-Net, deliberately self-contained so it runs on an air-gapped HPC node. Roughly 20–40&nbsp;M parameters. Two things make it a <em>conditional flow</em> network rather than a plain segmentation U-Net: the time <span class="m">t</span> enters every residual block as a FiLM scale-and-shift, and the conditioning stack is re-encoded and injected at <em>every</em> resolution instead of only being concatenated at the input.</p>
+
+    <figure>
+      <div class="svg-scroll">
+        <svg id="netSvg" viewBox="0 0 1020 430" role="img" aria-label="U-Net with four encoder levels at 128, 64, 32 and 16 cells, a bottleneck, and four decoder levels, with skip connections and a multiscale conditioning encoder feeding each level.">
+          <defs>
+            <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+            </marker>
+          </defs>
+          <g id="netEdges" class="edge" style="color:var(--ink-3)"></g>
+          <g id="netSkips"></g>
+          <g id="netNodes"></g>
+          <g id="netCond"></g>
+        </svg>
+      </div>
+      <figcaption>Resolutions are for the 128×128 production crop. Hover or tap a level for its width and whether it carries self-attention.</figcaption>
+    </figure>
+
+    <div class="readout" id="netOut" role="status" aria-live="polite">
+      <b>Hover a level.</b> Channel widths come from <span class="m">base_channels: 96</span> with <span class="m">channel_mult: [1, 2, 3, 4]</span>, two residual blocks per level, four attention heads, dropout 0.2.
+    </div>
+
+    <div class="split-3">
+      <div class="panel"><div class="panel-head"><span>Time conditioning</span></div><div class="panel-body">
+        <p class="prose" style="font-size:14px;margin:0">A Fourier embedding of the continuous <span class="m">t ∈ [0,1]</span> goes through a two-layer MLP, then each residual block projects it to a per-channel <span class="m">(scale, shift)</span> applied after the second GroupNorm. The network therefore knows how far along the path it is — which it must, because the right velocity depends on it.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>Multiscale conditioning</span></div><div class="panel-body">
+        <p class="prose" style="font-size:14px;margin:0">A separate encoder strides the conditioning stack down to 128², 64², 32² and 16², and each feature map is added into the matching encoder level through a zero-initialised 1×1 projection. Zero-init means the network starts life identical to the unconditioned one and learns to lean on CPC rather than being forced to.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>Land mask</span></div><div class="panel-body">
+        <p class="prose" style="font-size:14px;margin:0">CHIRPS is land-only. Masked cells are held at <span class="m">transform(0 mm) = −μ/σ</span>, not at a literal 0.0 — pinning them to zero would pin the Bay of Bengal to a moderate rain rate, and the global attention blocks would happily carry it inland.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ASSIMILATION ============ -->
+<section id="assim">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Assimilation, one sampling step at a time</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">Now run the path forward with observations attached. At every step the sampler asks the frozen network for a velocity, reconstructs the clean field <span class="m">x̂₁</span> from it, pushes <span class="m">x̂₁</span> through the observation operator, and differentiates the Gaussian log-likelihood <em>back through the network</em> to get a gradient on <span class="m">x<sub>t</sub></span>. That gradient, scaled by <span class="m">(1−t)/t</span>, is added to the velocity. Turn the observation streams on and off and watch the increment appear.</p>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span>Guided sampler · 128×128 at 0.05° · 12 members shown (production: 30)</span>
+        <span class="m" id="assimT">t = 0.55 · step 28 / 50</span>
+      </div>
+      <div class="panel-body">
+        <div class="split">
+          <div class="stack-s">
+            <div class="stage">
+              <canvas id="cvMain" width="512" height="512"></canvas>
+              <canvas id="cvOver" width="512" height="512"></canvas>
+            </div>
+            <div class="cbar">
+              <div class="bar" id="mainCbar"></div>
+              <div class="ticks"><span>dry</span><span>1</span><span>5</span><span>10</span><span>25</span><span>50</span><span>100 mm/day</span></div>
+            </div>
+            <div class="seg" role="group" aria-label="Field to display">
+              <button id="vwXt" data-view="xt" aria-pressed="false">x_t (state)</button>
+              <button id="vwX1" data-view="x1" aria-pressed="true">x̂₁ (denoised)</button>
+              <button id="vwInc" data-view="inc" aria-pressed="false">increment</button>
+            </div>
+          </div>
+
+          <div class="ctl">
+            <div class="ctl-row">
+              <label class="ctl-label" for="stepSlider"><span>Sampling step</span><span class="val" id="stepVal">28 / 50</span></label>
+              <input type="range" id="stepSlider" min="0" max="50" step="1" value="28">
+              <div class="btn-row">
+                <button class="btn primary" id="btnRun">▶ Run 0 → 1</button>
+                <button class="btn" id="btnReseed">New noise draw</button>
+              </div>
+            </div>
+
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Observation streams</span></span>
+              <label class="chk"><input type="checkbox" id="cbGauge" checked><span class="sw" style="background:var(--gauge)"></span>BMD gauges — 29 assimilated, 7 withheld</label>
+              <label class="chk"><input type="checkbox" id="cbImerg" checked><span class="sw" style="background:var(--sat)"></span>IMERG S04 — 0.4° footprints, exact 8×8 mean</label>
+              <label class="chk"><input type="checkbox" id="cbOverlay" checked><span class="sw" style="background:var(--ink-3)"></span>Show observation overlay</label>
+            </div>
+
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Gauge guidance spread</span><span class="val" id="spreadKm">6 cells ≈ 33 km</span></span>
+              <div class="seg" role="group" aria-label="Gauge guidance spread">
+                <button data-spread="0" aria-pressed="false">0 (bilinear)</button>
+                <button data-spread="6" aria-pressed="true">6 cells</button>
+                <button data-spread="12" aria-pressed="false">12 cells</button>
+              </div>
+            </div>
+
+            <div class="ctl-row">
+              <span class="ctl-label"><span>Gauge likelihood weight</span></span>
+              <div class="seg" role="group" aria-label="Gauge weight">
+                <button data-gw="0.5" aria-pressed="false">w = 0.5</button>
+                <button data-gw="1" aria-pressed="true">w = 1 (production)</button>
+                <button data-gw="4" aria-pressed="false">w = 4</button>
+              </div>
+            </div>
+
+            <div class="stat-grid">
+              <div class="stat hl"><span class="k">Observation authority R/V(t)</span><span class="v" id="stAuth">—</span><span class="u">0 = ignored, 1 = full weight</span></div>
+              <div class="stat"><span class="k">Increment applied so far</span><span class="v" id="stAlpha">—</span><span class="u">fraction of the total nudge</span></div>
+              <div class="stat"><span class="k">Mean |innovation| at gauges</span><span class="v" id="stInnov">—</span><span class="u">sqrt-mm, y − H(x̂₁)</span></div>
+            </div>
+
+            <figure>
+              <svg id="vtChart" viewBox="0 0 420 168" role="img" aria-label="Observation authority R over V of t rising from near zero at t equals 0.1 to one at t equals 1, with the guidance gate at 0.10 marked."></svg>
+              <figcaption style="margin-top:6px">Early in the trajectory the state is mostly noise, so <span class="m">V(t) = R + Γ(1−t)²/t²</span> is enormous and the observations are almost ignored. Below <span class="m">t = 0.10</span> guidance is switched off entirely — the variance is singular there.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="split-3">
+      <div class="panel"><div class="panel-head"><span>Gauges — a soft likelihood</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">A gauge is a point; a grid cell is 5&nbsp;km of area. The production likelihood adds a 0.10 measurement SD to a 0.25 representativeness SD, giving about <strong>0.269</strong> in transformed units — representativeness dominates. Each member gets its own perturbed draw from that error model, because assimilating one identical observation into every member is the classic route to an under-dispersive analysis.</p>
+        <p class="prose" style="font-size:14px;margin:0">A point gauge only touches four cells through the bilinear operator, so the gradient is a spike. Convolving it with a 6-cell Gaussian spreads one station over roughly 33&nbsp;km — defensible against the ~146&nbsp;km measured variogram range of the BMD network, but it is <em>an assertion about the background covariance</em>, and the code labels it as an approximation. Set the spread to 0 above to see the bullseyes it was introduced to fix.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>IMERG — an areal likelihood</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">A satellite footprint really is, to first order, an area average, so the forward operator is exact: one 0.4° value is the mean of an 8×8 block of 0.05° cells. No smoothing is needed or wanted — the observation is already areal.</p>
+        <p class="prose" style="font-size:14px;margin:0">Retrieval errors are correlated across neighbouring footprints, so perturbations are drawn with a 0.75-footprint correlation length; white noise would average away and add no spread. No fitted bias map is applied in the frozen production arm, which is why IMERG agreement is reported as <em>adherence to an assimilated product</em>, not as skill.</p>
+      </div></div>
+      <div class="panel"><div class="panel-head"><span>Integrator</span></div><div class="panel-body stack-s">
+        <p class="prose" style="font-size:14px;margin:0">50 Heun steps on a uniform schedule, two bounded Langevin corrector steps per level. The correctors are there because guidance is mode-seeking: re-injecting entropy at fixed <span class="m">t</span> stops integration error and the likelihood pull from compounding along a trajectory.</p>
+        <p class="prose" style="font-size:14px;margin:0">Prior temperature is the real spread knob, and production sets it to <span class="m">T = 1.0</span>. Inflating the <em>unguided</em> background is a trap: tempering happens in transformed space, and Jensen's inequality then biases the mm-space ensemble mean high — once by +6.4&nbsp;mm on a 1.7&nbsp;mm day.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ENSEMBLE ============ -->
+<section id="ens">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>Thirty members, and what they are for</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">Each member starts from an independent noise draw and carries its own perturbed observations, so the spread measures two things: how ambiguous the downscaling is given CPC and ERA5, and how much the observation error model admits. Watch what happens near the gauges — the members agree where they were pulled and disagree where nothing constrained them. That behaviour is the argument for inflating the prior rather than the analysis.</p>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span>Ensemble at the current step — driven by the controls in section 05</span>
+        <span class="m" id="ensT">t = 0.55</span>
+      </div>
+      <div class="panel-body stack">
+        <div class="split-4" id="memGrid"></div>
+        <p class="note" style="font-size:12.5px;margin:0">Each tile is that member's denoised estimate <span class="m">x̂₁</span> at the current step — the field the trajectory is heading for, not the noisy state it is standing on. Move the step slider in section 05 and the tiles firm up together.</p>
+        <div class="split-3">
+          <div class="mini"><canvas id="cvMean" width="128" height="128"></canvas><span class="cap">Ensemble mean — mm/day</span></div>
+          <div class="mini"><canvas id="cvSd" width="128" height="128"></canvas><span class="cap">Ensemble SD — same mm/day colour scale</span></div>
+          <div class="stack-s">
+            <h3>Scorecard at the finished analysis</h3>
+            <div class="stat-grid" style="grid-template-columns:1fr">
+              <div class="stat"><span class="k">RMSE at assimilated gauges — <em>fit, not skill</em></span><span class="v" id="stFit">—</span><span class="u">mm/day, 29 stations</span></div>
+              <div class="stat hl"><span class="k">RMSE at withheld gauges — the primary evidence</span><span class="v" id="stHold">—</span><span class="u">mm/day, 7 stations, fold 1 of 5</span></div>
+              <div class="stat"><span class="k">Spread / RMSE at withheld gauges</span><span class="v" id="stRatio">—</span><span class="u">&lt;1 under-dispersed, &gt;1 over-dispersed</span></div>
+            </div>
+            <p class="note" style="font-size:12.5px">Push the gauge weight to <span class="m">w = 4</span>: the assimilated-gauge error keeps falling toward the observation-noise floor while the withheld-gauge error stops improving. Buying a closer fit at the stations you assimilated is not the same as buying skill. Turn IMERG off and the withheld number degrades where no gauge is nearby. In the real system the primary metric is CRPS over five spatially rotated folds, so every eligible station is withheld exactly once.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ EVIDENCE ============ -->
+<section id="evidence">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>Reading the product honestly</h2>
+  </div>
+  <div class="stack">
+    <p class="prose">A generative model will hand you a beautifully textured 5&nbsp;km field whether or not that texture is in the right place. The evidence hierarchy exists so that a sharp-looking map is never mistaken for a demonstrated one.</p>
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr><th>Comparison</th><th>What it can show</th><th>Why it is not independent truth</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Withheld BMD</td><td>Generalisation — the primary real-data score. CRPS first, then MAE, bias, RMSE, coverage, spread.</td><td>Independent, when the station genuinely stayed out of the likelihood.</td><td><span class="pill p-ok">Verification</span></td></tr>
+          <tr><td>All-station BMD</td><td>Whether the likelihood and its error model are behaving.</td><td>Those stations were assimilated; close fit is expected by construction.</td><td><span class="pill p-warn">Assimilated fit</span></td></tr>
+          <tr><td>IMERG</td><td>Observation adherence; native 0.1° detail not directly constrained by S04.</td><td>The same observation family was assimilated at 0.4°.</td><td><span class="pill p-warn">Adherence</span></td></tr>
+          <tr><td>CPC</td><td>That the background constraint survived assimilation.</td><td>CPC conditioned the prior and is the residual baseline.</td><td><span class="pill p-no">Not independent</span></td></tr>
+          <tr><td>CHIRPS</td><td>Fine-scale structural agreement — spectra, variograms, residual variance.</td><td>CHIRPS is the learned training target.</td><td><span class="pill p-no">Training family</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split">
+      <div class="stack-s">
+        <h3>The date contract</h3>
+        <p class="prose" style="font-size:14.5px">For a public BMD label day <span class="m">D</span>, the gauges and the prepared IMERG cover the BMD window ending 03&nbsp;UTC on <span class="m">D</span>, while the CPC, ERA5 and CHIRPS background record is <span class="m">D − 1</span>. A calendar-day product cannot quietly stand in for the BMD-aligned file, and every map title, station table and daily comparison has to carry the same convention.</p>
+      </div>
+      <div class="stack-s">
+        <h3>What 0.05° does not buy you</h3>
+        <p class="prose" style="font-size:14.5px">An output grid at 0.05° does not by itself establish 0.05° information. The claim needs the exact decomposition into S04 footprint means and below-footprint residuals, spectra and variograms, increment-locality diagnostics — and above all, positive sub-footprint placement skill at <em>withheld</em> gauges. Texture alone is not enough, and neither is agreement with CHIRPS.</p>
+      </div>
+    </div>
+    <p class="note"><strong>The other design point.</strong> A <a href="https://claude.ai/code/artifact/939db332-909a-4577-97b9-67eb0b09244c">companion page</a> builds the same posterior on a graph instead of a grid: a diffusion prior whose backbone is a graph network on a global icosahedral mesh, where observations are nodes rather than interpolation targets and localisation comes from the receptive field rather than a spread length. It carries a side-by-side comparison of the two — including the one axis where the rectified-flow path used here is measurably better: with <span class="m">V(t) = R + Γ(1−t)²/t²</span> the observations carry more than half weight over roughly 36 of the 50 steps, against about 7 of 20 for an EDM diffusion schedule running from <span class="m">σ = 80</span>.</p>
+  </div>
+</section>
+
+<footer>
+  <div>SURMA-Flow v1.0 — Score-guided Unified Rainfall Modeling and Assimilation with Rectified Flow. BRISHTI-05 — Bangladesh Rainfall Integration of Satellite, Hydrometeorological and Terrestrial Information at 0.05°. Production archive: May–September 2021–2023 and May–June 2024, 520 BMD-labelled days, 30 members, legacy method key <span class="m">v2_simul_s04_ig010</span>.</div>
+  <div class="refs">
+    <span>Lipman et al. 2023 — Flow matching for generative modeling</span>
+    <span>Albergo, Boffi &amp; Vanden-Eijnden 2025 — Stochastic interpolants</span>
+    <span>Rozet &amp; Louppe 2024 — Score-based data assimilation</span>
+    <span>Manshausen et al. 2025 — Generative DA of sparse station observations at km scales, JAMES 17</span>
+  </div>
+</footer>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   Shared state — one t and one observation setting for the page
+   ============================================================ */
+const S = {
+  t: 0.55,
+  step: 28,
+  nSteps: 50,
+  gauge: true,
+  imerg: true,
+  overlay: true,
+  spread: 6,
+  gaugeWeight: 1,
+  view: "x1",
+  seed: 7
+};
+const subs = [];
+const on = fn => subs.push(fn);
+const emit = what => subs.forEach(f => f(what));
+
+/* ---------- grid + domain ---------- */
+const N = 128, RES = 0.05, LON0 = 88.0, LAT0 = 20.4;
+const BD = [[88.10,26.45],[88.45,26.62],[89.05,26.30],[89.65,26.20],[89.82,25.30],[90.10,25.18],
+  [91.05,25.20],[92.00,25.10],[92.42,24.90],[92.10,24.40],[91.40,24.10],[91.32,23.90],[91.80,23.42],
+  [91.42,23.00],[91.20,22.20],[92.20,21.42],[92.62,21.32],[92.32,20.78],[92.02,21.12],[91.80,22.00],
+  [90.62,21.80],[90.02,21.90],[89.42,21.62],[89.02,21.70],[88.92,22.60],[88.62,23.20],[88.72,24.00],
+  [88.05,24.30],[88.22,25.20]];
+
+function inPoly(lon, lat){
+  let inside = false;
+  for (let i = 0, j = BD.length - 1; i < BD.length; j = i++){
+    const xi = BD[i][0], yi = BD[i][1], xj = BD[j][0], yj = BD[j][1];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+const LAND = new Uint8Array(N * N);
+for (let j = 0; j < N; j++) for (let i = 0; i < N; i++)
+  LAND[j * N + i] = inPoly(LON0 + i * RES, LAT0 + j * RES) ? 1 : 0;
+
+/* ---------- BMD synoptic stations (approximate coordinates) ---------- */
+const STATIONS = [
+  ["Dhaka",23.78,90.38],["Chattogram",22.35,91.82],["Sylhet",24.90,91.88],["Rajshahi",24.37,88.70],
+  ["Khulna",22.78,89.53],["Barishal",22.72,90.37],["Rangpur",25.73,89.23],["Mymensingh",24.72,90.42],
+  ["Cumilla",23.43,91.18],["Cox's Bazar",21.45,91.97],["Jashore",23.18,89.17],["Bogura",24.85,89.37],
+  ["Dinajpur",25.65,88.68],["Faridpur",23.60,89.85],["Feni",23.03,91.42],["Hatiya",22.43,91.10],
+  ["Ishurdi",24.13,89.05],["Khepupara",21.98,90.23],["Kutubdia",21.82,91.85],["Madaripur",23.17,90.18],
+  ["Maijdee",22.87,91.10],["Mongla",22.47,89.60],["Patuakhali",22.33,90.33],["Rangamati",22.63,92.20],
+  ["Sandwip",22.48,91.43],["Satkhira",22.72,89.08],["Sitakunda",22.63,91.68],["Srimangal",24.30,91.73],
+  ["Saidpur",25.75,88.92],["Tangail",24.25,89.92],["Teknaf",20.87,92.30],["Chuadanga",23.65,88.82],
+  ["Chandpur",23.27,90.70],["Bhola",22.68,90.65],["Tetulia",26.40,88.40],["Netrokona",24.88,90.73]
+].map((s, k) => ({
+  name: s[0], lat: s[1], lon: s[2],
+  gx: (s[2] - LON0) / RES, gy: (s[1] - LAT0) / RES,
+  withheld: k % 5 === 0
+}));
+const ASSIM = STATIONS.filter(s => !s.withheld);
+const HOLD  = STATIONS.filter(s => s.withheld);
+
+/* ---------- value-noise fBm ---------- */
+function rng(seed){ let s = (seed >>> 0) || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+function lattice(seed, n){ const r = rng(seed); const a = new Float32Array((n + 1) * (n + 1)); for (let i = 0; i < a.length; i++) a[i] = r() * 2 - 1; return a; }
+function smp(a, n, u, v){
+  const x = u * n, y = v * n;
+  const i = Math.min(n - 1, Math.floor(x)), j = Math.min(n - 1, Math.floor(y));
+  const fx = x - i, fy = y - j, s = fx * fx * (3 - 2 * fx), t = fy * fy * (3 - 2 * fy);
+  const a00 = a[j*(n+1)+i], a10 = a[j*(n+1)+i+1], a01 = a[(j+1)*(n+1)+i], a11 = a[(j+1)*(n+1)+i+1];
+  return (a00*(1-s)+a10*s)*(1-t) + (a01*(1-s)+a11*s)*t;
+}
+function fbm(seed, oct, base){
+  const out = new Float32Array(N * N);
+  let amp = 1, tot = 0;
+  for (let o = 0; o < oct; o++){
+    const n = base * (1 << o), L = lattice(seed * 7919 + o * 131 + 1, n);
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) out[j*N+i] += amp * smp(L, n, i/(N-1), j/(N-1));
+    tot += amp; amp *= 0.55;
+  }
+  for (let k = 0; k < out.length; k++) out[k] /= tot;
+  return out;
+}
+function gauss(seed, n){ // standard normal array via Box-Muller
+  const r = rng(seed), a = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const u = Math.max(1e-7, r()), v = r();
+    a[i] = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  return a;
+}
+
+/* ---------- schematic truth field, in sqrt(mm) space ---------- */
+const BLOBS = [ // lat, lon, amp(sqrt-mm), sd-lat, sd-lon
+  [24.95, 91.85, 4.6, 0.95, 0.80],
+  [22.35, 92.10, 3.7, 0.85, 0.62],
+  [23.85, 90.30, 2.1, 1.25, 1.05],
+  [25.55, 89.05, 1.7, 0.95, 0.95],
+  [21.70, 91.95, 2.6, 0.70, 0.50]
+];
+const nA = fbm(3, 5, 3), nB = fbm(11, 6, 6);
+const TRUTH = new Float32Array(N * N);
+for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+  const lat = LAT0 + j * RES, lon = LON0 + i * RES, k = j * N + i;
+  let b = 0;
+  for (const [bl, bo, am, sy, sx] of BLOBS){
+    const dy = (lat - bl) / sy, dx = (lon - bo) / sx;
+    b += am * Math.exp(-0.5 * (dy*dy + dx*dx));
+  }
+  let v = b * (1 + 0.5 * nA[k]) + 0.9 * nB[k] + 0.35;
+  if (v < 0.28) v = 0;            // the atom at zero rainfall
+  TRUTH[k] = LAND[k] ? v : 0;
+}
+
+/* ---------- CPC background: 0.5 deg block mean, upsampled ---------- */
+const CPC = (() => {
+  const F = 10, M = Math.ceil(N / F);
+  const c = new Float32Array(M * M), w = new Float32Array(M * M);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+    if (!LAND[j*N+i]) continue;
+    const b = Math.floor(j/F) * M + Math.floor(i/F);
+    c[b] += TRUTH[j*N+i]; w[b]++;
+  }
+  for (let b = 0; b < c.length; b++) c[b] = w[b] ? c[b] / w[b] : 0;
+  const out = new Float32Array(N * N);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+    const x = Math.min(M - 1.001, Math.max(0, i / F - 0.5)), y = Math.min(M - 1.001, Math.max(0, j / F - 0.5));
+    const i0 = Math.floor(x), j0 = Math.floor(y), fx = x - i0, fy = y - j0;
+    const v = (c[j0*M+i0]*(1-fx) + c[j0*M+i0+1]*fx) * (1-fy) + (c[(j0+1)*M+i0]*(1-fx) + c[(j0+1)*M+i0+1]*fx) * fy;
+    out[j*N+i] = LAND[j*N+i] ? v * 0.93 : 0;   // CPC runs a little low here
+  }
+  return out;
+})();
+
+/* ---------- bilinear sampler + block means ---------- */
+function bilin(f, gx, gy){
+  const x = Math.min(N - 1.001, Math.max(0, gx)), y = Math.min(N - 1.001, Math.max(0, gy));
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j;
+  return (f[j*N+i]*(1-fx) + f[j*N+i+1]*fx)*(1-fy) + (f[(j+1)*N+i]*(1-fx) + f[(j+1)*N+i+1]*fx)*fy;
+}
+const SF = 8, NF = N / SF;                // S04: 16 x 16 footprints of 8 x 8 cells
+function blockMean(f){
+  const m = new Float32Array(NF * NF), w = new Float32Array(NF * NF);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+    if (!LAND[j*N+i]) continue;
+    const b = Math.floor(j/SF)*NF + Math.floor(i/SF);
+    m[b] += f[j*N+i]; w[b]++;
+  }
+  for (let b = 0; b < m.length; b++) m[b] = w[b] > SF*SF*0.5 ? m[b]/w[b] : NaN;  // footprints that are mostly sea are missing
+  return m;
+}
+
+/* ---------- observations ---------- */
+const SIG_G = 0.269;                       // 0.10 measurement + 0.25 representativeness
+const GAMMA = 0.01, R_G = SIG_G * SIG_G;
+const TRUTH_F = blockMean(TRUTH);
+const gN = gauss(101, STATIONS.length);
+const Y_GAUGE = STATIONS.map((s, k) => bilin(TRUTH, s.gx, s.gy) + SIG_G * gN[k]);
+const fN = fbm(23, 3, 4);
+const Y_IMERG = (() => {
+  const y = new Float32Array(NF * NF);
+  for (let b = 0; b < y.length; b++){
+    const j = Math.floor(b / NF) * SF + 4, i = (b % NF) * SF + 4;
+    y[b] = TRUTH_F[b] * 1.05 + 0.22 * fN[j*N+i];   // retrieval bias + spatially correlated error
+  }
+  return y;
+})();
+
+/* ---------- ensemble ---------- */
+const NMEM = 12;
+const MEM = [];             // prior draws x1 (sqrt space)
+const INC = [];             // guidance increment (sqrt space)
+const X0  = [];             // noise draws
+
+function buildPriors(seedBase){
+  MEM.length = 0; X0.length = 0;
+  for (let m = 0; m < NMEM; m++){
+    const tex = fbm(seedBase * 131 + m * 17 + 5, 6, 5);
+    const f = new Float32Array(N * N);
+    for (let k = 0; k < N * N; k++){
+      if (!LAND[k]) { f[k] = 0; continue; }
+      const local = 0.30 + 0.55 * CPC[k];
+      let v = CPC[k] + 1.15 * local * tex[k] + 0.10;
+      f[k] = v < 0.24 ? 0 : v;
+    }
+    MEM.push(f);
+    X0.push(gauss(seedBase * 977 + m * 61 + 3, N * N));
+  }
+}
+
+function gkernel(sig){
+  if (sig <= 0) return { rad: 1, k: [1, 0.42] };   // bilinear-ish: the 4 cells around the station
+  const rad = Math.max(1, Math.round(3 * sig)), k = new Float32Array(rad + 1);
+  for (let d = 0; d <= rad; d++) k[d] = Math.exp(-0.5 * (d / sig) ** 2);
+  return { rad, k };
+}
+
+function buildIncrements(){
+  INC.length = 0;
+  const sig = S.spread, { rad, k } = gkernel(sig);
+  const gw = S.gaugeWeight;
+  for (let m = 0; m < NMEM; m++){
+    const prior = MEM[m], inc = new Float32Array(N * N);
+    const pN = gauss(5000 + m * 13, STATIONS.length);
+    const num = new Float32Array(N * N), den = new Float32Array(N * N);
+
+    if (S.gauge){
+      for (let si = 0; si < STATIONS.length; si++){
+        const s = STATIONS[si];
+        if (s.withheld) continue;                       // held-out fold never enters the likelihood
+        const yObs = Y_GAUGE[si] + SIG_G * pN[si];      // per-member perturbed observation
+        const d = yObs - bilin(prior, s.gx, s.gy);
+        const ci = Math.round(s.gx), cj = Math.round(s.gy);
+        for (let dj = -rad; dj <= rad; dj++){
+          const j = cj + dj; if (j < 0 || j >= N) continue;
+          for (let di = -rad; di <= rad; di++){
+            const i = ci + di; if (i < 0 || i >= N) continue;
+            const dist = Math.hypot(di, dj);
+            const w = sig <= 0 ? (dist < 1.05 ? 1 : 0) : Math.exp(-0.5 * (dist / sig) ** 2);
+            if (w <= 1e-4) continue;
+            const kk = j * N + i;
+            num[kk] += w * d; den[kk] += w;
+          }
+        }
+      }
+      const gain = gw / (gw + 0.25);            // saturating: more weight = closer fit, never overshoot
+      for (let kk = 0; kk < N * N; kk++){
+        if (!LAND[kk] || den[kk] <= 0) continue;
+        const conf = den[kk] / (den[kk] + 0.12);  // how much this cell is actually informed
+        inc[kk] += gain * conf * (num[kk] / den[kk]);
+      }
+    }
+
+    if (S.imerg){
+      const pf = blockMean(prior);
+      const eN = fbm(7000 + m * 31, 3, 4);
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+        const kk = j * N + i; if (!LAND[kk]) continue;
+        const b = Math.floor(j/SF)*NF + Math.floor(i/SF);
+        if (!isFinite(TRUTH_F[b]) || !isFinite(pf[b])) continue;
+        const yObs = Y_IMERG[b] + 0.16 * eN[kk];        // correlated per-member perturbation
+        inc[kk] += 0.62 * (yObs - pf[b]);
+      }
+    }
+    INC.push(inc);
+  }
+}
+
+/* ---------- guidance weighting along the path ---------- */
+const T_START = 0.10;
+const authority = t => {
+  if (t < T_START) return 0;
+  const V = R_G + GAMMA * (1 - t) * (1 - t) / (t * t);
+  return R_G / V;
+};
+const ALPHA = (() => {                                   // fraction of the increment applied by step i
+  const a = new Float64Array(S.nSteps + 1);
+  let acc = 0;
+  for (let i = 1; i <= S.nSteps; i++){ acc += authority(i / S.nSteps); a[i] = acc; }
+  const tot = acc || 1;
+  for (let i = 0; i <= S.nSteps; i++) a[i] /= tot;
+  return a;
+})();
+
+/* ---------- field constructors at the current t ---------- */
+function x1eff(m, alpha){                  // the clean-field estimate the sampler is heading toward
+  const p = MEM[m], inc = INC[m], out = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++) out[k] = LAND[k] ? Math.max(0, p[k] + alpha * inc[k]) : 0;
+  return out;
+}
+function xtOf(m, t, alpha){
+  const x1 = x1eff(m, alpha), n = X0[m], out = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++) out[k] = LAND[k] ? t * x1[k] + (1 - t) * n[k] : 0;
+  return out;
+}
+
+/* ============================================================
+   Colour
+   ============================================================ */
+const STOPS = [
+  [-3.0, [ 38, 52, 64]], [-1.2, [ 96,112,122]], [0.0, [242,246,245]],
+  [ 0.5, [200,231,222]], [ 1.5, [116,199,199]], [2.5, [ 60,138,196]],
+  [ 4.0, [ 61, 84,170]], [ 6.0, [122, 62,156]], [8.0, [178, 58,114]], [10.5, [224, 85, 63]]
+];
+function fieldColor(v){
+  if (v <= STOPS[0][0]) return STOPS[0][1];
+  for (let i = 1; i < STOPS.length; i++){
+    if (v <= STOPS[i][0]){
+      const [a, ca] = STOPS[i-1], [b, cb] = STOPS[i], f = (v - a) / (b - a);
+      return [ca[0]+(cb[0]-ca[0])*f, ca[1]+(cb[1]-ca[1])*f, ca[2]+(cb[2]-ca[2])*f];
+    }
+  }
+  return STOPS[STOPS.length-1][1];
+}
+const DIV = [[-1.6,[176,84,36]],[-0.5,[214,170,132]],[0,[240,242,241]],[0.5,[134,178,196]],[1.6,[40,84,150]]];
+function divColor(v){
+  if (v <= DIV[0][0]) return DIV[0][1];
+  for (let i = 1; i < DIV.length; i++){
+    if (v <= DIV[i][0]){
+      const [a, ca] = DIV[i-1], [b, cb] = DIV[i], f = (v - a) / (b - a);
+      return [ca[0]+(cb[0]-ca[0])*f, ca[1]+(cb[1]-ca[1])*f, ca[2]+(cb[2]-ca[2])*f];
+    }
+  }
+  return DIV[DIV.length-1][1];
+}
+function seaColor(){
+  return getComputedStyle(document.documentElement).getPropertyValue('--sunk').trim() || '#e2e9e7';
+}
+function hexRgb(h){
+  h = h.replace('#',''); if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+let SEA = [226,233,231];
+function refreshSea(){ try { SEA = hexRgb(seaColor()); } catch(e){} }
+
+function paint(cv, field, mode){
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(N, N), d = img.data;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++){
+    const k = j * N + i, o = ((N - 1 - j) * N + i) * 4;   // row 0 is south, canvas row 0 is north
+    let c;
+    if (!LAND[k]) c = SEA;
+    else c = mode === 'div' ? divColor(field[k]) : fieldColor(field[k]);
+    d[o] = c[0]; d[o+1] = c[1]; d[o+2] = c[2]; d[o+3] = 255;
+  }
+  if (cv.width === N && cv.height === N){ ctx.putImageData(img, 0, 0); return; }
+  const off = paint._off || (paint._off = document.createElement('canvas'));
+  off.width = N; off.height = N;
+  off.getContext('2d').putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(off, 0, 0, cv.width, cv.height);
+}
+function cbarCss(){
+  const st = [];
+  for (let p = 0; p <= 20; p++){
+    const v = (p / 20) * 10.5;
+    const c = fieldColor(v);
+    st.push(`rgb(${c.map(Math.round).join(',')}) ${(p/20*100).toFixed(1)}%`);
+  }
+  return `linear-gradient(to right, ${st.join(',')})`;
+}
+
+/* ============================================================
+   Hero strip
+   ============================================================ */
+function buildHero(){
+  const host = document.getElementById('heroStrip');
+  host.textContent = '';
+  const ts = [0, 0.25, 0.5, 0.75, 1];
+  const f = x1eff(0, 1), n = X0[0];
+  ts.forEach(t => {
+    const d = document.createElement('div'); d.className = 'frame';
+    const cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+    const cap = document.createElement('span'); cap.className = 'cap';
+    cap.textContent = `t = ${t.toFixed(2)}${t === 0 ? '  · noise' : t === 1 ? '  · analysis' : ''}`;
+    const fld = new Float32Array(N * N);
+    for (let k = 0; k < N * N; k++) fld[k] = LAND[k] ? t * f[k] + (1 - t) * n[k] : 0;
+    d.append(cv, cap); host.appendChild(d);
+    paint(cv, fld, 'field');
+  });
+  document.getElementById('heroCbar').style.background = cbarCss();
+  document.getElementById('mainCbar').style.background = cbarCss();
+}
+
+/* ============================================================
+   Section 02 — pipeline map
+   ============================================================ */
+const MAP_TEXT = {
+  cond: ["Conditioning stack", "Seven dynamic channels — <span class='m'>cpc_precip, cpc_valid, era5_tcwv, era5_cape, era5_u10, era5_v10, era5_msl</span> — plus terrain, the land mask and a sine/cosine day-of-year encoding. The network predicts the standardised <b>residual</b> from CPC, so a zero residual reproduces the coarse analysis. Expanded in section 04."],
+  noise: ["Noise draw", "Each ensemble member begins at an independent <span class='m'>x₀ ~ N(0, I)</span> on the 128×128 grid. This is the only source of member-to-member difference in the unguided background. Expanded in section 03."],
+  xt:   ["State at time t", "<span class='m'>x_t = t·x₁ + (1−t)·x₀</span>. Pure noise at <span class='m'>t = 0</span>, a rainfall field at <span class='m'>t = 1</span>. Drag the slider in section 03 to move along it."],
+  unet: ["The velocity network", "Returns <span class='m'>u_θ(x_t, t, c)</span> — the direction to travel. 96 base channels, four levels, self-attention at 32² and 16², two residual blocks per level, EMA weights at decay 0.9995. <b>Frozen</b> during assimilation: no BMD or IMERG observation ever updates a weight. Expanded in section 04."],
+  lik:  ["Observation likelihood", "A Gaussian centred on the operator applied to the <em>denoised</em> state, with inflated variance <span class='m'>V(t) = R + Γ(1−t)²/t²</span> — enormous early, collapsing to <span class='m'>R</span> as <span class='m'>t → 1</span>. Production uses <span class='m'>Γ = 0.01</span> for both streams. Expanded in section 05."],
+  bmd:  ["BMD gauges", "About 35 synoptic stations over ~148,000 km² — one gauge per ~4,200 km². Bilinear interpolation from the 0.05° grid to each point, so the gradient reaches only four cells unless it is spread. Combined likelihood SD ≈ 0.269 in transformed units. Expanded in section 05."],
+  imerg:["IMERG S04", "Half-hourly retrievals accumulated into the BMD 03–03 UTC window, then coarsened so one 0.4° footprint is the exact mean of an 8×8 block of 0.05° cells. Every valid footprint is used, stride 1, with a 0.75-footprint error correlation length. Expanded in section 05."],
+  comb: ["Guided velocity", "<span class='m'>u + scale · ((1−t)/t) · ∇ log p(y | x_t)</span>, with a per-member gradient-norm clip at 50 and guidance gated off below <span class='m'>t = 0.10</span>. Two Heun evaluations plus two Langevin correctors per step. Expanded in section 05."],
+  out:  ["The analysis", "Thirty members per day in mm/day on the 0.05° Bangladesh grid, plus ensemble mean and SD. Members differ by their noise draw <em>and</em> by their perturbed observations. Expanded in sections 06 and 07."]
+};
+function wireMap(){
+  const svg = document.getElementById('mapSvg'), out = document.getElementById('mapOut');
+  svg.querySelectorAll('.node').forEach(n => {
+    const act = () => {
+      svg.querySelectorAll('.node').forEach(o => o.removeAttribute('data-on'));
+      n.setAttribute('data-on', '1');
+      const [h, b] = MAP_TEXT[n.dataset.node];
+      out.innerHTML = `<b>${h}.</b> ${b}`;
+    };
+    n.addEventListener('click', act);
+    n.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); act(); } });
+  });
+}
+
+/* ============================================================
+   Section 03 — interpolant explorer
+   ============================================================ */
+function drawPath(){
+  const t = S.t, alpha = ALPHA[Math.round(t * S.nSteps)];
+  const x1 = x1eff(0, alpha), n = X0[0];
+  const xt = new Float32Array(N * N), u = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++){
+    if (!LAND[k]) continue;
+    xt[k] = t * x1[k] + (1 - t) * n[k];
+    u[k]  = (x1[k] - n[k]) * 0.42;
+  }
+  paint(document.getElementById('cvX0'), n, 'div');
+  paint(document.getElementById('cvXt'), xt, 'field');
+  paint(document.getElementById('cvX1'), x1, 'field');
+  paint(document.getElementById('cvU'),  u,  'div');
+  document.getElementById('tVal').textContent = t.toFixed(2);
+  document.getElementById('pathTLabel').textContent = `t = ${t.toFixed(2)}`;
+  document.getElementById('capXt').textContent = `x_t — where you are (t = ${t.toFixed(2)})`;
+
+  const sc = t < 0.999 ? (1 / (1 - t)) : Infinity;
+  const f2v = t > 1e-3 ? (1 - t) / t : Infinity;
+  document.getElementById('pathNums').innerHTML =
+    `<span class="c">at t = ${t.toFixed(2)}</span><br>` +
+    `score  =  −x̂₀ / ${(1 - t).toFixed(2)}` + (isFinite(sc) ? `  (×${sc.toFixed(1)})` : '  (singular)') + `<br>` +
+    `Δu / Δscore  =  (1−t)/t  =  ${isFinite(f2v) ? f2v.toFixed(2) : '∞'}`;
+}
+
+/* ============================================================
+   Section 04 — U-Net anatomy
+   ============================================================ */
+const LEVELS = [
+  { r: 128, c: 96,  attn: false, d: 0 }, { r: 64, c: 192, attn: false, d: 1 },
+  { r: 32,  c: 288, attn: true,  d: 2 }, { r: 16, c: 384, attn: true,  d: 3 }
+];
+const NET_NOTE = {
+  enc: "Encoder level — two residual blocks, then a strided convolution halves the resolution. The conditioning encoder injects a feature map here through a zero-initialised 1×1 projection.",
+  mid: "Bottleneck — residual block, self-attention, residual block. Always attends, so the network can relate one corner of the domain to another in a single hop.",
+  dec: "Decoder level — the matching encoder features arrive on the skip connection and are concatenated before two residual blocks, then nearest-neighbour upsampling and a 3×3 convolution."
+};
+function buildNet(){
+  const NS = 'http://www.w3.org/2000/svg';
+  const nodes = document.getElementById('netNodes'), edges = document.getElementById('netEdges'),
+        skips = document.getElementById('netSkips'), condG = document.getElementById('netCond');
+  [nodes, edges, skips, condG].forEach(g => g.textContent = '');
+  const seq = [];
+  LEVELS.forEach(l => seq.push({ ...l, side: 'enc' }));
+  seq.push({ r: 16, c: 384, attn: true, d: 4, side: 'mid' });
+  for (let i = LEVELS.length - 1; i >= 0; i--) seq.push({ ...LEVELS[i], side: 'dec' });
+
+  const W = 90, H = 48, X0p = 34, DX = 108;
+  const yOf = d => 54 + d * 58;
+  const pos = seq.map((s, i) => ({ x: X0p + i * DX, y: yOf(s.d), s }));
+
+  pos.forEach((p, i) => {
+    if (i < pos.length - 1){
+      const q = pos[i + 1];
+      const e = document.createElementNS(NS, 'path');
+      e.setAttribute('d', `M${p.x + W},${p.y + H/2} L${q.x - 4},${q.y + H/2}`);
+      e.setAttribute('marker-end', 'url(#ah2)');
+      edges.appendChild(e);
+    }
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'lvl'); g.setAttribute('tabindex', '0');
+    g.dataset.idx = i;
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', p.x); r.setAttribute('y', p.y); r.setAttribute('width', W); r.setAttribute('height', H);
+    r.setAttribute('rx', '3');
+    const t1 = document.createElementNS(NS, 'text');
+    t1.setAttribute('x', p.x + W/2); t1.setAttribute('y', p.y + 20); t1.setAttribute('text-anchor', 'middle');
+    t1.textContent = `${p.s.r}²`;
+    const t2 = document.createElementNS(NS, 'text');
+    t2.setAttribute('x', p.x + W/2); t2.setAttribute('y', p.y + 37); t2.setAttribute('text-anchor', 'middle');
+    t2.setAttribute('font-size', '10'); t2.setAttribute('style', 'fill:var(--ink-3)');
+    t2.textContent = `${p.s.c} ch${p.s.attn ? ' · attn' : ''}`;
+    g.append(r, t1, t2); nodes.appendChild(g);
+  });
+
+  // skip connections: encoder level d -> decoder level d
+  for (let d = 0; d < 4; d++){
+    const a = pos[d], b = pos[8 - d];
+    const top = 26 - d * 4;
+    const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', `M${a.x + W/2},${a.y} C${a.x + W/2},${top} ${b.x + W/2},${top} ${b.x + W/2},${b.y}`);
+    p.setAttribute('stroke-width', '1.2');
+    p.setAttribute('stroke-dasharray', '4 3');
+    p.setAttribute('style', 'fill:none;stroke:var(--prior);opacity:.85');
+    skips.appendChild(p);
+  }
+  const sl = document.createElementNS(NS, 'text');
+  sl.setAttribute('x', 508); sl.setAttribute('y', 14); sl.setAttribute('text-anchor', 'middle');
+  sl.setAttribute('class', 'edge-lab'); sl.setAttribute('style', 'fill:var(--prior)');
+  sl.textContent = 'skip connections';
+  skips.appendChild(sl);
+
+  // conditioning lane
+  const lane = document.createElementNS(NS, 'rect');
+  lane.setAttribute('x', 20); lane.setAttribute('y', 372); lane.setAttribute('width', 980); lane.setAttribute('height', 40);
+  lane.setAttribute('rx', '3'); lane.setAttribute('stroke-width', '1.2');
+  lane.setAttribute('style', 'fill:var(--surface-2);stroke:var(--cond)');
+  condG.appendChild(lane);
+  const lt = document.createElementNS(NS, 'text');
+  lt.setAttribute('x', 34); lt.setAttribute('y', 397); lt.setAttribute('font-size', '11.5');
+  lt.setAttribute('style', 'fill:var(--cond);font-family:var(--mono)');
+  lt.textContent = 'multiscale conditioning encoder  ·  CPC + ERA5 + terrain + season, re-encoded at 128², 64², 32², 16²';
+  condG.appendChild(lt);
+  for (let d = 0; d < 4; d++){
+    const p = pos[d];
+    const a = document.createElementNS(NS, 'path');
+    a.setAttribute('d', `M${p.x + W/2},372 L${p.x + W/2},${p.y + H + 6}`);
+    a.setAttribute('stroke-width', '1.2');
+    a.setAttribute('marker-end', 'url(#ah2)');
+    a.setAttribute('style', 'color:var(--cond);stroke:var(--cond);fill:none');
+    condG.appendChild(a);
+  }
+  const te = document.createElementNS(NS, 'text');
+  te.setAttribute('x', 1000); te.setAttribute('y', 344); te.setAttribute('text-anchor', 'end');
+  te.setAttribute('class', 'edge-lab');
+  te.textContent = 't → Fourier embedding → MLP → FiLM (scale, shift) in every residual block';
+  condG.appendChild(te);
+
+  const out = document.getElementById('netOut');
+  nodes.querySelectorAll('.lvl').forEach(g => {
+    const show = () => {
+      nodes.querySelectorAll('.lvl').forEach(o => o.removeAttribute('data-on'));
+      g.setAttribute('data-on', '1');
+      const p = pos[+g.dataset.idx], s = p.s;
+      out.innerHTML = `<b>${s.side === 'mid' ? 'Bottleneck' : s.side === 'enc' ? 'Encoder' : 'Decoder'} · ${s.r}×${s.r} · ${s.c} channels${s.attn ? ' · self-attention' : ''}.</b> ${NET_NOTE[s.side]}`;
+    };
+    g.addEventListener('mouseenter', show);
+    g.addEventListener('focus', show);
+    g.addEventListener('click', show);
+  });
+}
+
+/* ============================================================
+   Section 05 — guided sampler
+   ============================================================ */
+function vtChart(){
+  const NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('vtChart');
+  svg.textContent = '';
+  const W = 420, H = 168, L = 42, Rr = 12, T = 14, B = 30;
+  const px = t => L + t * (W - L - Rr), py = v => H - B - v * (H - B - T);
+  const add = (tag, at) => {
+    const e = document.createElementNS(NS, tag);
+    let st = '';
+    for (const k in at){
+      const v = at[k];
+      if ((k === 'fill' || k === 'stroke' || k === 'font-family') && String(v).indexOf('var(') >= 0) st += k + ':' + v + ';';
+      else e.setAttribute(k, v);
+    }
+    if (st) e.setAttribute('style', st);
+    svg.appendChild(e); return e;
+  };
+
+  [0, 0.5, 1].forEach(v => {
+    add('line', { x1: L, y1: py(v), x2: W - Rr, y2: py(v), stroke: 'var(--line-soft)', 'stroke-width': 1 });
+    const t = add('text', { x: L - 6, y: py(v) + 4, 'text-anchor': 'end', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 });
+    t.textContent = v.toFixed(1);
+  });
+  [0, 0.25, 0.5, 0.75, 1].forEach(t => {
+    const e = add('text', { x: px(t), y: H - 10, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 });
+    e.textContent = t.toFixed(2);
+  });
+  // gate region
+  add('rect', { x: L, y: T, width: px(T_START) - L, height: H - B - T, fill: 'var(--line-soft)', opacity: 0.7 });
+  const gl = add('text', { x: px(T_START) + 5, y: T + 12, fill: 'var(--ink-3)', 'font-family': 'var(--mono)', 'font-size': 10 });
+  gl.textContent = 'gate: no guidance below t = 0.10';
+
+  let d = '';
+  for (let i = 0; i <= 200; i++){ const t = i / 200; d += (i ? ' L' : 'M') + px(t) + ',' + py(authority(t)); }
+  add('path', { d, fill: 'none', stroke: 'var(--gauge)', 'stroke-width': 2 });
+  let d2 = '';
+  for (let i = 0; i <= S.nSteps; i++){ const t = i / S.nSteps; d2 += (i ? ' L' : 'M') + px(t) + ',' + py(ALPHA[i]); }
+  add('path', { d: d2, fill: 'none', stroke: 'var(--prior)', 'stroke-width': 1.6, 'stroke-dasharray': '5 3' });
+
+  const marker = add('line', { id: 'vtMark', x1: px(S.t), y1: T, x2: px(S.t), y2: H - B, stroke: 'var(--focus)', 'stroke-width': 1.6 });
+  marker.setAttribute('data-px0', L); marker.setAttribute('data-px1', W - Rr);
+
+  const k1 = add('text', { x: W - Rr, y: T + 12, 'text-anchor': 'end', fill: 'var(--gauge)', 'font-family': 'var(--mono)', 'font-size': 10 });
+  k1.textContent = 'R / V(t) — observation authority';
+  const k2 = add('text', { x: W - Rr, y: T + 26, 'text-anchor': 'end', fill: 'var(--prior)', 'font-family': 'var(--mono)', 'font-size': 10 });
+  k2.textContent = 'cumulative increment applied';
+}
+function moveVtMark(){
+  const m = document.getElementById('vtMark'); if (!m) return;
+  const a = +m.getAttribute('data-px0'), b = +m.getAttribute('data-px1');
+  const x = a + S.t * (b - a);
+  m.setAttribute('x1', x); m.setAttribute('x2', x);
+}
+
+function drawOverlay(){
+  const cv = document.getElementById('cvOver'), ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!S.overlay) return;
+  const sc = cv.width / N;
+  const toX = gx => (gx + 0.5) * sc, toY = gy => (N - 0.5 - gy) * sc;
+
+  if (S.imerg){
+    ctx.strokeStyle = 'rgba(138,73,134,0.45)'; ctx.lineWidth = 1;
+    for (let b = 0; b <= NF; b++){
+      const p = b * SF * sc;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, cv.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(cv.width, p); ctx.stroke();
+    }
+  }
+  if (S.gauge || true){
+    const alpha = ALPHA[S.step];
+    const f = x1eff(0, alpha);
+    STATIONS.forEach((s, i) => {
+      const x = toX(s.gx), y = toY(s.gy);
+      const innov = Y_GAUGE[i] - bilin(f, s.gx, s.gy);
+      const r = 4 + Math.min(6, Math.abs(innov) * 3.2);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832);
+      if (s.withheld){
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.4; ctx.stroke();
+        ctx.strokeStyle = '#111a1b'; ctx.lineWidth = 1.2; ctx.stroke();
+      } else if (S.gauge){
+        ctx.fillStyle = innov > 0 ? 'rgba(176,101,14,0.92)' : 'rgba(59,94,168,0.92)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.1; ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(120,130,130,0.7)'; ctx.lineWidth = 1.2; ctx.stroke();
+      }
+    });
+  }
+}
+
+function drawAssim(){
+  const alpha = ALPHA[S.step], t = S.t;
+  let fld, mode = 'field';
+  if (S.view === 'inc'){
+    const inc = INC[0]; fld = new Float32Array(N * N);
+    for (let k = 0; k < N * N; k++) fld[k] = LAND[k] ? alpha * inc[k] * 1.15 : 0;
+    mode = 'div';
+  } else if (S.view === 'xt'){
+    fld = xtOf(0, t, alpha);
+  } else {
+    fld = x1eff(0, alpha);
+  }
+  paint(document.getElementById('cvMain'), fld, mode);
+  drawOverlay();
+
+  document.getElementById('assimT').textContent = `t = ${t.toFixed(2)} · step ${S.step} / ${S.nSteps}`;
+  document.getElementById('stepVal').textContent = `${S.step} / ${S.nSteps}`;
+  document.getElementById('ensT').textContent = `t = ${t.toFixed(2)}`;
+  document.getElementById('stAuth').textContent = authority(t).toFixed(3);
+  document.getElementById('stAlpha').textContent = (alpha * 100).toFixed(0) + '%';
+
+  const f = x1eff(0, alpha);
+  let acc = 0;
+  ASSIM.forEach((s, i) => { acc += Math.abs(Y_GAUGE[STATIONS.indexOf(s)] - bilin(f, s.gx, s.gy)); });
+  document.getElementById('stInnov').textContent = (acc / ASSIM.length).toFixed(3);
+  moveVtMark();
+}
+
+/* ============================================================
+   Section 06 — ensemble
+   ============================================================ */
+let memCanvases = [];
+function buildMemGrid(){
+  const host = document.getElementById('memGrid'); host.textContent = '';
+  memCanvases = [];
+  for (let m = 0; m < 8; m++){
+    const d = document.createElement('div'); d.className = 'mini';
+    const cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+    const cap = document.createElement('span'); cap.className = 'cap'; cap.textContent = `member ${m + 1} · x̂₁`;
+    d.append(cv, cap); host.appendChild(d); memCanvases.push(cv);
+  }
+}
+function drawEnsemble(){
+  const alpha = ALPHA[S.step], t = S.t;
+  const fields = [];
+  for (let m = 0; m < NMEM; m++) fields.push(x1eff(m, alpha));
+  memCanvases.forEach((cv, m) => paint(cv, fields[m], 'field'));
+
+  const mean = new Float32Array(N * N), sd = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++){
+    if (!LAND[k]) continue;
+    let s = 0, s2 = 0;
+    for (let m = 0; m < NMEM; m++){ const v = fields[m][k] * fields[m][k]; s += v; s2 += v * v; }
+    const mu = s / NMEM;
+    mean[k] = Math.sqrt(Math.max(0, mu));
+    sd[k] = Math.sqrt(Math.max(0, s2 / NMEM - mu * mu));
+  }
+  paint(document.getElementById('cvMean'), mean, 'field');
+  const sdv = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++) sdv[k] = LAND[k] ? Math.sqrt(Math.max(0, sd[k])) : 0;
+  paint(document.getElementById('cvSd'), sdv, 'field');
+}
+function score(){
+  const fields = [];
+  for (let m = 0; m < NMEM; m++) fields.push(x1eff(m, 1));   // the finished analysis
+  const stat = list => {
+    let se = 0, spr = 0;
+    list.forEach(s => {
+      const truth = bilin(TRUTH, s.gx, s.gy) ** 2;
+      const vals = fields.map(f => Math.max(0, bilin(f, s.gx, s.gy)) ** 2);
+      const mu = vals.reduce((a, b) => a + b, 0) / NMEM;
+      const va = vals.reduce((a, b) => a + (b - mu) ** 2, 0) / (NMEM - 1);
+      se += (mu - truth) ** 2; spr += va;
+    });
+    const rmse = Math.sqrt(se / list.length);
+    return { rmse, ratio: rmse > 0 ? Math.sqrt(spr / list.length) / rmse : 0 };
+  };
+  const a = stat(ASSIM), h = stat(HOLD);
+  document.getElementById('stFit').textContent = a.rmse.toFixed(2);
+  document.getElementById('stHold').textContent = h.rmse.toFixed(2);
+  document.getElementById('stRatio').textContent = h.ratio.toFixed(2);
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+function setT(t, fromStep){
+  S.t = Math.min(1, Math.max(0, t));
+  if (!fromStep) S.step = Math.round(S.t * S.nSteps);
+  else S.t = S.step / S.nSteps;
+  document.getElementById('tSlider').value = S.t.toFixed(2);
+  document.getElementById('stepSlider').value = S.step;
+  drawPath(); drawAssim(); drawEnsemble();
+}
+function rebuild(){
+  buildIncrements();
+  drawPath(); drawAssim(); drawEnsemble(); score();
+}
+
+function init(){
+  refreshSea();
+  buildPriors(S.seed);
+  buildIncrements();
+  buildHero();
+  wireMap();
+  buildNet();
+  vtChart();
+  buildMemGrid();
+
+  document.getElementById('tSlider').addEventListener('input', e => setT(parseFloat(e.target.value), false));
+  document.getElementById('stepSlider').addEventListener('input', e => { S.step = +e.target.value; setT(S.step / S.nSteps, true); });
+
+  document.querySelectorAll('.seg [data-view]').forEach(b => b.addEventListener('click', () => {
+    S.view = b.dataset.view;
+    document.querySelectorAll('.seg [data-view]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    drawAssim();
+  }));
+  document.querySelectorAll('.seg [data-spread]').forEach(b => b.addEventListener('click', () => {
+    S.spread = +b.dataset.spread;
+    document.querySelectorAll('.seg [data-spread]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    document.getElementById('spreadKm').textContent =
+      S.spread === 0 ? 'bilinear · 4 cells' : `${S.spread} cells ≈ ${Math.round(S.spread * 5.5)} km`;
+    rebuild();
+  }));
+  document.querySelectorAll('.seg [data-gw]').forEach(b => b.addEventListener('click', () => {
+    S.gaugeWeight = +b.dataset.gw;
+    document.querySelectorAll('.seg [data-gw]').forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+    rebuild();
+  }));
+  document.getElementById('cbGauge').addEventListener('change', e => { S.gauge = e.target.checked; rebuild(); });
+  document.getElementById('cbImerg').addEventListener('change', e => { S.imerg = e.target.checked; rebuild(); });
+  document.getElementById('cbOverlay').addEventListener('change', e => { S.overlay = e.target.checked; drawOverlay(); });
+  document.getElementById('btnReseed').addEventListener('click', () => {
+    S.seed = (S.seed * 7 + 13) % 9973;
+    buildPriors(S.seed); buildHero(); rebuild();
+  });
+
+  let raf = null, running = false;
+  const btn = document.getElementById('btnRun');
+  btn.addEventListener('click', () => {
+    if (running){ running = false; cancelAnimationFrame(raf); btn.textContent = '▶ Run 0 → 1'; return; }
+    running = true; btn.textContent = '■ Stop';
+    S.step = 0;
+    let last = performance.now(), acc = 0;
+    const tick = now => {
+      acc += now - last; last = now;
+      while (acc > 95 && S.step < S.nSteps){ S.step++; acc -= 95; }
+      setT(S.step / S.nSteps, true);
+      if (S.step >= S.nSteps){ running = false; btn.textContent = '▶ Run 0 → 1'; return; }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+  });
+
+  setT(S.t, false);
+  score();
+
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const repaint = () => { refreshSea(); buildHero(); drawPath(); drawAssim(); drawEnsemble(); };
+  if (mq.addEventListener) mq.addEventListener('change', repaint);
+}
+init();
+</script>
+
+</body>
+</html>
