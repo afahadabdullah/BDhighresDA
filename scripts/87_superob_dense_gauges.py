@@ -118,18 +118,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_transform(stats_path: str | None):
+def load_transform(stats_path: str | None, with_provenance=False):
     """Return a callable mm -> transformed units, or None."""
     if stats_path is None:
-        return None
+        return (None, {"status": "not_supplied"}) if with_provenance else None
+    import hashlib
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from bdhires.transforms import PrecipTransform  # noqa: E402
 
-    stats = json.loads(Path(stats_path).read_text())
+    content = Path(stats_path).read_bytes()
+    stats = json.loads(content)
     transform = PrecipTransform.from_dict(stats["precip_transform"])
-    return transform.forward
+    provenance = {"status": "recorded_at_preparation", "path": str(Path(stats_path).resolve()),
+                  "sha256": hashlib.sha256(content).hexdigest(),
+                  "precip_transform": stats["precip_transform"]}
+    return (transform.forward, provenance) if with_provenance else transform.forward
 
 
 def haversine_km(
@@ -216,7 +221,7 @@ def main() -> None:
     keys = cell_index(assimilated["lat"], assimilated["lon"], args.cell_deg)
     assimilated["cell_key"] = keys
 
-    forward = load_transform(args.stats)
+    forward, stats_provenance = load_transform(args.stats, with_provenance=True)
     budget = {
         "cell_deg": args.cell_deg,
         "mm": within_cell_spread(
@@ -268,6 +273,7 @@ def main() -> None:
 
     manifest = {
         "source_table": str(args.stations),
+        "stats_provenance": stats_provenance,
         "cell_deg": args.cell_deg,
         "stations_in": int(frame["station_id"].nunique()),
         "stations_held_out": int(len(holdout)),

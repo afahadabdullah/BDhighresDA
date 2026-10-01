@@ -92,6 +92,7 @@ def main():
         archive.write(ROOT / "docs/PAPER1_COMPLETION.md", "PAPER1_COMPLETION.md")
         archive.write(ROOT / "docs/PAPER1_BANGLADESH.md", "PAPER1_BANGLADESH.md")
         archive.write(ROOT / "docs/PAPER1_UPDATED_EVIDENCE.md", "PAPER1_UPDATED_EVIDENCE.md")
+        archive.write(ROOT / "docs/PAPER1_REMAINING_EVIDENCE.md", "PAPER1_REMAINING_EVIDENCE.md")
         for path in (ROOT / "configs/geography").glob("geoBoundaries-BGD-ADM0*.json"):
             archive.write(path, "geography/" + path.name)
         boundary = ROOT / "configs/geography/geoBoundaries-BGD-ADM0.geojson"

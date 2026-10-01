@@ -25,6 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from bdhires.country import DEFAULT_BOUNDARY, read_boundary, points_inside
+from bdhires.paper_evidence import paired_intervals, checkpoint_metadata
 
 FINAL = "dense_s6_bwdb_r4"
 METHODS = ["background", FINAL]
@@ -212,53 +213,6 @@ def product_rows(data, predictions, profile, counts, available_dates=None):
               {s: np.asarray(v) for s,v in pred_groups.items()})
     return rows, station_scores, periods
 
-
-def paired_intervals(data, predictions, block_days, resamples, seed):
-    """Bootstrap pooled RMSE/MAE gains by resampling whole day blocks.
-
-    All stations on a day move together. Recompute nonlinear RMSE in each
-    resample. Station-day weighting matches the headline deterministic table.
-    Bonferroni intervals cover the six primary product/metric contrasts for
-    each block-width sensitivity analysis. No model-selection uncertainty.
-    """
-    dates = np.unique(data["date"])
-    split = np.where(np.diff(dates).astype("timedelta64[D]").astype(int) > 1)[0] + 1
-    segments = np.split(np.arange(len(dates)), split)
-    day_index = np.searchsorted(dates, data["date"])
-    n = np.bincount(day_index).astype(float)
-    error = {s: p - data["truth"] for s,p in predictions.items()}
-    sums = {s: (np.bincount(day_index, weights=e**2), np.bincount(day_index, weights=np.abs(e))) for s,e in error.items()}
-    output = []
-    for reference in [s for s in predictions if s != FINAL]:
-        for width in block_days:
-            rng = np.random.default_rng(seed)
-            gains = np.empty((resamples,2))
-            # Bounded memory: totals for at most 256 resamples at once.
-            for start in range(0, resamples, 256):
-                batch = min(256, resamples-start)
-                totals = np.zeros((batch,5))
-                for segment in segments:
-                    length = len(segment); size = min(width,length)
-                    starts = rng.integers(0,length,(batch,int(np.ceil(length/size))))
-                    index = segment[((starts[...,None]+np.arange(size)).reshape(batch,-1)[:,:length]) % length]
-                    values = [n, sums[reference][0], sums[FINAL][0], sums[reference][1], sums[FINAL][1]]
-                    for col,v in enumerate(values):
-                        totals[:,col] += v[index].sum(axis=1)
-                gains[start:start+batch,0] = np.sqrt(totals[:,1]/totals[:,0]) - np.sqrt(totals[:,2]/totals[:,0])
-                gains[start:start+batch,1] = (totals[:,3]-totals[:,4])/totals[:,0]
-            for col, metric in enumerate(("rmse", "mae")):
-                low, high = np.percentile(gains[:,col],[2.5,97.5])
-                family = 6 if reference in ("chirps","imerg","cpc") else 0
-                adj = np.percentile(gains[:,col], [100*.05/(2*family),100*(1-.05/(2*family))]) if family else [None,None]
-                point = (np.sqrt(sums[reference][0].sum()/n.sum())-np.sqrt(sums[FINAL][0].sum()/n.sum())
-                         if col == 0 else (sums[reference][1].sum()-sums[FINAL][1].sum())/n.sum())
-                output.append({"reference": reference, "candidate": FINAL, "metric": metric,
-                               "gain_mm_day": float(point), "ci_low": float(low), "ci_high": float(high),
-                               "family_size": family, "family_ci_low": adj[0], "family_ci_high": adj[1],
-                               "block_days": width, "n_resamples": resamples, "n_days": len(dates),
-                               "n_segments": len(segments), "n": int(n.sum()), "seed": seed,
-                               "weighting": "pooled station-days; all sites resampled together within day"})
-    return output
 
 
 def collect_predictions(data, scopes, root, periods, profile, country, cpc_override, native_paths):
@@ -497,6 +451,8 @@ def parse_args(argv=None):
     p.add_argument("--compute",type=Path)
     p.add_argument("--accounting-job-ids",nargs="+",help="explicit Slurm job IDs to read with sacct; raw accounting only, not fabricated stage timings")
     p.add_argument("--preparation-logs",type=Path,nargs="+",help="original execution logs to scan for recorded --stats paths")
+    p.add_argument("--inspect-checkpoint", action="store_true", help="read epoch from the pinned checkpoint with restricted Torch loading; also done in --run mode")
+    p.add_argument("--checkpoint", type=Path, help="remap the pinned best.pt for metadata extraction")
     p.add_argument("--robustness",type=Path,nargs="+")
     p.add_argument("--run",action="store_true",help="score saved arrays; default is input audit only")
     p.add_argument("--run-existing",action="store_true",help="also run 90 and 92; requires --run")
@@ -554,6 +510,11 @@ def main(argv=None):
     preparation = preparation_provenance(root,periods,args.preparation_logs)
     (args.out_dir/"preparation_stats_provenance.json").write_text(json.dumps(preparation,indent=2)+"\n")
     generated.append(args.out_dir/"preparation_stats_provenance.json")
+    if args.inspect_checkpoint or args.run:
+        checkpoint = checkpoint_metadata(args.checkpoint or ROOT/contract["checkpoint"], EXPECTED_HASHES["checkpoint"])
+        (args.out_dir/"checkpoint_metadata.json").write_text(json.dumps(finite_json(checkpoint),indent=2,allow_nan=False)+"\n")
+        generated.append(args.out_dir/"checkpoint_metadata.json")
+        manifest["checkpoint_metadata_status"] = checkpoint["status"]
     if args.accounting_job_ids:
         command = ["sacct","--noheader","--parsable2","--jobs",",".join(args.accounting_job_ids),
                    "--format","JobIDRaw,JobName,State,ElapsedRaw,AllocTRES,NodeList,Start,End"]
@@ -641,12 +602,26 @@ def main(argv=None):
         command = [sys.executable,str(ROOT/"scripts/92_complete_cpcv2_paper1.py"),"--root",str(root),
                    "--output",str(args.out_dir/"additional"),"--contract",str(args.contract),
                    "--boundary-geojson",str(args.boundary_geojson),"--history",str(args.history)]
-        command += ["--seed",str(args.seed)]
+        command += ["--seed",str(args.seed),"--bootstrap",str(args.bootstrap),
+                    "--block-days",*[str(n) for n in args.block_days]]
         for flag,value in (("--selection",args.selection),("--compute",args.compute)):
             if value:command += [flag,str(value)]
         if args.robustness:command += ["--robustness",*[str(p) for p in args.robustness]]
         subprocess.run(command,check=True,cwd=ROOT)
-    manifest["outputs"] = [{"path":p.name,"sha256":digest(p)} for p in generated]
+        # Record child outputs from this run, including their actual existence
+        # and content hashes, independently of input-store availability.
+        for child in (args.out_dir/"additional/completion_manifest.json",
+                      args.out_dir/"evaluation/superob-final/paper1_evaluation.json"):
+            if child.is_file():
+                generated.append(child)
+        manifest["gridded_run_requested"] = args.with_gridded
+        grid = args.out_dir/"evaluation/superob-final/gridded"
+        manifest["gridded_result_files"] = [{"path":str(p.relative_to(args.out_dir)),"sha256":digest(p)}
+            for p in sorted(grid.glob("*.csv"))] if args.with_gridded else []
+        grid_names = {Path(r["path"]).name for r in manifest["gridded_result_files"]}
+        manifest["gridded_status"] = "outputs_generated_require_scientific_review" if {
+            "subgrid_matrix.csv", "withheld_gauge_subgrid_anomalies.csv"} <= grid_names else "not_generated"
+    manifest["outputs"] = [{"path":str(p.relative_to(args.out_dir)),"sha256":digest(p)} for p in generated]
     (args.out_dir/"evidence_manifest.json").write_text(json.dumps(finite_json(manifest),indent=2,allow_nan=False)+"\n")
     lines = ["# Updated-paper evidence audit","",f"Status: {manifest['status']}",
              "Scope: every available frozen test period; all May 2022 selection dates excluded.",

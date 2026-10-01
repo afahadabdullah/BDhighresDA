@@ -1,5 +1,10 @@
 # Updated-paper review and evidence recovery
 
+The returned first-run exports now fill the all-product, yearly, intensity,
+temporal, calibration, IDW and validation-history gaps identified in this
+initial review. See [PAPER1_REMAINING_EVIDENCE.md](PAPER1_REMAINING_EVIDENCE.md)
+for the current nine remaining items and the updated recovery commands.
+
 Reviewed the current `manuscript/BDhighresDA_arxiv.tex` on 2026-10-01,
 including every main result, figure caption, methods section and appendix.
 The review concerns the model paper and the entire available test archive.
@@ -144,7 +149,8 @@ python scripts/96_complete_updated_paper_evidence.py \
 Set `PAPER1_CPC_SOURCE` or pass `--cpc-source-zarr` if the archived packed
 store path needs remapping. The source must contain original `cpc_precip`
 and same-day date coordinates; lagged `condition` is never substituted.
-`PAPER1_FULL_GRIDDED=1` additionally generates BD2 and full gridded diagnostics.
+The batch launcher now defaults to `PAPER1_FULL_GRIDDED=1`, generating BD2 and
+full gridded diagnostics. Set it to `0` only for a deliberate gauge-only run.
 `PAPER1_HISTORY`, `PAPER1_SELECTION`, `PAPER1_COMPUTE` and
 `PAPER1_UPSTREAM_INVENTORIES` forward actual optional inputs. A missing
 manuscript source on HPC does not prevent scoring; its source hash is simply

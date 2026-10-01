@@ -21,6 +21,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from bdhires.country import DEFAULT_BOUNDARY, read_boundary, points_inside, map_axes
+from bdhires.paper_evidence import paired_intervals
 FINAL = "dense_s6_bwdb_r4"
 SLOTS = {
     "country_intervals": ["tab_country_intervals.tex", "paired_country_crps.csv"],
@@ -28,7 +29,8 @@ SLOTS = {
     "calibration": ["fig_calibration.pdf", "tab_thresholds.tex", "threshold_scores.csv",
                     "reliability.csv", "rank_histogram.csv", "coverage_curve.csv"],
     "interpolation": ["tab_interpolation.tex", "interpolation_scores.csv",
-                      "interpolation_station_days.csv"],
+                      "interpolation_station_days.csv", "paired_idw_intervals.csv",
+                      "idw_intensity_scores.csv", "tab_idw_paired.tex", "tab_idw_intensity.tex"],
     "selection": ["tab_selection.tex", "selection_scores.csv"],
     "training": ["fig_training.pdf", "training_curve.csv"],
     "compute": ["tab_compute.tex", "compute_summary.csv"],
@@ -227,7 +229,8 @@ def raw_station_data(path):
     return coords, values
 
 
-def build_network_idw(data, keep, root, periods, out, country=None):
+def build_network_idw(data, keep, root, periods, out, country=None,
+                      seed=20261001, resamples=10000, block_days=(3, 7)):
     plt = plotting()
     fig, axes = plt.subplots(1, len(periods), figsize=(12, 4.8), layout="constrained", squeeze=False)
     predictions = np.full(len(data["truth"]), np.nan)
@@ -287,11 +290,56 @@ def build_network_idw(data, keep, root, periods, out, country=None):
     write_csv(out / "interpolation_scores.csv", rows)
     write_csv(out / "interpolation_station_days.csv", [
         {"date": str(data["date"][i]), "station_id": data["station"][i], "period": data["period"][i],
-         "truth_mm": data["truth"][i], "idw_mm": predictions[i]} for i in np.flatnonzero(common)])
+         "truth_mm": data["truth"][i], "idw_mm": predictions[i],
+         "background_mean_mm": data["members"]["background"][i].mean(),
+         "analysis_mean_mm": data["members"][FINAL][i].mean()} for i in np.flatnonzero(common)])
+    build_idw_comparisons(read_csv(out / "interpolation_station_days.csv"), out,
+                          seed, resamples, block_days)
     table(out / "tab_interpolation.tex", ["Method", "n", "RMSE", "MAE", "Bias", "r"],
           [[r["method"], r["n"], f'{r["rmse"]:.3f}', f'{r["mae"]:.3f}', f'{r["bias"]:.3f}',
             "--" if r["correlation"] is None else f'{r["correlation"]:.3f}'] for r in rows],
           f"Fixed p=2 IDW uses retained original daily reports only. Common sample: {int(common.sum()):,}; excluded for unavailable IDW: {int(keep.sum() - common.sum()):,}.")
+
+
+def build_idw_comparisons(rows, out, seed=20261001, resamples=10000, block_days=(3, 7)):
+    """Paired mean-versus-IDW evidence from the identical independent sample."""
+    if not rows or any(not all(k in row for k in ("date", "station_id", "period",
+                          "truth_mm", "idw_mm", "analysis_mean_mm")) for row in rows):
+        raise ValueError("IDW daily export needs analysis_mean_mm; rerun script 92 from original arrays")
+    keys = [(r["date"], r["station_id"]) for r in rows]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate IDW station-days")
+    dates = np.asarray([r["date"] for r in rows], dtype="datetime64[D]")
+    if np.any((dates >= np.datetime64("2022-05-01")) & (dates <= np.datetime64("2022-05-31"))):
+        raise ValueError("IDW comparisons must exclude the May 2022 selection month")
+    truth = np.asarray([float(r["truth_mm"]) for r in rows])
+    predictions = {FINAL: np.asarray([float(r["analysis_mean_mm"]) for r in rows]),
+                   "IDW p=2": np.asarray([float(r["idw_mm"]) for r in rows])}
+    if not np.isfinite(truth).all() or not all(np.isfinite(p).all() for p in predictions.values()):
+        raise ValueError("IDW export must contain common finite samples only")
+    paired = paired_intervals({"date": dates, "truth": truth}, predictions,
+                              block_days, resamples, seed)
+    write_csv(out / "paired_idw_intervals.csv", paired)
+    scores = []
+    for low, high, label in ((0, 1, "[0,1)"), (1, 10, "[1,10)"), (10, 25, "[10,25)"),
+                             (25, 50, "[25,50)"), (50, 100, "[50,100)"), (100, np.inf, "[100,inf)")):
+        keep = (truth >= low) & (truth < high)
+        if not keep.any():
+            continue
+        model, baseline = [deterministic(predictions[m][keep], truth[keep]) for m in (FINAL, "IDW p=2")]
+        for method, score in ((FINAL, model), ("IDW p=2", baseline)):
+            scores.append({"intensity": label, "method": method, **score,
+                           "rmse_gain_mm_day": baseline["rmse"] - model["rmse"],
+                           "mae_gain_mm_day": baseline["mae"] - model["mae"]})
+    write_csv(out / "idw_intensity_scores.csv", scores)
+    table(out / "tab_idw_paired.tex", ["Metric", "Block", "Gain", "95% low", "95% high"],
+          [[r["metric"], r["block_days"], *[f'{r[k]:.3f}' for k in ("gain_mm_day", "ci_low", "ci_high")]] for r in paired],
+          "Positive gain favours SURMA-Flow over retained-gauge IDW p=2. Identical original withheld station-days; whole-day blocks stay within date-gap segments. Pooled RMSE is recomputed per resample. Temporal uncertainty conditional on this holdout; pointwise intervals.")
+    table(out / "tab_idw_intensity.tex", ["Rain bin", "n", "RMSE IDW", "RMSE model", "RMSE gain", "MAE gain"],
+          [[r["intensity"], r["n"], f'{r["rmse"] + r["rmse_gain_mm_day"]:.3f}',
+            f'{r["rmse"]:.3f}', f'{r["rmse_gain_mm_day"]:.3f}', f'{r["mae_gain_mm_day"]:.3f}']
+           for r in scores if r["method"] == FINAL],
+          "Bins use observed rainfall (mm/day). Positive gain favours SURMA-Flow. Each bin uses the same IDW/model station-days; rare-bin counts are reported. These are point estimates, not simultaneous intensity-bin confidence intervals.")
 
 
 def build_selection(path, contract, out, scorer, record, country=None):
@@ -451,8 +499,12 @@ def main(argv=None):
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--require-complete", action="store_true", help="exit 2 when any slot remains pending")
     parser.add_argument("--seed", type=int, default=20261001)
+    parser.add_argument("--bootstrap", type=int, default=10000)
+    parser.add_argument("--block-days", type=int, nargs="+", default=[3, 7])
     parser.add_argument("--boundary-geojson", type=Path, default=DEFAULT_BOUNDARY)
     args = parser.parse_args(argv)
+    if args.bootstrap < 1 or any(n < 1 for n in args.block_days):
+        parser.error("bootstrap and block widths must be positive")
     contract = json.loads(args.contract.read_text())
     profile = contract["profiles"]["superob-final"]
     periods = list(contract["periods"])
@@ -512,16 +564,17 @@ def main(argv=None):
             build_calibration(data, keep, args.output, args.seed)
             status["calibration"]["status"] = "generated"
             _, paired, _, _ = mod.score_samples(data, ["background", FINAL], profile,
-                                               mod.scoring_module(), [3, 7], 10000, args.seed)
+                                               mod.scoring_module(), args.block_days, args.bootstrap, args.seed)
             write_csv(args.output / "paired_country_crps.csv", paired)
             table(args.output / "tab_country_intervals.tex", ["Block days", "Gain", "95% lower", "95% upper"],
                   [[r["block_days"], f'{r["difference"]:.3f}', f'{r["ci_low"]:.3f}', f'{r["ci_high"]:.3f}'] for r in paired],
-                  "Bangladesh-only equal-day fair CRPS differences; 10,000 resamples, no blocks cross gaps or the excluded selection month. Units: mm/day.")
+                  f"Bangladesh-only equal-day fair CRPS differences; {args.bootstrap:,} resamples, no blocks cross gaps or the excluded selection month. Units: mm/day.")
             status["country_intervals"]["status"] = "generated"
             if all(p.is_file() for p in raw):
                 for p in raw:
                     record(p)
-                build_network_idw(data, keep, root, periods, args.output, country)
+                build_network_idw(data, keep, root, periods, args.output, country,
+                                  args.seed, args.bootstrap, args.block_days)
                 status["network"]["status"] = status["interpolation"]["status"] = "generated"
         for slot, path, build in (("training", args.history, build_training), ("compute", args.compute, None),
                                   ("selection", args.selection, None)):

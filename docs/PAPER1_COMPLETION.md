@@ -4,6 +4,9 @@ For the updated eight-figure manuscript, use
 [PAPER1_UPDATED_EVIDENCE.md](PAPER1_UPDATED_EVIDENCE.md) and script 96.
 That workflow evaluates every available test period, adds paired product
 comparisons and native IMERG, and records the current paper's evidence gaps.
+See [PAPER1_REMAINING_EVIDENCE.md](PAPER1_REMAINING_EVIDENCE.md) for the nine
+items still missing after the first full-archive run. Script 92 now also
+exports daily model means, paired IDW intervals and IDW intensity gains.
 The instructions below describe the existing script-92 completion slots.
 
 The manuscript is `manuscript/BDhighresDA_arxiv.tex`. The reported results

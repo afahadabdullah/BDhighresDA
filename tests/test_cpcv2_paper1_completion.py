@@ -79,6 +79,11 @@ class CompletionTests(unittest.TestCase):
             for row in predictions:
                 day = np.where(fixture.dates == np.datetime64(row["date"]))[0][0]
                 self.assertAlmostEqual(float(row["idw_mm"]), fixture.dump["gauge_mm"][day, 2])
+                station = np.flatnonzero(fixture.dump["station_ids"] == row["station_id"])[0]
+                self.assertAlmostEqual(float(row["analysis_mean_mm"]),
+                    fixture.dump["station_" + COMPLETE.FINAL][day, :, station].mean())
+            self.assertTrue((output / "paired_idw_intervals.csv").is_file())
+            self.assertTrue((output / "idw_intensity_scores.csv").is_file())
             for file in ("fig_network.pdf", "fig_calibration.pdf"):
                 self.assertTrue((output / file).read_bytes().startswith(b"%PDF"))
             # A subsequent run missing raw reports removes their stale fills.

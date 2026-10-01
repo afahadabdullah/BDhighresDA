@@ -26,11 +26,12 @@ TASK_ARGS=(--run --run-existing
 [[ -z "${PAPER1_CPC_SOURCE:-}" ]] || TASK_ARGS+=(--cpc-source-zarr "$PAPER1_CPC_SOURCE")
 [[ -z "${PAPER1_SELECTION:-}" ]] || TASK_ARGS+=(--selection "$PAPER1_SELECTION")
 [[ -z "${PAPER1_COMPUTE:-}" ]] || TASK_ARGS+=(--compute "$PAPER1_COMPUTE")
+[[ -z "${PAPER1_CHECKPOINT:-}" ]] || TASK_ARGS+=(--checkpoint "$PAPER1_CHECKPOINT")
 [[ -z "${PAPER1_UPSTREAM_INVENTORIES:-}" ]] || TASK_ARGS+=(--upstream-inventories "$PAPER1_UPSTREAM_INVENTORIES")
 if [[ -n "${PAPER1_NATIVE_IMERG_LIST:-}" ]]; then
     mapfile -t TASK_NATIVE_FILES < "$PAPER1_NATIVE_IMERG_LIST"
     [[ ${#TASK_NATIVE_FILES[@]} -gt 0 ]] || { echo "ERROR: native IMERG file list is empty" >&2; exit 1; }
     TASK_ARGS+=(--native-imerg "${TASK_NATIVE_FILES[@]}")
 fi
-[[ "${PAPER1_FULL_GRIDDED:-0}" != "1" ]] || TASK_ARGS+=(--with-gridded)
+[[ "${PAPER1_FULL_GRIDDED:-1}" != "1" ]] || TASK_ARGS+=(--with-gridded)
 "$PYTHON_BIN" -u scripts/96_complete_updated_paper_evidence.py "${TASK_ARGS[@]}"
