@@ -57,9 +57,9 @@ class PaperEvaluationTests(unittest.TestCase):
                 "group": "v2_bmd_bwdb_superob_winner",
                 "analysis_sampler_n_steps": 50, "analysis_sampler_n_corrections": 2,
                 "analysis_sampler_heun": True,
-                "config_overrides": ["observations.imerg.factor=8",
-                                     "observations.imerg.error_corr_cells=0.75",
-                                     "observations.gauges.representativeness=0.45"],
+                "config_overrides": ["observations.imerg.factor: 8 -> 8",
+                                     "observations.imerg.error_corr_cells: 0.75 -> 0.75",
+                                     "observations.gauges.representativeness: 0.25 -> 0.45"],
             },
             "variants": {self.method: {"spec": self.profile["expected_spec"]}},
         }
@@ -104,6 +104,33 @@ class PaperEvaluationTests(unittest.TestCase):
         report = copy.deepcopy(self.report)
         report["variants"][self.method]["spec"]["secondary_r_multiplier"] = 1.0
         with self.assertRaisesRegex(ValueError, "secondary_r_multiplier"):
+            self.validate(report=report)
+
+    def test_archived_overrides_and_cli_entries_have_identical_effective_values(self):
+        expected = {
+            "observations.imerg.factor": 8,
+            "observations.imerg.error_corr_cells": 0.75,
+            "observations.gauges.representativeness": 0.45,
+        }
+        self.assertEqual(PAPER.normalize_overrides(self.report["scope"]["config_overrides"]), expected)
+        self.assertEqual(PAPER.normalize_overrides([f"{key}={value}" for key, value in expected.items()]), expected)
+        self.assertEqual(PAPER.normalize_overrides(expected), expected)
+        self.assertEqual(PAPER.normalize_overrides([
+            {"path": key, "value": value} for key, value in expected.items()]), expected)
+        self.validate()
+
+    def test_override_parser_handles_duplicates_and_rejects_malformed_records(self):
+        self.assertEqual(PAPER.normalize_overrides([
+            "observations.imerg.factor: 8 -> 4", "observations.imerg.factor: 4 -> 8"]),
+            {"observations.imerg.factor": 8})
+        for malformed in (["observations.imerg.factor"], [{"path": "x"}], "x=8"):
+            with self.assertRaisesRegex(ValueError, "override"):
+                PAPER.normalize_overrides(malformed)
+
+    def test_changed_recorded_footprint_is_still_rejected(self):
+        report = copy.deepcopy(self.report)
+        report["scope"]["config_overrides"][0] = "observations.imerg.factor: 8 -> 4"
+        with self.assertRaisesRegex(ValueError, "S04 factor"):
             self.validate(report=report)
 
     def test_rejects_incomplete_dates_and_synthetic_withheld_nodes(self):
@@ -181,6 +208,8 @@ class PaperEvaluationTests(unittest.TestCase):
         second_dump["station_lat"][3] += 0.01
         second_report = copy.deepcopy(self.report)
         second_report["scope"].update(start="2023-06-01", end="2023-06-30")
+        second_report["scope"]["config_overrides"][0] = "observations.imerg.factor: 4 -> 8"
+        second_report["scope"]["config_overrides"][2] = "observations.gauges.representativeness: 0.25 -> 0.60"
         np.savez(self.root / "evaluation/2023_may_sep.npz", **second_dump)
         (self.root / "evaluation/2023_may_sep.json").write_text(json.dumps(second_report))
         data, _, _, _ = PAPER.load_samples(self.root, list(self.contract["periods"]),

@@ -10,6 +10,7 @@ standard library and reports missing inputs without producing skill scores.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import hashlib
 import importlib.util
@@ -101,6 +102,53 @@ def scoring_module():
     return module
 
 
+def normalize_overrides(recorded):
+    """Read effective values from the DA writer's ``path: old -> new`` log.
+
+    Older/handmade reports may instead use CLI ``path=value`` strings, a
+    mapping, or structured ``{path, value}`` entries. Comparisons use the final
+    values, not the previous configuration values printed in the audit log.
+    Repeated assignments follow the writer's last-assignment-wins behaviour.
+    """
+    def scalar(value):
+        if not isinstance(value, str):
+            return value
+        try:
+            return ast.literal_eval(value.strip())
+        except (ValueError, SyntaxError):
+            try:
+                return json.loads(value.strip())
+            except json.JSONDecodeError:
+                return value.strip()
+
+    if recorded is None:
+        return {}
+    if isinstance(recorded, dict):
+        entries = recorded.items()
+    elif isinstance(recorded, list):
+        parsed = []
+        for entry in recorded:
+            if isinstance(entry, dict) and "path" in entry and "value" in entry:
+                parsed.append((entry["path"], entry["value"]))
+            elif isinstance(entry, str) and ":" in entry and " -> " in entry:
+                path, transition = entry.split(":", 1)
+                _, value = transition.split(" -> ", 1)
+                parsed.append((path, value))
+            elif isinstance(entry, str) and "=" in entry:
+                parsed.append(entry.split("=", 1))
+            else:
+                raise ValueError(f"unrecognized archived configuration override: {entry!r}")
+        entries = parsed
+    else:
+        raise ValueError("config_overrides must be a mapping or a list of recorded assignments")
+    result = {}
+    for path, value in entries:
+        if not isinstance(path, str) or not path.strip() or any(c.isspace() for c in path.strip()):
+            raise ValueError(f"invalid archived configuration override path: {path!r}")
+        result[path.strip()] = scalar(value)
+    return result
+
+
 def validate_fold(dump, report, contract, profile, period, fold, methods):
     import numpy as np
 
@@ -136,7 +184,7 @@ def validate_fold(dump, report, contract, profile, period, fold, methods):
         if spec.get(key) != value:
             raise ValueError(f"{period}/fold{fold}: method setting {key} differs")
     # All other method settings must also agree across files (checked by loader).
-    overrides = dict(item.split("=", 1) for item in scope.get("config_overrides", []))
+    overrides = normalize_overrides(scope.get("config_overrides"))
     if float(overrides.get("observations.imerg.factor", -1)) != contract["imerg_factor"]:
         raise ValueError("scope must explicitly record the frozen S04 factor")
     if float(overrides.get("observations.imerg.error_corr_cells", -1)) != 0.75:
@@ -192,9 +240,9 @@ def load_samples(root, periods, contract, profile, methods):
                              ("checkpoint", "checkpoint_data", "checkpoint_stats", "seed",
                               "precip_transform", "group", "analysis_sampler_n_steps",
                               "analysis_sampler_n_corrections", "analysis_sampler_heun")}
-                signature["config_overrides"] = sorted(
-                    item for item in scope.get("config_overrides", [])
-                    if not item.startswith("observations.gauges.representativeness="))
+                signature["config_overrides"] = {
+                    key: value for key, value in normalize_overrides(scope.get("config_overrides")).items()
+                    if key != "observations.gauges.representativeness"}
                 if reference is None:
                     reference, reference_spec = signature, method_spec
                 elif signature != reference or method_spec != reference_spec:
