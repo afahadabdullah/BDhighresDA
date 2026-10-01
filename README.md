@@ -7,7 +7,7 @@ SURMA-Flow is a conditional, rectified-flow generative model and score-guided
 data-assimilation framework for daily high-resolution rainfall analysis. The
 current **SURMA-Flow v1.0** prior learns fine-scale rainfall structure from
 historical CPC, ERA5, and CHIRPS. At analysis time, the frozen prior is guided
-jointly by BMD rain gauges and GPM IMERG V07B satellite accumulations to
+jointly by BMD/BWDB rain gauges and GPM IMERG V07B satellite accumulations to
 generate a stochastic ensemble rather than a deterministic interpolation.
 
 This repository, `BDhighresDA`, is the development and reproducibility codebase
@@ -24,6 +24,14 @@ The **final learned model is CPCv2**, the conditional rectified-flow U-Net in
 combines 0.25° gauge super-observations with `dense_s6_bwdb_r4`, S04 (0.4°)
 IMERG and 30 members. The original BMD-only `v2_simul_s04_ig010` archive remains
 the five-fold reference. These observation contracts share the CPCv2 prior.
+
+![SURMA-Flow Figure 1: training a conditional rectified-flow prior, then daily observation-guided rainfall sampling and withheld-gauge verification](docs/figures/surma_flow_overview.png)
+
+*Figure 1 from the model paper.* The prior learns from CPC/ERA5 predictors and
+CHIRPS targets during 1981–2018. Daily sampling freezes the model weights and
+combines BMD/BWDB gauge super-observations with IMERG area means to produce
+30-member rainfall ensembles. Verification uses original gauges excluded from
+assimilation; 132 unique withheld sites occur across the test-period layouts.
 
 The first paper focuses on model description and generated test-year
 evaluation. The 2000–2025 historical product and its paper are subsequent work.
