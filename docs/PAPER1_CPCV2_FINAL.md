@@ -109,39 +109,70 @@ trajectories. The new paper tables therefore assess deterministic monthly and
 seasonal means, without claiming ensemble CRPS or coverage for accumulated
 rainfall. Posterior daily spread and temporal variability are distinct.
 
-## Existing manuscript and revision plan
+## Manuscript and completed result exports
 
-An existing draft is `manuscript/BDhighresDA_arxiv.tex`, revised 2026-08-02;
-the original backup is `BDhighresDA_arxiv_v1_original.tex`. The current draft
-centres on OSSEs and a May 2018 process experiment inside the training period,
-and reports a provisional gauge-only selection. It predates the final CPCv2
-assimilation contracts. Its scores and conclusions cannot be carried into
-the new abstract or headline results without checking the generated artifacts.
-`manuscript/REVIEW_AND_NEXT_STEPS.md` is the corresponding historical review.
+`manuscript/BDhighresDA_arxiv.tex` was rewritten on 2026-10-01 as the CPCv2
+model-paper preprint. It follows the broad organization of Manshausen et al.
+(arXiv:2406.16947v3), with the project's own methods and completed test-period
+results. `manuscript/BDhighresDA_arxiv_pre_CPCv2.tex` preserves the preceding
+August draft, which centred on older OSSE and May 2018 process experiments.
+`manuscript/REVIEW_AND_NEXT_STEPS.md` remains a historical review.
 
-Proposed first-paper title: **SURMA-Flow: conditional rectified-flow rainfall
+The completed HPC exports are copied to `paper1_cpcv2/superob-final/` in the
+project root. They score 29,615 station-days on 489 non-selection dates;
+fair CRPS is 8.775 for background and 6.263 for the selected analysis.
+The new manuscript reports intensity-dependent failures and undercoverage
+alongside the pooled gain. Its vector figures are reproduced with
+`scripts/91_build_cpcv2_paper1_figures.py`; preparation notes and remaining
+provenance/author decisions are in `manuscript/PAPER1_PREPARATION_NOTES.md`.
+
+First-paper title: **SURMA-Flow: conditional rectified-flow rainfall
 downscaling and observation assimilation over Bangladesh**.
 
-Reuse the draft's broad organization and equation derivations after checking
-them against the final sampler. Rewrite the model/data, observation-contract,
-experiment, abstract and results sections around the final CPCv2 model. Replace
-old May 2018 headline numbers with audited test-year outputs. Retain OSSEs as
-supporting operator diagnostics only where their checkpoint and settings are
-explicitly identified. Add a domain/network map, independent daily scores,
-source/intensity and calibration panels, monthly/seasonal means, spatial
-structure, an extreme test-year case and measured compute.
+The rewritten draft describes the final sampler and replaces old May 2018
+headline numbers with audited test-period scores. It includes daily, source,
+intensity and calibration diagnostics, deterministic temporal means, spatial
+structure and a selected test-period case. Older OSSE numbers are not reused
+as CPCv2 evidence. A network map, new ablations and measured compute can be
+added when supporting records are available.
 
-Before final results: recover selection reports, complete missing archived
-folds/stores, retain the checkpoint weights and their SHA-256 identity,
+Before release or extending the evidence: recover selection reports, complete
+any reference folds needed for claimed comparisons, retain checkpoint weights
+and their SHA-256 identity,
 verify the superob error-budget transform against checkpoint
 stats, and verify actual observation coverage. The current superob preparation
 launcher defaults to `data/processed/stats.json`, whereas CPCv2 names
 `stats_cpc_v2.json`; archived superob manifests do not record that stats path.
-Resolve this provenance gap before making a transformed-error claim. Numerical
-results and confidence intervals are pending until real archives are available.
+Resolve this provenance gap before release or reuse of the transformed-error
+budget. Numerical results and confidence intervals are now available for the
+final profile; the copied BMD-reference folder still contains only an audit.
 Compare practical non-generative baselines using the same withheld stations,
 and record gauge overlap in upstream products as a limitation where unknown.
 
 For the later 2000–2025 production, also audit the IMERG start date and changing
 BMD/BWDB availability. A fixed learned model can accommodate missing observation
 streams, but early years may not have the same observing-system contract.
+
+## Complete draft and pending evidence workflow
+
+The full manuscript now includes eight explicit missing-evidence slots and
+written verification methods. `scripts/92_complete_cpcv2_paper1.py` generates
+calibration, threshold scores, original-gauge IDW comparisons, network maps,
+selection tables, validation curves, measured compute tables and separate
+audited holdout summaries when their actual inputs are supplied. Missing
+inputs remain pending; no synthetic result enters the manuscript.
+
+See [PAPER1_COMPLETION.md](PAPER1_COMPLETION.md) for input schemas, the
+CPU-only Slurm launcher and source-package command. The copied result bundle
+contains summary exports; member-level arrays and original station tables
+remain on the original compute archive.
+
+## Bangladesh-only revision
+
+Verification and map layers now use the snapshotted Bangladesh ADM0 boundary.
+BWDB_CL130 and 214 scored pairs are excluded according to the original
+catalogues; the current recoverable sample is 29,401 station-days at 132
+withheld site IDs. CRPS is 8.768 / 6.258 and RMSE 20.795 / 17.070 mm/day.
+See [PAPER1_BANGLADESH.md](PAPER1_BANGLADESH.md) for source identity, exact
+sufficient-statistic reconstruction, pending raw-array diagnostics and the
+full country-only Slurm rerun. The earlier wider-domain results are preserved.

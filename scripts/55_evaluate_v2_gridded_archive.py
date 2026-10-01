@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -43,8 +44,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bdhires.eval import scale as S  # noqa: E402
+# Load the NumPy-only scale algebra directly: importing bdhires.eval also
+# imports training monitors and requires PyTorch for an otherwise CPU-only
+# saved-archive evaluation.
+_scale_spec = importlib.util.spec_from_file_location(
+    "_paper1_scale", Path(__file__).resolve().parents[1] / "src/bdhires/eval/scale.py")
+S = importlib.util.module_from_spec(_scale_spec)
+sys.modules[_scale_spec.name] = S
+_scale_spec.loader.exec_module(S)
 from bdhires.paper import save_figure, use_paper_style  # noqa: E402
+from bdhires.country import read_boundary, grid_mask, points_inside, map_layer, map_axes
 
 
 FOOTPRINT_FACTOR = 8
@@ -86,6 +95,7 @@ def parse_args() -> argparse.Namespace:
              "default is inferred from each archive's scope.checkpoint_data",
     )
     parser.add_argument("--factor", type=int, default=FOOTPRINT_FACTOR)
+    parser.add_argument("--boundary-geojson", help="restrict all scoring and map layers to this country ADM0")
     parser.add_argument("--texture-members", type=int, default=5,
                         help="evenly spaced members used for spectra/variograms")
     parser.add_argument("--minimum-block-valid", type=float, default=1.0)
@@ -441,6 +451,18 @@ def load_archive(paths: list[Path], factor: int) -> dict:
         "imerg": imerg,
         "imerg_coarse": imerg_coarse,
     }
+
+
+def restrict_archive_country(archive, boundary):
+    country, region = read_boundary(boundary)
+    mask = grid_mask(archive["lat"], archive["lon"], country) & archive["valid"]
+    if not mask.any():
+        raise ValueError("no valid grid centres inside Bangladesh")
+    region["scored_grid_cells"] = int(mask.sum())
+    archive["country"], archive["valid"] = country, mask
+    for key in ("mean", "spread", "chirps", "cpc", "imerg"):
+        archive[key] = np.where(mask, archive[key], np.nan)
+    return region
 
 
 def load_spatial_comparison(paths: list[Path], method: str, archive: dict, label: str) -> dict:
@@ -1077,7 +1099,7 @@ def required_heldout_files(layout: str) -> int:
 
 
 def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
-                             cv_root: Path | None, cv_layout: str) -> tuple[list[dict], list[dict]]:
+                             cv_root: Path | None, cv_layout: str, country=None) -> tuple[list[dict], list[dict]]:
     if cv_root is None:
         return [], []
     point_members = {name: [] for name in methods}
@@ -1097,6 +1119,10 @@ def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
             if dump["variant_names"].astype(str).tolist() != methods:
                 raise ValueError(f"{fold_path}: method order differs from Zarr")
             eval_idx = np.asarray(dump["eval_idx"], int)
+            if country is not None:
+                eval_idx = eval_idx[points_inside(dump["station_lat"][eval_idx], dump["station_lon"][eval_idx], country)]
+            if not len(eval_idx):
+                continue
             primary = confirmatory_daily_mask(dump["times"].astype("datetime64[D]"))
             observed = np.asarray(dump["gauge_mm"][primary][:, eval_idx], float)
             point_truth.append(observed.reshape(-1))
@@ -1162,7 +1188,7 @@ def evaluate_withheld_gauges(paths: list[Path], methods: list[str], factor: int,
 
 def load_withheld_gauge_bundle(
     paths: list[Path], methods: list[str], factor: int, cv_root: Path | None,
-    cv_layout: str,
+    cv_layout: str, country=None,
 ) -> dict | None:
     """Collect every independently withheld station/day exactly once."""
     if cv_root is None:
@@ -1179,6 +1205,10 @@ def load_withheld_gauge_bundle(
                 if dump["variant_names"].astype(str).tolist() != methods:
                     raise ValueError(f"{fold_path}: method order differs from Zarr")
                 eval_idx = np.asarray(dump["eval_idx"], int)
+                if country is not None:
+                    eval_idx = eval_idx[points_inside(dump["station_lat"][eval_idx], dump["station_lon"][eval_idx], country)]
+                if not len(eval_idx):
+                    continue
                 fold_dates = dump["times"].astype("datetime64[D]")
                 fold_stations = dump["station_ids"].astype(str)[eval_idx]
                 observed = np.asarray(dump["gauge_mm"][:, eval_idx], float)
@@ -1244,7 +1274,11 @@ def load_assimilated_gauge_bundle(archive: dict) -> dict:
         station_ids = dataset.station_id.values.astype(str)
         station_lat = np.asarray(dataset.station_lat.values, float)
         station_lon = np.asarray(dataset.station_lon.values, float)
+        select = (points_inside(station_lat, station_lon, archive["country"])
+                  if "country" in archive else np.ones(len(station_ids), bool))
+        station_ids, station_lat, station_lon = station_ids[select], station_lat[select], station_lon[select]
         observed = np.asarray(dataset.gauge.values, float)
+        observed = observed[:, select]
         dates.append(np.repeat(store_dates, len(station_ids)))
         stations.append(np.tile(station_ids, len(store_dates)))
         truth.append(observed.reshape(-1))
@@ -1436,12 +1470,12 @@ def deterministic_metrics(predicted: np.ndarray, observed: np.ndarray) -> dict:
 def evaluate_long_term_withheld_products(
     bundle: dict | None, methods: list[str]
 ) -> tuple[list[dict], list[dict]]:
-    """Compare all model and reference products against withheld BMD gauges.
+    """Compare all model and reference products against original withheld gauges.
 
     ``pooled_daily`` weights every finite station-day equally. ``station_time``
     first scores the daily time series at each station and then summarizes the
-    station scores. ``long_term_mean`` averages each station over all archived
-    confirmatory dates and evaluates the 38-station spatial climatology.
+    station scores. ``long_term_mean`` averages each station over its archived
+    confirmatory dates and evaluates station-mean agreement.
     """
     if bundle is None:
         return [], []
@@ -1515,7 +1549,7 @@ def evaluate_long_term_withheld_products(
             "archive_start": str(dates.min()), "archive_end": str(dates.max()),
             "archive_days": int(len(np.unique(dates))),
             "seasonal_sampling": "May-Sep 2021-2023 plus May-Jun 2024",
-            "selection_dates_excluded": "2022-05-01..2022-05-10",
+            "selection_dates_excluded": f"{SELECTION_START}..{SELECTION_END}",
             "matched_sample_across_all_sources": True,
             "cpc_timing": "same-day original CPC" if source == "cpc" else None,
             "n_stations": int(len(np.unique(stations))),
@@ -1530,6 +1564,84 @@ def evaluate_long_term_withheld_products(
             **{f"long_term_station_mean_{key}": value for key, value in long_term.items()},
         })
     return rows, station_rows
+
+
+def evaluate_withheld_product_strata(bundle: dict | None, methods: list[str]) -> list[dict]:
+    """Compare all products on one daily intersection at original holdouts.
+
+    Temporal rows use means of daily physical-space ensemble means, never
+    ensembles of accumulated rainfall. Missing same-day CPC is an error:
+    the lagged conditioning field cannot silently substitute for it.
+    """
+    if bundle is None:
+        return []
+    if "cpc_same_day" not in bundle["products"]:
+        raise ValueError("withheld product strata require original same-day CPC")
+    dates = np.asarray(bundle["date"]).astype("datetime64[D]")
+    stations = np.asarray(bundle["station"]).astype(str)
+    truth = np.asarray(bundle["truth"], float)
+    predicted = {m: np.asarray(bundle["members"][m], float).mean(axis=1) for m in methods}
+    predicted.update({p: np.asarray(bundle["products"][key], float)
+                      for p, key in (("chirps", "chirps"), ("imerg", "imerg"), ("cpc", "cpc_same_day"))})
+    keys = np.char.add(np.char.add(dates.astype(str), "|"), stations)
+    if len(np.unique(keys)) != len(keys):
+        raise ValueError("duplicate original withheld station-day")
+    primary = confirmatory_daily_mask(dates)
+    common = primary & np.isfinite(truth)
+    for values in predicted.values():
+        common &= np.isfinite(values)
+    if not common.any():
+        raise ValueError("no common finite withheld sample across all five methods")
+    input_n = int((primary & np.isfinite(truth)).sum())
+    dates, stations, truth = dates[common], stations[common], truth[common]
+    predicted = {m: v[common] for m, v in predicted.items()}
+    networks = np.where(np.char.startswith(stations, "BWDB_"), "BWDB", "BMD")
+    rows = []
+
+    def score(group, label, choose, observed=truth, values=predicted):
+        if not np.any(choose):
+            return
+        for source, field in values.items():
+            rows.append({"group": group, "label": label, "source": source,
+                         "primary_truth_n": input_n, "matched_daily_n": len(truth),
+                         "daily_sample_attrition": input_n - len(truth),
+                         **deterministic_metrics(field[choose], observed[choose])})
+
+    score("pooled", "all", np.ones(len(truth), bool))
+    for network in ("BMD", "BWDB"):
+        score("network", network, networks == network)
+    for year in np.unique(dates.astype("datetime64[Y]")):
+        score("year", str(year), dates.astype("datetime64[Y]") == year)
+    for low, high, label in ((0, 1, "[0,1)"), (1, 10, "[1,10)"), (10, 25, "[10,25)"),
+                             (25, 50, "[25,50)"), (50, 100, "[50,100)"), (100, np.inf, "[100,inf)")):
+        score("intensity", label, (truth >= low) & (truth < high))
+    # Evaluate exactly the same eligible station-period groups for all sources.
+    # Eligibility counts matched finite dates, not the wider archive length.
+    for scale in ("monthly", "may_sep"):
+        observed_groups, values_groups = [], {m: [] for m in predicted}
+        period_dates = dates.astype("datetime64[M]" if scale == "monthly" else "datetime64[Y]")
+        for period in np.unique(period_dates):
+            if scale == "monthly":
+                start = period.astype("datetime64[D]")
+                stop = (period + np.timedelta64(1, "M")).astype("datetime64[D]")
+                required = int(np.ceil(.8 * int((stop - start) / np.timedelta64(1, "D"))))
+            else:
+                start, stop = np.datetime64(str(period) + "-05-01"), np.datetime64(str(period) + "-10-01")
+                required = int((stop - start) / np.timedelta64(1, "D"))
+            calendar = np.arange(start, stop)
+            if not confirmatory_daily_mask(calendar).all():
+                continue
+            for station in np.unique(stations):
+                choose = (stations == station) & (dates >= start) & (dates < stop)
+                if int(choose.sum()) < required:
+                    continue
+                observed_groups.append(float(truth[choose].mean()))
+                for source in predicted:
+                    values_groups[source].append(float(predicted[source][choose].mean()))
+        observed_groups = np.asarray(observed_groups)
+        values_groups = {m: np.asarray(v) for m, v in values_groups.items()}
+        score("temporal", scale, np.ones(len(observed_groups), bool), observed_groups, values_groups)
+    return rows
 
 
 def aggregate_monthly_matrix(rows: list[dict], methods: list[str]) -> list[dict]:
@@ -1756,6 +1868,14 @@ def _source_label(name: str) -> str:
     return name.replace("v2_simul_s04_", "").replace("v2_", "")
 
 
+def geographic_image(axis, field, archive, **kwargs):
+    if "country" in archive:
+        return map_layer(axis, field, archive["lat"], archive["lon"], archive["country"], **kwargs)
+    lat, lon = archive["lat"], archive["lon"]
+    extent = [lon[0], lon[-1], lat[0], lat[-1]]
+    return axis.imshow(field, origin="lower", extent=extent, **kwargs)
+
+
 def plot_monthly_grid_maps(
     grids: dict, archive: dict, kind: str, number: str, out_dir: Path,
     source_paths: list[Path], grid_path: Path, summary_rows: list[dict],
@@ -1778,10 +1898,8 @@ def plot_monthly_grid_maps(
     for row, source in enumerate(sources):
         for column, month in enumerate(months):
             axis = axes[row, column]
-            image = axis.imshow(
-                grids[kind][source][column], origin="lower", extent=extent,
-                vmin=0, vmax=vmax, cmap="YlGnBu", aspect="auto",
-            )
+            image = geographic_image(axis, grids[kind][source][column], archive,
+                                     vmin=0, vmax=vmax, cmap="YlGnBu")
             axis.grid(False)
             if row == 0:
                 axis.set_title(month_names[column])
@@ -1835,10 +1953,8 @@ def plot_seasonal_grid_maps(
             ("seasonal_variability", variability_vmax),
         )):
             axis = axes[row, column]
-            images[row] = axis.imshow(
-                grids[kind][source], origin="lower", extent=extent,
-                vmin=0, vmax=vmax, cmap="YlGnBu", aspect="auto",
-            )
+            images[row] = geographic_image(axis, grids[kind][source], archive,
+                                          vmin=0, vmax=vmax, cmap="YlGnBu")
             axis.grid(False); axis.set_xticks([]); axis.set_yticks([])
             if row == 0:
                 axis.set_title(_source_label(source), fontsize=7)
@@ -2140,14 +2256,10 @@ def plot_subgrid_case(archive: dict, factor: int, out_dir: Path,
     table = []
     lon_grid, lat_grid = np.meshgrid(archive["lon"], archive["lat"])
     for column, (name, field) in enumerate(fields.items()):
-        first = axes[0, column].imshow(
-            np.where(archive["valid"], field, np.nan), origin="lower",
-            vmin=0, vmax=full_max, cmap="Blues",
-        )
-        second = axes[1, column].imshow(
-            np.where(mask, residuals[name], np.nan), origin="lower",
-            vmin=-residual_max, vmax=residual_max, cmap="RdBu",
-        )
+        first = geographic_image(axes[0, column], np.where(archive["valid"], field, np.nan),
+                                 archive, vmin=0, vmax=full_max, cmap="Blues")
+        second = geographic_image(axes[1, column], np.where(mask, residuals[name], np.nan),
+                                  archive, vmin=-residual_max, vmax=residual_max, cmap="RdBu")
         axes[0, column].set_title(name, fontsize=7)
         axes[0, column].set_xticks([]); axes[0, column].set_yticks([])
         axes[1, column].set_xticks([]); axes[1, column].set_yticks([])
@@ -2212,12 +2324,12 @@ def plot_prior_production_spatial_comparison(
     mean_image = difference_image = residual_image = None
     for column, (name, (field, residual)) in enumerate(panels.items()):
         if column < 2:
-            top = axes[0, column].imshow(np.where(archive["valid"], field, np.nan), origin="lower", vmin=0, vmax=full_max, cmap="Blues")
+            top = geographic_image(axes[0, column], np.where(archive["valid"], field, np.nan), archive, vmin=0, vmax=full_max, cmap="Blues")
             mean_image = top
         else:
-            top = axes[0, column].imshow(np.where(archive["valid"], field, np.nan), origin="lower", vmin=-difference_max, vmax=difference_max, cmap="RdBu")
+            top = geographic_image(axes[0, column], np.where(archive["valid"], field, np.nan), archive, vmin=-difference_max, vmax=difference_max, cmap="RdBu")
             difference_image = top
-        bottom = axes[1, column].imshow(np.where(mask, residual, np.nan), origin="lower", vmin=-residual_max, vmax=residual_max, cmap="RdBu")
+        bottom = geographic_image(axes[1, column], np.where(mask, residual, np.nan), archive, vmin=-residual_max, vmax=residual_max, cmap="RdBu")
         residual_image = bottom
         axes[0, column].set_title(name, fontsize=8)
         for axis in axes[:, column]:
@@ -2319,6 +2431,9 @@ def main() -> None:
             raise ValueError("--selection-daily-end precedes --selection-daily-start")
     paths = [Path(path) for path in args.zarr]
     archive = load_archive(paths, args.factor)
+    region = None
+    if args.boundary_geojson:
+        region = restrict_archive_country(archive, args.boundary_geojson)
     comparison = (
         load_spatial_comparison(
             [Path(path) for path in args.comparison_zarr], args.comparison_method,
@@ -2326,6 +2441,8 @@ def main() -> None:
         )
         if args.comparison_zarr else None
     )
+    if comparison is not None and "country" in archive:
+        comparison["mean"] = np.where(archive["valid"], comparison["mean"], np.nan)
     same_day_cpc_result = load_same_day_cpc(archive, args.cpc_source_zarr)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2342,10 +2459,10 @@ def main() -> None:
     )
     cv_root = Path(args.cv_root) if args.cv_root else infer_cv_root(paths)
     point_rows, anomaly_rows = evaluate_withheld_gauges(
-        paths, archive["methods"], args.factor, cv_root, args.cv_layout
+        paths, archive["methods"], args.factor, cv_root, args.cv_layout, archive.get("country")
     )
     withheld_bundle = load_withheld_gauge_bundle(
-        paths, archive["methods"], args.factor, cv_root, args.cv_layout
+        paths, archive["methods"], args.factor, cv_root, args.cv_layout, archive.get("country")
     )
     if same_day_cpc_result is not None:
         attach_same_day_cpc_to_withheld_bundle(
@@ -2361,6 +2478,8 @@ def main() -> None:
     long_term_product_rows, long_term_station_rows = (
         evaluate_long_term_withheld_products(withheld_bundle, archive["methods"])
     )
+    withheld_product_strata = (evaluate_withheld_product_strata(withheld_bundle, archive["methods"])
+                              if same_day_cpc_result is not None else [])
     matrix = merge_matrix(
         archive["methods"], product_rows, monthly_matrix_rows, subgrid_rows,
         point_rows, anomaly_rows,
@@ -2382,6 +2501,7 @@ def main() -> None:
     write_rows(
         out_dir / "long_term_withheld_station_scores.csv", long_term_station_rows
     )
+    write_rows(out_dir / "withheld_product_strata.csv", withheld_product_strata)
     write_rows(out_dir / "evaluation_matrix.csv", matrix)
     temporal_grid_path, temporal_grid_summary = save_temporal_grids(
         temporal_grids, archive, out_dir
@@ -2389,6 +2509,7 @@ def main() -> None:
     write_rows(out_dir / "temporal_mean_variability_grid_summary.csv", temporal_grid_summary)
 
     payload = {
+        "evaluation_region": region,
         "design": {
             "zarr_stores": [str(path) for path in paths],
             "start": str(archive["time"].min()),

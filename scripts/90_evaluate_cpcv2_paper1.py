@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from bdhires.country import DEFAULT_BOUNDARY, read_boundary, points_inside
 DEFAULT_CONTRACT = ROOT / "configs/paper1_cpcv2_final.json"
 
 
@@ -40,6 +42,8 @@ def parse_args(argv=None):
     parser.add_argument("--bootstrap", type=int, default=10_000)
     parser.add_argument("--block-days", type=int, nargs="+", default=[3, 7])
     parser.add_argument("--seed", type=int, default=20261001)
+    parser.add_argument("--boundary-geojson", type=Path, default=DEFAULT_BOUNDARY,
+                        help="Bangladesh ADM0 polygon; excludes outside original gauges and grid cells")
     return parser.parse_args(argv)
 
 
@@ -300,6 +304,8 @@ def load_samples(root, periods, contract, profile, methods):
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate withheld station-day across input files")
     data["source"] = np.where(np.char.startswith(data["station"], "BWDB_"), "BWDB", "BMD")
+    data["station_lat"] = np.array([coordinates[s][0] for s in data["station"]])
+    data["station_lon"] = np.array([coordinates[s][1] for s in data["station"]])
     # Pin available weights/stats by content rather than calling a mutable
     # best.pt pathname a permanent scientific identity. No model is loaded.
     for key in ("checkpoint", "checkpoint_stats"):
@@ -312,6 +318,20 @@ def load_samples(root, periods, contract, profile, methods):
         else:
             sources.append({"role": key, **provenance(artifact, True)})
     return data, sources, scopes, warnings
+
+
+def country_samples(data, boundary):
+    """Filter every scoring array on the same strict country membership."""
+    country, region = read_boundary(boundary)
+    keep = points_inside(data["station_lat"], data["station_lon"], country)
+    region.update(original_station_days=len(keep), excluded_station_days=int((~keep).sum()),
+                  excluded_station_ids=sorted(set(data["station"][~keep])),
+                  included_station_ids=sorted(set(data["station"][keep])))
+    if not keep.any():
+        raise ValueError("no original withheld gauges inside Bangladesh")
+    filtered = {key: ({name: values[keep] for name, values in value.items()} if key == "members" else value[keep])
+                for key, value in data.items()}
+    return filtered, region
 
 
 def score_samples(data, methods, profile, scorer, block_days, resamples, seed):
@@ -475,7 +495,8 @@ def run_gridded(args, root, periods, contract, profile, out):
                "--zarr", *map(str, stores), "--cv-root", str(root), "--cv-layout", profile["layout"],
                "--out-dir", str(out / "gridded"), "--factor", str(contract["imerg_factor"]),
                "--selection-daily-start", profile["selection_start"],
-               "--selection-daily-end", profile["selection_end"]]
+               "--selection-daily-end", profile["selection_end"],
+               "--boundary-geojson", str(args.boundary_geojson)]
     if args.cpc_source_zarr:
         command.extend(["--cpc-source-zarr", str(args.cpc_source_zarr)])
     subprocess.run(command, check=True, cwd=ROOT)
@@ -487,6 +508,7 @@ def main(argv=None):
     out = args.out_dir / args.profile
     out.mkdir(parents=True, exist_ok=True)
     audit = inventory(root, periods, profile)
+    audit["required"].append({"path": str(args.boundary_geojson), "present": args.boundary_geojson.is_file()})
     missing = [r["path"] for r in audit["required"] if not r["present"]]
     audit.update(profile=args.profile, method=profile["method"], periods=periods,
                  contract_sha256=sha256(args.contract),
@@ -502,6 +524,8 @@ def main(argv=None):
     methods = list(dict.fromkeys(["background", profile["method"], *args.comparators]))
     scorer = scoring_module()
     data, sources, scopes, warnings = load_samples(root, periods, contract, profile, methods)
+    data, region = country_samples(data, args.boundary_geojson)
+    sources.append(provenance(args.boundary_geojson, True))
     rows, paired, _, counts = score_samples(data, methods, profile, scorer,
                                               args.block_days, args.bootstrap, args.seed)
     temporal = temporal_scores(data, methods, profile)
@@ -510,6 +534,7 @@ def main(argv=None):
     write_csv(out / "temporal_withheld_scores.csv", temporal)
     write_report(out, contract, args.profile, profile, rows, paired, counts)
     payload = dict(status="withheld_evaluation_complete", contract=contract, profile=args.profile,
+                   evaluation_region=region,
                    periods=periods, counts=counts, provenance=sources, archived_contracts=scopes,
                    warnings=warnings, daily_scores=rows, paired_crps=paired,
                    temporal_scores=temporal,

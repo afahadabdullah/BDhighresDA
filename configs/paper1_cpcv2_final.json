@@ -6,18 +6,39 @@
   "training_config": "configs/train_h100_cpc_v2.yaml",
   "checkpoint": "runs/prior_h100_cpc_v2/best.pt",
   "architecture": "unet",
-  "training_years": [1981, 2018],
-  "validation_years": [2019, 2020],
-  "test_years": [2021, 2025],
+  "training_years": [
+    1981,
+    2018
+  ],
+  "validation_years": [
+    2019,
+    2020
+  ],
+  "test_years": [
+    2021,
+    2025
+  ],
   "members": 30,
   "background_day_offset": -1,
   "imerg_factor": 8,
   "imerg_degrees": 0.4,
   "periods": {
-    "2021_may_sep": ["2021-05-01", "2021-09-30"],
-    "2022_may_sep": ["2022-05-01", "2022-09-30"],
-    "2023_may_sep": ["2023-05-01", "2023-09-30"],
-    "2024_may_jun": ["2024-05-01", "2024-06-30"]
+    "2021_may_sep": [
+      "2021-05-01",
+      "2021-09-30"
+    ],
+    "2022_may_sep": [
+      "2022-05-01",
+      "2022-09-30"
+    ],
+    "2023_may_sep": [
+      "2023-05-01",
+      "2023-09-30"
+    ],
+    "2024_may_jun": [
+      "2024-05-01",
+      "2024-06-30"
+    ]
   },
   "profiles": {
     "superob-final": {
@@ -59,7 +80,18 @@
       }
     }
   },
-  "future_product_period": [2000, 2025],
+  "future_product_period": [
+    2000,
+    2025
+  ],
   "paper1_scope": "Model description and evaluation on generated test-year data only",
-  "paper2_scope": "Historical product and evaluation using all available observations"
+  "paper2_scope": "Historical product and evaluation using all available observations",
+  "evaluation_region": {
+    "name": "Bangladesh ADM0",
+    "boundary_geojson": "configs/geography/geoBoundaries-BGD-ADM0.geojson",
+    "boundary_sha256": "b556c52ad47050a751fe58b7e2636fd53fad54178ac73dba0b0d1b449e012e61",
+    "station_rule": "inside polygon with numerical tolerance 1e-9 degrees",
+    "grid_rule": "cell centres inside polygon intersected with model validity",
+    "outside_maps": "white, vector clipped"
+  }
 }

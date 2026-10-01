@@ -21,7 +21,8 @@ export PYTHONPATH="$PWD/src"
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/surma-paper1-${SLURM_JOB_ID}"
 mkdir -p "$MPLCONFIGDIR" logs
 TASK_ARGS=(--profile "${PAPER1_PROFILE:-superob-final}"
-           --out-dir "${PAPER1_OUT:-output/paper1_cpcv2}")
+           --out-dir "${PAPER1_OUT:-output/paper1_cpcv2_bangladesh}"
+           --boundary-geojson "${PAPER1_BOUNDARY:-configs/geography/geoBoundaries-BGD-ADM0.geojson}")
 [[ -z "${PAPER1_ROOT:-}" ]] || TASK_ARGS+=(--root "$PAPER1_ROOT")
 [[ "${PAPER1_GRIDDED:-1}" != "1" ]] || TASK_ARGS+=(--with-gridded)
 [[ -z "${PAPER1_CPC_SOURCE:-}" ]] || TASK_ARGS+=(--cpc-source-zarr "$PAPER1_CPC_SOURCE")

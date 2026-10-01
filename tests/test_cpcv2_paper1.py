@@ -24,6 +24,9 @@ class PaperEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.boundary = self.root / "synthetic-country.geojson"
+        self.boundary.write_text(json.dumps({"type": "Polygon", "coordinates": [
+            [[88, 19], [95, 19], [95, 27], [88, 27], [88, 19]]]}))
         self.contract = json.loads(PAPER.DEFAULT_CONTRACT.read_text())
         self.contract["periods"] = {"2021_may_sep": ["2021-06-01", "2021-06-30"]}
         self.profile = self.contract["profiles"]["superob-final"]
@@ -251,7 +254,7 @@ class PaperEvaluationTests(unittest.TestCase):
         contract_path.write_text(json.dumps(self.contract))
         (self.root / "evaluation/2021_may_sep.json").unlink()
         args = ["--contract", str(contract_path), "--root", str(self.root),
-                "--out-dir", str(self.root / "output")]
+                "--out-dir", str(self.root / "output"), "--boundary-geojson", str(self.boundary)]
         self.assertEqual(PAPER.main(args), 2)
         output = self.root / "output/superob-final"
         self.assertFalse((output / "paper1_evaluation.json").exists())
@@ -263,7 +266,7 @@ class PaperEvaluationTests(unittest.TestCase):
         contract_path.write_text(json.dumps(self.contract))
         self.assertEqual(PAPER.main([
             "--contract", str(contract_path), "--root", str(self.root),
-            "--out-dir", str(self.root / "output"), "--bootstrap", "20"]), 0)
+            "--out-dir", str(self.root / "output"), "--bootstrap", "20", "--boundary-geojson", str(self.boundary)]), 0)
         output = self.root / "output/superob-final"
         result = json.loads((output / "paper1_evaluation.json").read_text())
         self.assertEqual(result["counts"]["scored_station_days"], 60)
