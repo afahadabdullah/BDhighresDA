@@ -1,0 +1,65 @@
+{
+  "model_name": "SURMA-Flow v1.0",
+  "product_name": "BRISHTI-05",
+  "decision_date": "2026-10-01",
+  "status": "CPCv2 selected as final model; publication evaluation pending",
+  "training_config": "configs/train_h100_cpc_v2.yaml",
+  "checkpoint": "runs/prior_h100_cpc_v2/best.pt",
+  "architecture": "unet",
+  "training_years": [1981, 2018],
+  "validation_years": [2019, 2020],
+  "test_years": [2021, 2025],
+  "members": 30,
+  "background_day_offset": -1,
+  "imerg_factor": 8,
+  "imerg_degrees": 0.4,
+  "periods": {
+    "2021_may_sep": ["2021-05-01", "2021-09-30"],
+    "2022_may_sep": ["2022-05-01", "2022-09-30"],
+    "2023_may_sep": ["2023-05-01", "2023-09-30"],
+    "2024_may_jun": ["2024-05-01", "2024-06-30"]
+  },
+  "profiles": {
+    "superob-final": {
+      "root": "data/processed/v2_bmd_bwdb_superob_2021_2024",
+      "method": "dense_s6_bwdb_r4",
+      "layout": "single-holdout",
+      "folds": 1,
+      "selection_start": "2022-05-01",
+      "selection_end": "2022-05-31",
+      "superob_cell_degrees": 0.25,
+      "expected_spec": {
+        "streams": "both",
+        "algorithm": "joint",
+        "prior_temperature": 1.0,
+        "imerg_stride": 1,
+        "huber_delta": 3.0,
+        "gauge_component_spread_cells": 6.0,
+        "gauge_guidance_gamma": 0.01,
+        "imerg_guidance_gamma": 0.001,
+        "secondary_source_prefix": "BWDB_",
+        "secondary_r_multiplier": 4.0
+      }
+    },
+    "bmd-reference": {
+      "root": "data/processed/v2_confirmatory_2021_2024",
+      "method": "v2_simul_s04_ig010",
+      "layout": "five-fold",
+      "folds": 5,
+      "selection_start": "2022-05-01",
+      "selection_end": "2022-05-10",
+      "expected_spec": {
+        "streams": "both",
+        "algorithm": "joint",
+        "prior_temperature": 1.0,
+        "imerg_stride": 1,
+        "gauge_component_spread_cells": 6.0,
+        "gauge_guidance_gamma": 0.01,
+        "imerg_guidance_gamma": 0.01
+      }
+    }
+  },
+  "future_product_period": [2000, 2025],
+  "paper1_scope": "Model description and evaluation on generated test-year data only",
+  "paper2_scope": "Historical product and evaluation using all available observations"
+}

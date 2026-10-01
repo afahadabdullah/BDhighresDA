@@ -18,10 +18,22 @@ over Bangladesh on a 0.05° (about 5 km) grid.
 
 ## SURMA-Flow v1.0
 
-The selected configuration uses simultaneous BMD and 0.4° IMERG guidance and a
-30-member ensemble. Its legacy machine key, `v2_simul_s04_ig010`, is retained
-only in reproducibility metadata. The full model and BRISHTI-05 product
-definition is in [the methodology](docs/METHODOLOGY.md).
+The **final learned model is CPCv2**, the conditional rectified-flow U-Net in
+`configs/train_h100_cpc_v2.yaml` with checkpoint
+`runs/prior_h100_cpc_v2/best.pt`. The latest dense BMD+BWDB assimilation winner
+combines 0.25° gauge super-observations with `dense_s6_bwdb_r4`, S04 (0.4°)
+IMERG and 30 members. The original BMD-only `v2_simul_s04_ig010` archive remains
+the five-fold reference. These observation contracts share the CPCv2 prior.
+
+The first paper focuses on model description and generated test-year
+evaluation. The 2000–2025 historical product and its paper are subsequent work.
+See [the final-model decision and paper evaluation workflow](docs/PAPER1_CPCV2_FINAL.md).
+The [methodology](docs/METHODOLOGY.md) details the original BMD-only contract.
+
+```bash
+python scripts/90_evaluate_cpcv2_paper1.py --audit-only
+python scripts/90_evaluate_cpcv2_paper1.py --with-gridded
+```
 
 | Source | SURMA-Flow role | Not a claim of |
 |---|---|---|

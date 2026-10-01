@@ -1,5 +1,13 @@
 # BRISHTI-05 and SURMA-Flow methodology
 
+**2026-10-01 model decision:** CPCv2 is selected as the final learned model.
+The latest dense BMD+BWDB production profile uses 0.25° super-observations
+and `dense_s6_bwdb_r4`. This document describes the original BMD-only
+`v2_simul_s04_ig010` contract; consult
+[the final-model and first-paper protocol](PAPER1_CPCV2_FINAL.md) for the
+current profile and its separate test-year evaluation. Public release and
+the planned 2000–2025 product remain future milestones.
+
 **BRISHTI-05** is the public name for the Bangladesh daily precipitation
 analysis produced by this repository. It means **Bangladesh Rainfall
 Integration of Satellite, Hydrometeorological, and Terrestrial Information at
