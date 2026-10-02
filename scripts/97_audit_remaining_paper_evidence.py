@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Review the nine remaining gaps from an existing exported evidence folder.
+"""Review completed evidence and remaining gaps from an exported evidence folder.
 
 Reads copied results without overwriting their manifests. Writes a recovery
 checklist and a calendar-extension plan, never fabricated measurements. Can
@@ -31,6 +31,16 @@ def digest(path):
 
 def load_json(path):
     return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def default_evidence():
+    # Prefer the returned v2 results over the earlier, incomplete export.
+    for relative in ('paper1_updated_evidence_v2', 'output/paper1_updated_evidence_v2',
+                     'paper1_updated_evidence', 'output/paper1_updated_evidence'):
+        path = ROOT/relative
+        if load_json(path/'evidence_manifest.json').get('status') == 'matched_product_scores_complete':
+            return path
+    return ROOT/'paper1_updated_evidence_v2'
 
 
 def manifest_artifact(folder, manifest, name):
@@ -117,24 +127,31 @@ def review(export):
     return [
         {'item':1,'evidence':'Native 0.1-degree IMERG','status':'generated' if native else 'prepared_native_files_required','next':'Supply PAPER1_NATIVE_IMERG_LIST; rerun script 96. Do not substitute assimilated 0.4-degree IMERG.'},
         {'item':2,'evidence':'Upstream verification-gauge overlap','status':'documented_overlap_available_nonmatches_unknown' if statuses.get('confirmed_overlap_on_dated_inventory') else 'dated_provider_inventories_required','status_counts':statuses,'next':'Supply documented provider/version inventories and ID crosswalks; absence is not proof of non-use.'},
-        {'item':3,'evidence':'Paired IDW interval and intensity gains','status':'generated' if paired else 'daily_model_means_export_required','next':'Rerun updated script 92 from original arrays; it now exports daily model means and both comparisons.'},
+        {'item':3,'evidence':'Paired IDW interval and intensity gains','status':'generated' if paired else 'daily_model_means_export_required','next':'Use the verified additional/paired_idw_intervals.csv and idw_intensity_scores.csv.' if paired else 'Rerun updated script 92 from original arrays; it exports daily model means and both comparisons.'},
         {'item':4,'evidence':'Sub-0.4-degree withheld skill','status':'outputs_available_require_scientific_review' if grid_verified else 'gridded_outputs_missing','archive_present_in_hpc_audit':primary.get('availability',{}).get('BD2_full_gridded_archive',False),'next':'PAPER1_FULL_GRIDDED=1 with the CPU launcher; copy evaluation/superob-final/gridded and retain its hashes.'},
         {'item':5,'evidence':'May 2022 profile selection','status':'generated' if manifest_artifact(export/'additional',child,'selection_scores.csv') else 'saved_selection_experiments_required','next':'Use --discover-selection-root on actual profiles, then script 92 --selection; only matched original May arrays establish a ranking.'},
         {'item':6,'evidence':'Compute and evaluated checkpoint epoch','compute_status':'generated' if manifest_artifact(export/'additional',child,'compute_summary.csv') else 'measured_stage_timings_required','epoch_status':checkpoint.get('status','checkpoint_metadata_required'),'next':'Script 96 reads epoch from the hash-verified checkpoint. Supply checkpoint-linked measured timings; validation-curve minimum is not checkpoint identity.'},
         {'item':7,'evidence':'Five-fold BMD and sparse holdouts','status':'comparison_available_needs_design_review' if manifest_artifact(export/'additional',child,'robustness_scores.csv') else 'complete_original_fold_archives_required','next':'Audit/run script 90 --profile bmd-reference. Missing folds require generation. Sparse-network experiments need their own frozen contracts and audited outputs.'},
         {'item':8,'evidence':'Historical preparation statistics','status':'recorded_at_original_preparation' if historical else 'historical_identity_unresolved','next':'Recover original executed logs or archived hashes. New script 87 records the actual transform/hash prospectively; never rewrite old provenance as if measured then.'},
-        {'item':9,'evidence':'Remaining 2021-2025 dates','status':'archive_extension_required','next':'Review test_extension_plan.json and remote inventory; missing dates require new preparation and sampling.'}]
+        {'item':9,'evidence':'Remaining 2021-2025 dates','status':'archive_extension_required','next':'Review test_extension_plan.json and remote inventory; missing dates require new preparation and sampling. This extends the current paper scope; it is not a missing result for the 489 scored dates.'},
+        {'item':10,'slot':'KR','evidence':'Probabilistic interpolation baseline','status':'baseline_experiment_required','next':'Script 98 --prepare-baseline-inputs exports retained-only daily inputs and separate withheld verification arrays. Fit/tune uncertainty without test holdouts; run and validate the baseline before adding scores. Deterministic IDW CRPS is not this comparison.'},
+        {'item':11,'slot':'META','evidence':'Funding, computing acknowledgement and public release','status':'author_and_release_metadata_required','next':'Fill publication_metadata.template.json from actual award/allocation records and public release identifiers. Local result folders are not public repository deposits.'}]
 
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--evidence-dir',type=Path,default=ROOT/'paper1_updated_evidence')
+    p.add_argument('--evidence-dir',type=Path,default=default_evidence())
     p.add_argument('--out-dir',type=Path,default=ROOT/'output/paper1_remaining_evidence')
     p.add_argument('--contract',type=Path,default=ROOT/'configs/paper1_cpcv2_final.json')
     p.add_argument('--discover-selection-root',type=Path,help='actual directory of saved profile .npz/.json pairs')
     p.add_argument('--checkpoint',type=Path,help='inspect this actual pinned checkpoint in the existing Torch environment')
     p.add_argument('--idw-samples',type=Path,help='new daily IDW/model export; old exports without analysis means are rejected')
-    args=p.parse_args(argv);args.out_dir.mkdir(parents=True,exist_ok=True)
+    args=p.parse_args(argv)
+    if not (args.evidence_dir/'evidence_manifest.json').is_file():
+        p.error('evidence directory must contain evidence_manifest.json; pass --evidence-dir')
+    if args.out_dir.resolve() == args.evidence_dir.resolve():
+        p.error('write the audit to a separate output directory')
+    args.out_dir.mkdir(parents=True,exist_ok=True)
     rows=review(args.evidence_dir);contract=load_json(args.contract)
     report={'source':str(args.evidence_dir),'remaining_items':rows}
     if args.discover_selection_root:

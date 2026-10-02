@@ -1,118 +1,132 @@
-# Nine remaining evidence gaps after the first full-archive rerun
+# Paper 1 evidence audit after the returned v2 evaluation
 
-The returned `paper1_updated_evidence/` folder confirms a completed five-product
-comparison on 29,401 original Bangladesh withheld station-days over 489 dates.
-It contains separate results for 2021–2024, intensity and temporal product
-comparisons, country CRPS intervals, calibration, retained-gauge IDW, network
-geometry and the validation history. It has no generated gridded output directory.
-The following gaps remain; a present input is not a completed result.
+The latest local manuscript is `manuscript/BDhighresDA_arxiv.tex`. The verified
+`paper1_updated_evidence_v2/` export covers **29,401 Bangladesh withheld
+station-days, 132 gauges, and 489 independent dates over all four available
+2021–2024 periods**. All of May 2022 is excluded from scored results.
 
-## Immediate saved-data recovery on PRISM
+## Already available: do not regenerate these just to fill the paper
 
-After pulling the updated scripts, run from the repository root:
+- Daily, annual, intensity and temporal comparisons with CPC, CHIRPS and 0.4° IMERG.
+- Paired IDW RMSE/MAE intervals and intensity gains in `additional/`.
+- Sub-0.4° results in `evaluation/superob-final/gridded/`.
+- Calibration, network geometry and training validation history.
+- Hash-verified checkpoint identity: completed epoch 40, EMA weights.
+- The configuration table already reports 57,493,729 parameters. This is the
+  implemented architecture count, not a count extracted from checkpoint tensors.
+  ERA5 is sourced at 0.25° and regridded to the 0.05° model grid.
+
+The new collector retained 47 manifest-backed tables and metadata files locally.
+The original gauge CSVs and ensemble NPZs are not in the copied export; they
+must be read on PRISM. Local absence does not establish absence on PRISM.
+
+## Still open in the manuscript
+
+| Slot | Missing evidence | Recovery or new work |
+|---|---|---|
+| WG5 | Native 0.1° IMERG on the same withheld station-days | Supply prepared native files for every period to script 96. Check daily accumulation window/version and report common-sample attrition. |
+| WG4 | Which withheld gauges enter CPC, CHIRPS or IMERG's gauge analysis | Dated provider inventories and station-ID crosswalks. All 396 product–gauge combinations remain unknown; proximity or nonmatches do not establish independence. |
+| P5 | May 2022 profile-selection comparison | Recover original matched profile NPZ/JSON pairs; script 97/98 discovers candidates and script 92 validates and scores them. |
+| P7 | Measured training, background and analysis cost | Executed logs plus Slurm records or a new measured benchmark. Scheduler allocation time alone does not establish stage timing. Epoch is already known. |
+| P8 | BMD-only five-fold reference and sparse-network tests | Recover complete audited experiments or generate missing runs under frozen contracts. Existing distance strata do not replace thinning experiments. |
+| KR | Probabilistic spatial interpolation baseline | Script 98 exports separate retained-only daily inputs and withheld verification ensembles. A specified, fitted and scored probabilistic baseline is still needed; deterministic IDW CRPS is not this result. |
+| PR | Historical statistics used in super-observation preparation | Original executed preparation logs or archived content hashes. Current defaults and prospective manifests cannot prove historical identity. |
+| FP | July–September 2024, 2025 and dry-season verification | Extend the contract and generate missing data after checking remote coverage. There are 1,306 dates outside the present contract: 92 wet-season dates in 2024, 153 in 2025, and 1,061 dry-season dates across 2021–2025. |
+| META | Funding, compute acknowledgement, final author metadata and release/access statements | Author and allocation/award records, plus actual public release identifiers or accurate access statements. A DOI is not mandatory, but a local folder is not a public deposit. |
+
+FP is a scope extension beyond the existing 489-date paper, not evidence that
+some of those available dates were omitted. Claims about a full 2021–2025 or
+all-season evaluation must wait for that extension. Native IMERG, the
+probabilistic baseline, provenance and selection evidence are especially
+important for interpreting the current model comparison.
+
+## Claims that need correction before submission
+
+These are wording/evidence issues, not numbers to invent:
+
+1. Replace “never sees the verification gauges” with exclusion from the direct
+   likelihood and super-observations. CPC/CHIRPS/IMERG can transmit upstream gauge
+   information to SURMA-Flow. Network-level score similarity does not bound that
+   effect or prove independent truth.
+2. A roughly flat validation history does not establish test-score insensitivity
+   to stopping epoch. Report epoch 40 and the validation history; a checkpoint
+   sensitivity claim needs matched evaluation of additional checkpoints.
+3. Lower CRPS than deterministic IDW establishes improvement over that point
+   forecast. It does not establish superiority over probabilistic interpolation
+   until KR is completed. Keep the under-dispersion caveat prominent.
+4. Appendix F says only the last row needs new sampling. Missing P8 experiments
+   can require new sampling too. Other gaps may need new post-processing or
+   provider records.
+5. The data-availability section calls `paper1_updated_evidence_v2` a repository
+   folder, but it is currently untracked. Publish permitted derived outputs or
+   state the actual access arrangement; do not publish restricted gauge data.
+
+## Run the audit locally
+
+```bash
+python scripts/97_audit_remaining_paper_evidence.py
+python scripts/98_collect_paper1_missing_information.py \
+  --evidence-dir paper1_updated_evidence_v2 \
+  --out-dir output/paper1_information_bundle
+```
+
+The audit prefers the completed v2 export, checks result hashes and tracks the
+new KR and publication metadata gaps. Script 98 requires a **new** output
+folder so stale results cannot survive a rerun. Use a different name if the
+bundle already exists. It copies verified CSV/JSON/TeX/Markdown artifacts,
+writes a manifest, a calendar extension plan, and unfilled compute/publication
+metadata templates. These templates are not measurements.
+
+## Collect the missing original inputs on PRISM
 
 ```bash
 mkdir -p logs
-PAPER1_EVIDENCE_OUT=output/paper1_updated_evidence_v2 \
-PAPER1_FULL_GRIDDED=1 \
-sbatch slurm/cpcv2_updated_paper_evidence.sbatch
+sbatch slurm/cpcv2_collect_missing_information.sbatch
 ```
 
-This keeps the first result folder intact, reuses all four saved periods and
-adds the following evidence. It does not generate rainfall or submit GPU jobs.
+This reads the completed v2 export and original archive, validates all four
+periods with script 90, and exports baseline inputs without training or
+sampling. The job-specific destination is `output/paper1_information_JOBID/`.
+Copy that folder back for the next paper update. Override `PAPER1_EVIDENCE_DIR`
+or `PAPER1_ROOT` if the actual directories differ.
 
-| Item | What the updated code does | What still needs original evidence |
-|---|---|---|
-| 3: paired IDW gains | Script 92 exports `analysis_mean_mm` and `background_mean_mm` in `interpolation_station_days.csv`, then generates `paired_idw_intervals.csv`, `idw_intensity_scores.csv`, `tab_idw_paired.tex`, `tab_idw_intensity.tex` | Original withheld ensembles and retained raw gauge CSVs are on PRISM; old IDW exports cannot reconstruct daily model means |
-| 4: sub-0.4-degree skill | The batch launcher now enables the full saved-grid evaluator by default. Script 96 separately records output filenames/hashes and input availability | Saved production stores plus original withheld arrays; copy `evaluation/superob-final/gridded/` back after the run |
-| 6: checkpoint epoch | Script 96 writes `checkpoint_metadata.json`, reading the zero-based epoch and completed epoch from the hash-verified checkpoint | The actual `best.pt`; a plotted CRPS minimum alone cannot establish checkpoint epoch |
-| 8: statistics provenance | Script 87 records the exact bytes' SHA-256, actual path and transform in `stats_provenance` for future preparation | The old manifests remain unrecorded. Recover original execution logs/archived hashes; do not rerun preparation into the old archive or attach today's hash as historical proof |
+For original logs, create a text file with one executed-log path per line and
+set `PAPER1_LOG_LIST`. Set `PAPER1_SELECTION_ROOT` to a directory of actual May
+selection NPZ/JSON pairs. Set `PAPER1_JOB_ID_LIST` to a text file with one numeric
+Slurm job ID per line to retrieve accounting. These are optional; the script
+never infers a measurement from a filename or submits further jobs.
 
-IDW comparison uses the same finite independent station-days for the model and
-IDW, with all May 2022 dates excluded. Paired RMSE and MAE gains use whole-day
-3- and 7-day blocks, resampling all stations on a day together within date-gap
-segments. Nonlinear pooled RMSE is recomputed in every draw; 10,000 resamples
-are used by default. Positive gains favour the model, including when actual
-results favour IDW in some bins. Intensity bins are based on gauge rainfall;
-the bin tables report point estimates and counts, not simultaneous intervals.
-IDW remains deterministic; no invented IDW ensemble or temporal probabilistic
-scores are introduced.
-
-Checkpoint metadata uses restricted `torch.load(..., weights_only=True)` in the
-existing Torch environment; it never instantiates a model or falls back to
-unrestricted loading. `PAPER1_CHECKPOINT` can remap the actual file on PRISM.
-Missing/unsupported metadata remains unresolved, not inferred from training
-history. Measured training/background/analysis cost still needs the original
-stage timings or an explicit benchmark, using the `--compute` schema in
-[PAPER1_COMPLETION.md](PAPER1_COMPLETION.md). `sacct` allocation elapsed time
-by itself cannot separate background and analysis cost for a multi-arm job.
-
-## Other original records and data
-
-1. **Native IMERG.** Supply the actual prepared V07B native 0.1-degree files,
-   half-hourly-derived 24-hour windows ending at 03 UTC. Put one path per line
-   in a list and set `PAPER1_NATIVE_IMERG_LIST`. No files are acquired by the
-   post-processing scripts. The native comparison retains a separate finite
-   intersection so it cannot change the primary five-product scores.
-2. **Provider overlap.** Supply historical product/version station inventories
-   with dated membership and documented local ID crosswalks. The schema and
-   `PAPER1_UPSTREAM_INVENTORIES` are in
-   [PAPER1_UPDATED_EVIDENCE.md](PAPER1_UPDATED_EVIDENCE.md). Proximity candidates
-   and unlisted gauges remain unknown; these do not establish non-use.
-5. **May 2022 selection.** Discover actual saved arrays at their real path:
-
-   ```bash
-   python scripts/97_audit_remaining_paper_evidence.py \
-     --evidence-dir output/paper1_updated_evidence \
-     --discover-selection-root data/processed/v2_dense_gauge_sweep/profiles \
-     --out-dir output/paper1_remaining_evidence
-   ```
-
-   If at least two profiles actually contain `dense_s6_bwdb_r4` on May 2022
-   dates, this writes `selection_candidates.json`. Set
-   `PAPER1_SELECTION=output/paper1_remaining_evidence/selection_candidates.json`
-   for the batch run. Script 92 still checks matching dates, original gauges,
-   statistics, checkpoint, seed and sampler settings before scoring. Discovery
-   alone is not a validated ranking. Profiles using a different arm are not
-   substituted; a five-day sweep must be reported as five days, not a month.
-7. **BMD and sparse holdouts.** First inventory all reference folds:
-
-   ```bash
-   python scripts/90_evaluate_cpcv2_paper1.py --profile bmd-reference --audit-only
-   ```
-
-   Only after all original folds are present, run the same command without
-   `--audit-only`. The existing BMD reference has different guidance, network
-   and selection exclusions; report it separately. Sparse-network experiments
-   require actual original arrays and their own frozen split/settings contract.
-   No sparse results are manufactured from the dense-network summary.
-9. **Remaining calendar dates.** Script 97 writes `test_extension_plan.json`:
-   1,306 dates outside the current 520-day archive contract, including
-   July–September 2024 (92 days), all 2025 (365 days), and the dry-season gaps.
-   This is a plan, not a statement that every remote checkout lacks those dates.
-   Check remote inputs/outputs first, freeze the extension split and configuration,
-   then prepare and sample missing dates into a separate archive. Keep the same
-   selected model and DA profile, record statistics provenance, and generate
-   original withheld-gauge arrays as well as production grids. Score the combined
-   entire test archive, preserving the May 2022 exclusion. Do not replace the
-   original frozen contract silently or retune on the new test dates.
-
-## Audit returned exports without changing them
+Direct invocation supports the same inputs:
 
 ```bash
-python scripts/97_audit_remaining_paper_evidence.py \
-  --evidence-dir paper1_updated_evidence \
-  --out-dir output/paper1_remaining_evidence
+python scripts/98_collect_paper1_missing_information.py \
+  --evidence-dir output/paper1_updated_evidence_v2 \
+  --root data/processed/v2_bmd_bwdb_superob_2021_2024 \
+  --out-dir output/paper1_information_recovery \
+  --prepare-baseline-inputs
 ```
 
-This writes a nine-item JSON/Markdown checklist and the extension plan in a
-separate folder. It checks generated result hashes before calling them available;
-input-store availability never satisfies the gridded-output requirement. On PRISM,
-point `--evidence-dir` at the actual output folder. To recover just IDW comparisons
-from a *new* daily export, use `--idw-samples PATH.csv`; old exports lacking model
-means are rejected. Its original `completion_manifest.json` must accompany it
-and identify the same country boundary and unchanged CSV hash.
-`--checkpoint PATH.pt` reads just the evaluated identity/epoch.
-Do not overwrite the original completed scoring manifest with a local raw-input
-inventory run: copied summaries and locally absent raw files describe different
-availability contexts.
+Add `--logs PATH...`, `--selection-root DIRECTORY`, and/or
+`--accounting-job-ids ID...` using actual records. Log matches retain line
+numbers and source hashes; they remain candidates until attributed to the
+specific checkpoint and stage. A failed collection retains a non-complete
+manifest and must not be used as completed evidence.
+
+The baseline export excludes every original withheld ID from retained inputs,
+uses the Bangladesh polygon, checks archived truth and coordinates against the
+raw CSV, preserves all 30 members, and excludes selection dates. Files ending
+`verification_only.npz` must never be used to fit or tune covariance or variance.
+Missing original files are listed explicitly. There are no synthetic scores.
+
+Fill `compute.template.json` from measured records and pass it to script 92
+`--compute` to generate the P7 table. Review discovered selection candidates
+and pass their configuration to script 92 `--selection`; discovery alone does
+not establish a matched experiment or a winner. The existing script-96 native
+IMERG and upstream inventory inputs are documented in
+[PAPER1_UPDATED_EVIDENCE.md](PAPER1_UPDATED_EVIDENCE.md).
+
+**Keep the collection private:** it can contain original rainfall observations,
+station coordinates and execution-log excerpts. Commit the collector and docs,
+not this bundle. It does not create a kriging result, retrieve unavailable
+provider inventories, recover lost historical provenance, or generate missing
+rainfall ensembles.

@@ -26,6 +26,56 @@ def script(number):
 
 
 class RemainingEvidenceTests(unittest.TestCase):
+    def test_collector_preserves_verified_files_and_rejects_changed_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); source=root/'source'; source.mkdir(); (source/'additional').mkdir()
+            data=source/'scores.csv'; data.write_text('n,rmse\n10,2\n')
+            audit=script(97); collector=script(98)
+            (source/'evidence_manifest.json').write_text(json.dumps({'outputs':[{'path':data.name,'sha256':audit.digest(data)}]}))
+            (source/'additional/completion_manifest.json').write_text('{"outputs":[]}')
+            out=root/'out'; out.mkdir()
+            records=collector.retain_evidence(source,out,audit)
+            self.assertEqual((out/'verified_evidence/scores.csv').read_bytes(),data.read_bytes())
+            self.assertEqual(len(records),3)
+            data.write_text('altered')
+            with self.assertRaisesRegex(ValueError,'changed'):
+                collector.retain_evidence(source,out,audit)
+            with self.assertRaisesRegex(ValueError,'escapes'):
+                collector.safe_artifact(source,'../outside.csv')
+
+    def test_baseline_inputs_cannot_include_withheld_gauges(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp); raw=folder/'raw.csv'; dump=folder/'eval.npz'
+            raw.write_text('station_id,lat,lon,date,precip_mm\nR,23,90,2021-05-01,10\nW,23.1,90,2021-05-01,12\nOUT,0,0,2021-05-01,8\n')
+            np.savez(dump,station_ids=np.array(['W','OUT']),eval_idx=np.array([0,1]),station_lat=np.array([23.1,0.]),station_lon=np.array([90.,0.]))
+            helper=script(92); collector=script(98)
+            data={'period':np.array(['period']), 'date':np.array(['2021-05-01']),
+                  'station':np.array(['W']), 'truth':np.array([12.]),
+                  'members':{helper.FINAL:np.ones((1,30)), 'background':np.zeros((1,30))}}
+            with patch.object(collector,'points_inside',side_effect=lambda lat,lon,country:lat>20):
+                inputs, targets=collector.baseline_period(data,np.array([True]),'period',raw,dump,{},helper)
+                self.assertEqual(inputs['station_ids'].tolist(),['R'])
+                self.assertEqual(targets['station_ids'].tolist(),['W'])
+                self.assertEqual(targets['analysis_members_mm'].shape,(1,30))
+                self.assertNotIn('truth_mm',inputs)
+                data['truth'][0]=999
+                with self.assertRaisesRegex(ValueError,'rainfall differ'):
+                    collector.baseline_period(data,np.array([True]),'period',raw,dump,{},helper)
+
+    def test_collector_logs_are_candidates_not_measurements(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp); log=folder/'job.out'
+            log.write_text('Starting\n--stats original/stats.json\nelapsed 20 seconds\n')
+            records=script(98).log_evidence([log],folder,script(97))
+            value=json.loads((folder/records[0]['path']).read_text())
+            self.assertEqual([r['line'] for r in value['matches']],[2,3])
+            self.assertEqual(value['status'],'candidate_requires_stage_and_run_attribution')
+
+    def test_review_tracks_new_baseline_and_publication_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rows=script(97).review(Path(temp))
+            self.assertEqual({r.get('slot') for r in rows if r['item']>9},{'KR','META'})
+
     def test_idw_interval_and_intensity_share_daily_means(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);mod=script(92)
