@@ -75,6 +75,25 @@ def difference(a, b, mask):
             "within_0.001_mm_day": int((np.abs(delta) <= .001).sum())}
 
 
+def error_encoding_diagnostics(native_error, sum_squared, mask):
+    """Test a numerical encoding hypothesis; never substitute it into assimilation."""
+    valid = mask & np.isfinite(native_error) & np.isfinite(sum_squared)
+    valid &= (native_error >= 0) & (sum_squared >= 0)
+    raw, squared = native_error[valid], sum_squared[valid]
+    agrees = np.isclose(raw, squared, rtol=1e-5, atol=1e-4)
+    positive = squared > 0
+    return {"hypothesis": "native daily randomError numerically equals sum(half-hourly error rates squared)",
+            "valid_cells": int(valid.sum()), "matching_cells": int(agrees.sum()),
+            "all_cells_match": bool(len(raw) and agrees.all()),
+            "relative_tolerance": 1e-5, "absolute_tolerance_raw_units": 1e-4,
+            "max_abs_raw_difference": float(np.abs(raw - squared).max()) if len(raw) else None,
+            "raw_to_sum_squared_ratio": distribution(raw[positive] / squared[positive]),
+            "candidate_quadrature_from_daily_vs_halfhourly_mm_day": difference(
+                .5 * np.sqrt(np.maximum(native_error, 0)), .5 * np.sqrt(np.maximum(sum_squared, 0)), valid),
+            "candidate_definition": "0.5 hours * sqrt(native daily randomError), ONLY if sum-squared encoding is verified",
+            "scope": "Empirical check for this day/region/product only; not a production conversion or independent calibration."}
+
+
 def compare(day, daily_raw, halfhourly, output):
     day = date.fromisoformat(day)
     # The discovery helper labels windows by their END date. End at midnight
@@ -120,6 +139,7 @@ def compare(day, daily_raw, halfhourly, output):
     error_valid = native["randomError"] >= 0
     if "randomError_cnt" in native:
         error_valid &= native["randomError_cnt"] == 48
+    encoding = error_encoding_diagnostics(native["randomError"], squared_errors, error_valid & (e_count == 48))
     summary = {
         "utc_day": day.isoformat(), "region": "BD model box and halo, native 0.1 degree grid",
         "half_hourly_files": 48,
@@ -135,6 +155,7 @@ def compare(day, daily_raw, halfhourly, output):
         "rainfall_daily_vs_half_hourly_total_mm_day": difference(native["precipitation"], halfhour_total, rain_valid),
         "error_daily_vs_half_hourly_quadrature_mm_day": difference(native["randomError"], quadrature, error_valid),
         "error_daily_vs_documented_daily_formula_mm_day": difference(native["randomError"], documented_daily_error, error_valid),
+        "error_encoding_check": encoding,
         "half_hourly_error_distribution_mm_day": distribution(quadrature),
         "half_hourly_files_detail": halfhour_records,
         "interpretation": "Same UTC window, V07B Final product, regional cells and rainfall units. "
@@ -148,8 +169,14 @@ def compare(day, daily_raw, halfhourly, output):
               "documented_daily_error": documented_daily_error}
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    xr.Dataset({name: (("lat", "lon"), values, {"units": "mm/day"}) for name, values in fields.items()},
-               coords={"lat": lat, "lon": lon}, attrs={"utc_day": day.isoformat()}).to_netcdf(output / "fields.nc")
+    dataset = xr.Dataset({name: (("lat", "lon"), values, {"units": "mm/day"}) for name, values in fields.items()},
+                         coords={"lat": lat, "lon": lon}, attrs={"utc_day": day.isoformat()})
+    dataset["half_hourly_sum_squared_error_rates"] = (("lat", "lon"),
+        np.where(e_count == 48, squared_errors, np.nan), {"units": "(mm/hour)^2"})
+    dataset["candidate_quadrature_from_daily"] = (("lat", "lon"),
+        np.where(error_valid, .5 * np.sqrt(np.maximum(native["randomError"], 0)), np.nan),
+        {"units": "mm/day", "status": "hypothesis only; not applied to pilot or production"})
+    dataset.to_netcdf(output / "fields.nc")
     (output / "comparison.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     lines = [f"# Native daily vs 48 half-hourly IMERG: {day} UTC", "", summary["interpretation"], "",
              "Differences are native daily minus half-hourly-derived; rainfall is in mm/day.", "",
@@ -164,6 +191,13 @@ def compare(day, daily_raw, halfhourly, output):
     lines += ["", "Rainfall cells agreeing within 0.001 mm/day: " + str(
         summary["rainfall_daily_vs_half_hourly_total_mm_day"]["within_0.001_mm_day"]),
         "", "Native daily randomError (mm/day): " + json.dumps(summary["native_distributions"]["randomError"]),
+        "", "Sum-squared encoding hypothesis: " + str(encoding["matching_cells"]) + "/" +
+        str(encoding["valid_cells"]) + " cells agree that daily raw error = sum(half-hourly error rates squared) "
+        "(rtol 1e-5; atol 1e-4 in raw units).",
+        "", "Candidate 0.5 * sqrt(daily raw error) vs half-hourly quadrature (mm/day): " +
+        json.dumps(encoding["candidate_quadrature_from_daily_vs_halfhourly_mm_day"]),
+        "", "This candidate is diagnostic only and has not been applied to assimilation. "
+        "Agreement for one day does not establish the encoding for the full archive.",
         "", "See comparison.json for native metadata, valid counts and error distributions."]
     (output / "comparison.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))

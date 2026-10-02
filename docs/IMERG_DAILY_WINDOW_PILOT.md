@@ -249,6 +249,16 @@ quadrature and a reconstruction of the distinct daily formula documented in
 the [NASA dataset catalogue](https://data.nasa.gov/dataset/gpm-imerg-final-precipitation-l3-1-day-0-1-degree-x-0-1-degree-v07-gpm-3imergdf-at-ges-dis-13ed8).
 Agreement of rainfall does not imply agreement of these error definitions.
 
+The direct comparison also checks the hypothesis that the native daily
+`randomError` numerically contains `sum(half-hourly error rates squared)`.
+It reports cellwise agreement (relative tolerance 1e-5; absolute 1e-4 in
+raw units) and compares the diagnostic candidate `0.5 * sqrt(daily raw error)`
+against the half-hourly quadrature. This candidate has physical error-depth
+units only if that numerical encoding is verified; it is never substituted
+into assimilation by this script. Agreement must be checked over additional
+dates before defining a conversion for the daily archive. The daily field's
+declared units and the NASA documented RMS formula are still recorded.
+
 To audit the original GPU pilot's raw and coarsened errors without resampling:
 
 ```bash

@@ -69,6 +69,7 @@ class DirectImergComparisonTests(unittest.TestCase):
             self.assertEqual(result["error_count_mismatches"], 0)
             self.assertLess(result["error_daily_vs_documented_daily_formula_mm_day"]["mae"], 1e-10)
             self.assertGreater(result["error_daily_vs_half_hourly_quadrature_mm_day"]["mae"], .1)
+            self.assertFalse(result["error_encoding_check"]["all_cells_match"])
             self.assertEqual(result["native_distributions"]["randomError"]["above_1000"], 1)
             with xr.open_dataset(root / "out/fields.nc") as ds:
                 self.assertTrue(np.isfinite(ds.rainfall_difference[1, 1]))
@@ -78,6 +79,21 @@ class DirectImergComparisonTests(unittest.TestCase):
             # Default NetCDF NaN fill metadata must be represented as JSON safely.
             data = json.loads((root / "out/comparison.json").read_text())
             self.assertEqual(data["native_metadata"]["randomError"]["encoding"]["_FillValue"], "nan")
+
+    def test_sum_squared_encoding_is_checked_cellwise_including_zero(self):
+        squared = np.array([[0., 2.76480079, 122.36616516], [4227.13916016, 10455.63755, 25409.65625]])
+        raw = squared.astype(np.float32).astype(float)
+        result = COMPARE.error_encoding_diagnostics(raw, squared, np.ones_like(raw, dtype=bool))
+        self.assertEqual(result["matching_cells"], 6)
+        self.assertTrue(result["all_cells_match"])
+        self.assertLess(result["candidate_quadrature_from_daily_vs_halfhourly_mm_day"]["max_abs_difference"], .00001)
+        raw[0, 1] += 1.
+        result = COMPARE.error_encoding_diagnostics(raw, squared, np.ones_like(raw, dtype=bool))
+        self.assertEqual(result["matching_cells"], 5)
+        self.assertFalse(result["all_cells_match"])
+        mask = np.ones_like(raw, dtype=bool)
+        mask[0, 1] = False
+        self.assertTrue(COMPARE.error_encoding_diagnostics(raw, squared, mask)["all_cells_match"])
 
     def test_missing_interval_fails_before_writing_results(self):
         with tempfile.TemporaryDirectory() as temp:
