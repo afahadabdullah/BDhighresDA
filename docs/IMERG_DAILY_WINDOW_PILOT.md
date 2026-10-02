@@ -200,3 +200,66 @@ GPU production job. Its preparation launcher defaults to `stats.json` unless
 overridden; the historical report is needed to establish the actual statistics
 used. This pilot's raw rebuild explicitly uses `stats_cpc_v2.json`, while
 archive mode preserves the stored historical budget and records its provenance.
+
+## Compare one daily file with its 48 half hours
+
+Before interpreting analysis differences as timing sensitivity, check raw
+rainfall and errors on the **same UTC day**. This CPU comparison needs no
+checkpoint, gauges, Slurm GPU allocation, or new daily downloads:
+
+```bash
+mkdir -p logs
+sbatch slurm/imerg_daily_halfhourly_compare.sbatch --day 2022-05-01 \
+  --daily-raw data/raw/imerg --halfhourly data/imerg_halfhourly/2022
+```
+
+The job uses `grace-cpuonly` and the established GH200 Python environment,
+without requesting a GPU. On a compatible compute node, it can also be run
+directly with that environment's Python and the same script arguments.
+
+It compares native daily `precipitation` (mm/day) with `0.5 * sum(rate)`
+from exactly 48 V07B Final half-hourly files for May 1 00:00–24:00 UTC.
+The mean half-hourly rate is in mm/hour; multiply it by 24 to compare with
+the daily file. The script keeps rainfall validity independent of error
+validity and compares only cells with all 48 valid precipitation estimates.
+Zero rainfall remains valid. The original reporting-window preparation ends
+at 03 UTC and is not suitable for this direct calendar-day check.
+
+Missing or duplicate intervals fail before producing results. If files are
+missing, the existing downloader can fetch just that calendar day, expressed
+as a window ending at midnight May 2; existing files are skipped:
+
+```bash
+/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python \
+  scripts/02_download_imerg_halfhourly.py \
+  --bmd-start 2022-05-02 --bmd-end 2022-05-02 --end-hour-utc 0 \
+  --out data/imerg_halfhourly/2022 --jobs 2
+```
+
+Run that direct downloader command on a compatible compute node. It is not
+part of the comparison job and does not download an entire month.
+
+Results are saved in `data/processed/imerg_daily_halfhourly_20220501/`:
+`comparison.md/json` give rainfall/error differences, native units, fill and
+scale metadata, valid-data counts, and half-hourly error distributions.
+`fields.nc` saves the native rainfall, half-hourly total, difference, and
+the separate error estimates. Errors are never clipped or silently replaced.
+The error comparison includes both the existing temporal-independence
+quadrature and a reconstruction of the distinct daily formula documented in
+the [NASA dataset catalogue](https://data.nasa.gov/dataset/gpm-imerg-final-precipitation-l3-1-day-0-1-degree-x-0-1-degree-v07-gpm-3imergdf-at-ges-dis-13ed8).
+Agreement of rainfall does not imply agreement of these error definitions.
+
+To audit the original GPU pilot's raw and coarsened errors without resampling:
+
+```bash
+sbatch slurm/imerg_daily_halfhourly_compare.sbatch --audit-pilot \
+  --root data/processed/imerg_daily_window_pilot_production_stations
+```
+
+This writes `imerg_error_audit.json`, recording regional error percentiles,
+large values and their locations, precipitation/error counts (when provided),
+units, missing-value metadata, scaling, and original manifest identities.
+It does not modify pilot inputs. Values above 1000 mm/day are flagged for
+inspection as a diagnostic tail, not declared invalid by an arbitrary cutoff.
+An anomalously large error mismatch means the original two analyses cannot
+be interpreted as a clean test of rainfall-window timing alone.
