@@ -25,6 +25,90 @@ spec.loader.exec_module(PILOT)
 
 
 class DailyWindowPilotTests(unittest.TestCase):
+    def make_sum_squared_calendar_inputs(self, folder):
+        raw, half = folder / "daily", folder / "half"
+        raw.mkdir()
+        half.mkdir()
+        dates = np.arange(np.datetime64("2022-04-30"), np.datetime64("2022-05-05"))
+        lat = BD.lat.reshape(64, 2).mean(axis=1)
+        lon = BD.lon.reshape(64, 2).mean(axis=1)
+        for i, day in enumerate(dates):
+            error_rate = np.full((64, 64), 2. + i)
+            error_rate[:4, :4] = np.arange(1., 17.).reshape(4, 4)
+            for h in range(48):
+                start = day.astype("datetime64[s]") + np.timedelta64(30*h, "m")
+                end = start + np.timedelta64(1799, "s")
+                key = str(day).replace("-", "")
+                begin = str(start).split("T")[1].replace(":", "")
+                stop = str(end).split("T")[1].replace(":", "")
+                name = f"3B-HHR.MS.MRG.3IMERG.{key}-S{begin}-E{stop}.{h*30:04d}.V07B.HDF5.SUB.nc4"
+                xr.Dataset({"precipitation": (("lat", "lon"), np.full((64, 64), 1.), {"units": "mm/hr"}),
+                            "randomError": (("lat", "lon"), error_rate, {"units": "mm/hr"})},
+                           coords={"lat": lat, "lon": lon}).to_netcdf(half / name)
+            xr.Dataset({"precipitation": (("time", "lat", "lon"), np.full((1, 64, 64), 24.), {"units": "mm/day"}),
+                        "randomError": (("time", "lat", "lon"), (48*error_rate**2)[None], {"units": "mm/day"}),
+                        "precipitation_cnt": (("time", "lat", "lon"), np.full((1, 64, 64), 48)),
+                        "randomError_cnt": (("time", "lat", "lon"), np.full((1, 64, 64), 48))},
+                       coords={"time": [day.astype("datetime64[ns]")], "lat": lat, "lon": lon}).to_netcdf(
+                           raw / f"3B-DAY.MS.MRG.3IMERG.{key}-S000000-E235959.V07B.nc4")
+        return raw, half
+
+    @staticmethod
+    def quiet_child(script, *arguments):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / script), *map(str, arguments)],
+                                cwd=ROOT, capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+
+    def test_verified_daily_error_conversion_precedes_spatial_coarsening(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            raw, half = self.make_sum_squared_calendar_inputs(folder)
+            original_hashes = {str(path): PILOT.sha(path) for path in raw.glob("*.nc4")}
+            output = folder / "native.nc"
+            inputs = []
+            with patch.object(PILOT, "run", side_effect=self.quiet_child):
+                PILOT.prepare_calendar_imerg(raw, output, error_mode="verified-sum-squared",
+                    halfhourly=half, validation_root=folder / "validation", validation_inputs=inputs)
+            self.assertEqual(len(inputs), 5*(48+2))
+            with xr.open_dataset(output) as ds:
+                self.assertEqual(ds.attrs["daily_random_error_mode"], "verified-sum-squared")
+                self.assertEqual(len(json.loads(ds.attrs["error_encoding_validation_reports"])), 5)
+                np.testing.assert_allclose(ds.randomError[:, 5, 5], .5*np.sqrt(48)*np.arange(2., 7.))
+                np.testing.assert_array_equal(ds.precipitation.values, np.full((5, 64, 64), 24.))
+            self.quiet_child("44_coarsen_imerg_observations.py", "--input", output,
+                             "--factor", "8", "--out", folder / "coarse.nc")
+            with xr.open_dataset(folder / "coarse.nc") as ds:
+                scale = ds.attrs["random_error_scale_applied"]
+                expected = .5*np.sqrt(48)*np.sqrt(np.mean(np.arange(1., 17.)**2))*scale
+                np.testing.assert_allclose(ds.randomError[:, 0, 0], expected, rtol=1e-6)
+                # Taking sqrt AFTER the old raw-error RMS coarsening yields a different answer.
+                wrong = .5*np.sqrt(np.sqrt(np.mean((48*np.arange(1., 17.)**2)**2))*scale)
+                self.assertGreater(abs(expected-wrong), 1.)
+            self.assertEqual({str(path): PILOT.sha(path) for path in raw.glob("*.nc4")}, original_hashes)
+
+    def test_verified_conversion_rejects_bad_encoding_or_incomplete_error_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            raw, half = self.make_sum_squared_calendar_inputs(folder)
+            first = sorted(raw.glob("*.nc4"))[0]
+            with xr.open_dataset(first) as source:
+                original = source.load()
+            for kind in ("encoding", "count"):
+                modified = original.copy(deep=True)
+                if kind == "encoding":
+                    modified.randomError.values[0, 5, 5] *= 2
+                    pattern = "encoding not verified"
+                else:
+                    modified.randomError_cnt.values[0, 5, 5] = 47
+                    pattern = "incomplete error counts"
+                modified.to_netcdf(first)
+                output = folder / f"bad_{kind}.nc"
+                with patch.object(PILOT, "run", side_effect=self.quiet_child), self.assertRaisesRegex(ValueError, pattern):
+                    PILOT.prepare_calendar_imerg(raw, output, error_mode="verified-sum-squared",
+                        halfhourly=half, validation_root=folder / f"validation_{kind}")
+                self.assertFalse(output.exists())
+
     def test_reuses_production_centroids_seasonal_station_set_and_error_budget(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

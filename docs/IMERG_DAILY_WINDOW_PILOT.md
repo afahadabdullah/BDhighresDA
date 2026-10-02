@@ -153,10 +153,44 @@ Useful options:
 - `--ckpt`, `--stats`: evaluated artifact paths; hashes are checked and the
   statistics path must match checkpoint metadata.
 - `--daily-raw`, `--halfhourly`: existing raw IMERG locations.
+- `--daily-error-mode verified-sum-squared`: validates the raw daily
+  `randomError == sum(half-hourly error rates squared)` relationship independently
+  on **all five calendar input days (April 30–May 4)**. It then applies
+  `0.5 * sqrt(raw daily error)` at native 0.1° resolution, before spatial
+  coarsening. It requires 48 valid error samples on every usable daily
+  footprint and confirms the converted error matches the half-hourly
+  quadrature. A failed encoding/count check stops before GPU sampling.
+  Validation reports and all contributing half-hourly file identities are
+  recorded. This uses half hours for this bounded validation experiment;
+  it does not establish a conversion for the full 2001–2024 archive.
+- `--daily-error-mode native` (legacy default) retains the original raw values
+  for reproducing the first pilot. The observed May 1 V07B file numerically
+  contains squared-error sums despite its declared mm/day units. Consequently,
+  that legacy arm confounds timing with error interpretation and should not
+  guide a production switch. Use the verified mode for the corrected pilot.
 - `--prepare-only`: prepare all input files without sampling.
 - `--summarize-only`: recompute reports and maps from the two saved cases.
 - `--root`: separate experiment output root. Existing sampled or partial
   outputs are preserved; use a new root when rerunning sampling.
+
+For the corrected one-member pilot, retaining the archived production station
+inputs and the original completed results:
+
+```bash
+mkdir -p logs
+sbatch slurm/imerg_daily_window_pilot.sbatch --download-imerg \
+  --daily-error-mode verified-sum-squared \
+  --production-station-root data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep \
+  --root data/processed/imerg_daily_window_pilot_verified_errors
+```
+
+The five native daily files and existing half-hourly regional files are reused.
+With `--download-imerg`, any missing calendar validation half-hours are fetched
+only for April 30 00:00 through May 5 00:00 UTC. In particular an archive starting
+at April 30 03:00 may need its first six half-hours. No yearly download occurs.
+Per-day validation is saved under `error_validation/YYYYMMDD/`; rainfall is not
+rescaled by the error conversion. Raw granules and earlier pilot outputs are
+never rewritten.
 
 ## Read the results
 

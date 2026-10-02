@@ -174,27 +174,75 @@ def download_daily(directory):
         temporary.replace(destination)
 
 
-def prepare_calendar_imerg(directory, output):
+def prepare_calendar_imerg(directory, output, *, error_mode="native", halfhourly=None,
+                           validation_root=None, validation_inputs=None):
     import numpy as np
     import xarray as xr
-    from bdhires.imerg import load_imerg_daily, validate_prepared_time_convention
+    from bdhires.imerg import (_open_granule, _regional_array, load_imerg_daily,
+                              validate_prepared_time_convention)
+    if error_mode not in ("native", "verified-sum-squared"):
+        raise ValueError(f"unknown daily error mode: {error_mode}")
     daily = load_imerg_daily(directory, shift_day(START), shift_day(END), min_count=48)
+    error = daily.random_error.copy()
+    aggregation = "native NASA daily product; raw values unchanged"
+    reports = []
+    counts_for_preparation = daily.count.copy()
+    if error_mode == "verified-sum-squared":
+        if halfhourly is None or validation_root is None:
+            raise ValueError("verified sum-squared errors require half-hourly inputs and a validation output root")
+        for i, day in enumerate(daily.time.astype("datetime64[D]").astype(str)):
+            check_root = Path(validation_root) / day.replace("-", "")
+            run("102_compare_imerg_daily_halfhourly.py", "--day", day,
+                "--daily-raw", directory, "--halfhourly", halfhourly, "--out", check_root)
+            report_path = check_root / "comparison.json"
+            report = json.loads(report_path.read_text())
+            check = report["error_encoding_check"]
+            if report["utc_day"] != day or not check["all_cells_match"] or check["valid_cells"] == 0:
+                raise ValueError(f"daily sum-squared error encoding not verified on {day}; inspect {report_path}")
+            # Error validity is independent of precipitation validity. The native
+            # reader's precipitation count alone cannot establish complete errors.
+            with _open_granule(Path(directory) / daily.source_files[i]) as source:
+                if "randomError_cnt" not in source:
+                    raise ValueError(f"daily error counts required for verified conversion: {day}")
+                counts = _regional_array(source, "randomError_cnt", daily.lat, daily.lon)
+            usable = np.isfinite(daily.precipitation[i]) & np.isfinite(error[i])
+            if not usable.any() or not np.all(counts[usable] == 48):
+                raise ValueError(f"daily IMERG has incomplete error counts on usable pilot footprints: {day}")
+            corrected = .5 * np.sqrt(error[i])
+            with xr.open_dataset(check_root / "fields.nc") as source:
+                quadrature = source.half_hourly_quadrature_error.values
+            if not np.isfinite(quadrature[usable]).all() or not np.allclose(
+                    corrected[usable], quadrature[usable], rtol=1e-5, atol=1e-5):
+                raise ValueError(f"daily error conversion does not reproduce half-hourly quadrature on {day}")
+            error[i] = corrected
+            reports.append(str(report_path))
+            if validation_inputs is not None:
+                validation_inputs.extend([report_path, check_root / "fields.nc",
+                                          *[Path(item["path"]) for item in report["half_hourly_files_detail"]]])
+            print(f"[pilot] {day}: verified sum-squared errors on {check['valid_cells']} cells; "
+                  "applied 0.5 * sqrt(raw daily randomError) before coarsening", flush=True)
+        aggregation = ("0.5 * sqrt(raw daily sum of half-hourly squared error rates); "
+                       "temporal-independence baseline; verified for every pilot UTC day")
+        # Spatial NaN reductions must not hide an unusable native footprint.
+        counts_for_preparation[~np.isfinite(daily.precipitation) | ~np.isfinite(error)] = 0
     # Native mm/day values are already daily mean rates * 24. Do not rescale.
     dataset = xr.Dataset(
         {"precipitation": (("time", "lat", "lon"), daily.precipitation, {"units": "mm/day"}),
-         "randomError": (("time", "lat", "lon"), daily.random_error,
-                         {"units": "mm/day", "aggregation": "native NASA daily product"}),
-         "precipitation_cnt": (("time", "lat", "lon"), daily.count)},
+         "randomError": (("time", "lat", "lon"), error,
+                         {"units": "mm/day", "aggregation": aggregation}),
+         "precipitation_cnt": (("time", "lat", "lon"), counts_for_preparation)},
         coords={"time": daily.time, "lat": daily.lat, "lon": daily.lon},
         attrs={"product": "GPM_3IMERGDF", "version": "V07B", "source_frequency": "daily",
                "bmd_accumulation_end_hour_utc": 0, "window_duration_hours": 24,
                "time_coordinate_semantics": "UTC calendar day; window start",
                "accumulation_window": "selected-day 00:00 UTC to next-day 00:00 UTC",
-               "random_error_aggregation": "native NASA daily product",
+               "random_error_aggregation": aggregation,
+               "daily_random_error_mode": error_mode,
+               "error_encoding_validation_reports": json.dumps(reports),
                "quality_control": "all 48 half-hourly retrievals required",
                "source_files": json.dumps(list(daily.source_files))})
     validate_prepared_time_convention(dataset, allow_calendar_day=True)
-    for values in (daily.precipitation, daily.random_error):
+    for values in (daily.precipitation, error):
         if not np.isfinite(values).reshape(5, -1).any(axis=1).all():
             raise ValueError("a native daily IMERG field has no valid regional footprints")
     dataset.to_netcdf(output)
@@ -311,14 +359,22 @@ def prepare(args):
             raise ValueError("--aligned-imerg must be native 0.1° or evaluated 0.4° IMERG")
     if args.download_imerg:
         download_daily(args.daily_raw)
+        if args.daily_error_mode == "verified-sum-squared":
+            # Calendar B needs Apr 30 00:00..May 5 00:00. Existing regional
+            # files are skipped; an older 03 UTC archive may lack Apr 30's first six.
+            run("02_download_imerg_halfhourly.py", "--bmd-start", START, "--bmd-end", END,
+                "--end-hour-utc", 0, "--out", args.halfhourly)
     native_b = p["root"] / "imerg_calendar_native.nc"
-    daily_files = prepare_calendar_imerg(args.daily_raw, native_b)
+    error_validation_inputs = []
+    daily_files = prepare_calendar_imerg(args.daily_raw, native_b, error_mode=args.daily_error_mode,
+        halfhourly=args.halfhourly, validation_root=p["root"] / "error_validation",
+        validation_inputs=error_validation_inputs)
     run("44_coarsen_imerg_observations.py", "--input", native_b, "--factor", 8, "--out", p["b"])
     enforce_complete_footprints(p["a"])
     enforce_complete_footprints(p["b"], calendar=True)
     production.validate_imerg(p["a"], START, END, factor=8)
     inputs = [Path(args.ckpt), Path(args.stats), Path(args.config), p["gauges"], p["superobs"],
-              p["shifted"], p["a"], p["b"], *daily_files]
+              p["shifted"], p["a"], p["b"], native_b, *daily_files, *error_validation_inputs]
     preparation_report = p["root"] / "station_preparation.json"
     if original:
         inputs.append(original)
@@ -331,6 +387,9 @@ def prepare(args):
     manifest = {"gauge_report_dates": [START, END],
                 "calendar_background_dates": [shift_day(START), shift_day(END)],
                 "members": 1, "method": METHOD, "data_zarr": args.data_zarr,
+                "daily_random_error_mode": args.daily_error_mode,
+                "daily_error_validation_days": [shift_day(START), shift_day(END)]
+                    if args.daily_error_mode == "verified-sum-squared" else None,
                 "statistics": args.stats, "checkpoint": args.ckpt,
                 "representativeness": budget["superob_implied_representativeness"],
                 "station_preparation": archived["provenance"] if archived else {
@@ -340,7 +399,10 @@ def prepare(args):
                 "input_sha256": {str(path): sha(path) for path in inputs},
                 "caveats": ["One member; sensitivity only, no ensemble calibration or independent skill claim.",
                             "BMD support 00–00 UTC; BWDB support 03–03 UTC; both relabelled -1 day in B.",
-                            "Daily native randomError differs from half-hourly quadrature aggregation.",
+                            ("Daily errors converted at native resolution using 0.5 * sqrt(raw sum squared rates); "
+                             "verified against half-hourly quadrature for all five calendar days."
+                             if args.daily_error_mode == "verified-sum-squared" else
+                             "Daily raw randomError retained without encoding validation; this arm confounds timing and error interpretation."),
                             "CHIRPS is diagnostic only; common calendar-day reference used for comparison."]}
     write_json(p["root"] / "experiment.json", manifest)
     return manifest
@@ -467,6 +529,7 @@ def summarize(args):
              "One member per day; matched CPC/ERA5 backgrounds, gauge values and random draws.", "",
              f"Station preparation: {manifest.get('station_preparation', {}).get('mode', 'not recorded')}; "
              f"gauge representativeness: {manifest.get('representativeness', 'not recorded')}.", "",
+             f"Daily IMERG error mode: {manifest.get('daily_random_error_mode', 'native (legacy pilot)')}.", "",
              "Differences below are calendar IMERG (B) minus reporting-window IMERG (A).", "",
              "| Quantity | MAE | RMSE | Mean difference |", "|---|---:|---:|---:|"]
     for key in ("analysis_mm_day", "five_day_total_mm", "imerg_precipitation_mm_day", "imerg_random_error_mm_day"):
@@ -525,6 +588,9 @@ def main(argv=None):
     parser.add_argument("--aligned-imerg", help="existing native or S04 reporting-window IMERG; auto-detects the May archive")
     parser.add_argument("--halfhourly", default="data/imerg_halfhourly/2022")
     parser.add_argument("--daily-raw", default="data/raw/imerg")
+    parser.add_argument("--daily-error-mode", choices=("native", "verified-sum-squared"), default="native",
+                        help="native preserves legacy raw errors; verified-sum-squared validates all five UTC days "
+                             "against half hours and applies 0.5*sqrt(raw error) before coarsening")
     parser.add_argument("--download-imerg", action="store_true", help="fetch missing IMERG for this pilot only")
     parser.add_argument("--seed", type=int, default=202205)
     modes = parser.add_mutually_exclusive_group()
@@ -538,6 +604,7 @@ def main(argv=None):
         print("A: gauges May 1–5; background Apr 30–May 4 (offset -1); IMERG 03–03 UTC.")
         print("B: SAME gauges relabelled Apr 30–May 4; background offset 0; daily IMERG 00–24 UTC.")
         print("One member; B seed = A seed + 1 to preserve per-day draws; backgrounds checked after sampling.")
+        print(f"Daily error mode: {args.daily_error_mode}; verified mode checks Apr 30–May 4 before sampling.")
         for command in case_commands(args, "MEASURED_FROM_SHARED_SUPEROBS"):
             print(shlex.join([sys.executable, "scripts/28_simultaneous_method_sweep.py", *command]))
         return
