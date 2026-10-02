@@ -1,5 +1,15 @@
 # Compute guide
 
+For the final CPCv2 **2001–2024** production run, use
+[SURMA_PRODUCTION_2001_2024.md](docs/SURMA_PRODUCTION_2001_2024.md). Its wrapper
+audits PRISM inputs, downloads missing gridded data, prepares gauge/satellite
+observations and schedules 96 quarterly GH200 tasks after validation:
+
+```bash
+bash slurm/submit_surma_production_2001_2024.sh --audit-only
+bash slurm/submit_surma_production_2001_2024.sh
+```
+
 This repository's primary GPU workflow targets the NASA NCCS PRISM Grace
 partition: one NVIDIA Grace Hopper/GH200 GPU on an `aarch64` node. The
 scientific configuration remains `configs/train_h100.yaml`, its checkpoints

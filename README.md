@@ -65,9 +65,10 @@ physical skill.
   footprints (`S04`), with correlated-footprint error treatment.
 - **Gauge treatment:** each member receives perturbed BMD observations; the
   established production gauge weight is `1.0`.
-- **Time convention:** for public BMD label day `D`, BMD and IMERG are the BMD
-  03 UTC end-date `D`; CPC/ERA5/CHIRPS background inputs are record `D-1`.
-  This convention must be preserved in all comparisons.
+- **Time convention:** the final dense BMD/BWDB contract retains BMD totals
+  ending at 00 UTC and BWDB/IMERG totals ending at 03 UTC on date `D`;
+  CPC/ERA5/CHIRPS background inputs are record `D-1`. The three-hour gauge
+  support difference is recorded in preparation manifests.
 - **Current archive:** May–September 2021–2023 and May–June 2024, with five
   rotated spatial BMD holdout folds plus an all-station gridded production
   archive.
@@ -78,6 +79,18 @@ The reproducible historical production run is documented in
 [docs/EXPERIMENT_v2_confirmatory_2021_2024.md](docs/EXPERIMENT_v2_confirmatory_2021_2024.md).
 
 ## Run the established production workflow
+
+For the full **2001–2024** CPCv2 BMD/BWDB production archive, including input
+downloads and preparation, use the [production guide](docs/SURMA_PRODUCTION_2001_2024.md):
+
+```bash
+bash slurm/submit_surma_production_2001_2024.sh --audit-only
+bash slurm/submit_surma_production_2001_2024.sh
+```
+
+This covers 8,766 days and produces 96 quarterly, 30-member shards. The full
+wrapper schedules prerequisite acquisition/validation before GPU sampling.
+Use `--prepare-only` to stop after input preparation.
 
 On the target HPC system, after selecting the supported Python environment:
 

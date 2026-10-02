@@ -794,6 +794,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", default="2024-05-01")
     parser.add_argument("--end", default="2024-05-05")
+    parser.add_argument("--data-zarr", default=None,
+                        help="Explicit relocated/production predictor archive; checkpoint preprocessing and channel selection remain fixed")
     parser.add_argument("--background-day-offset", type=int, default=-1)
     parser.add_argument("--members", type=int, default=16)
     parser.add_argument("--min-coverage", type=float, default=0.5)
@@ -1032,7 +1034,8 @@ def main() -> None:
     training_config = checkpoint["cfg"]
     training_data = training_config["data"]
 
-    data_zarr = str(training_data.get("zarr", config["data"]["zarr"]))
+    checkpoint_data_zarr = str(training_data.get("zarr", config["data"]["zarr"]))
+    data_zarr = str(args.data_zarr or checkpoint_data_zarr)
     data_stats = str(training_data.get("stats", config["data"]["stats"]))
     stats = json.loads(Path(data_stats).read_text())
     transform = PrecipTransform.from_dict(stats["precip_transform"])
@@ -1065,6 +1068,10 @@ def main() -> None:
     if not len(observation_selected):
         raise ValueError(f"no checkpoint-bound data between {args.start} and {args.end}")
     selected_times = times[observation_selected]
+    expected_times = np.arange(np.datetime64(args.start, "D"),
+                               np.datetime64(args.end, "D") + np.timedelta64(1, "D"))
+    if not np.array_equal(selected_times.astype("datetime64[D]"), expected_times):
+        raise ValueError("checkpoint-bound predictor archive does not contain every requested daily date in order")
     background_times = selected_times + np.timedelta64(args.background_day_offset, "D")
     time_to_index = {np.datetime64(v, "D"): i for i, v in enumerate(times)}
     missing = [
@@ -1703,6 +1710,7 @@ def main() -> None:
         "background_day_offset": args.background_day_offset,
         "checkpoint": args.ckpt,
         "checkpoint_data": data_zarr,
+        "checkpoint_original_data": checkpoint_data_zarr,
         "checkpoint_stats": data_stats,
         "precip_transform": transform.to_dict(),
         "config": args.config,
