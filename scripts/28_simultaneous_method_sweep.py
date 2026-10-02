@@ -797,6 +797,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-zarr", default=None,
                         help="Explicit relocated/production predictor archive; checkpoint preprocessing and channel selection remain fixed")
     parser.add_argument("--background-day-offset", type=int, default=-1)
+    parser.add_argument(
+        "--allow-calendar-day-imerg", action="store_true",
+        help="experimental daily-IMERG comparison only: requires offset 0 and gauges relabelled to UTC calendar days",
+    )
     parser.add_argument("--members", type=int, default=16)
     parser.add_argument("--min-coverage", type=float, default=0.5)
     parser.add_argument("--withhold", type=float, default=0.2)
@@ -1152,7 +1156,12 @@ def main() -> None:
     imerg = None
     raw_imerg_mm = None
     if uses_imerg:
-        imerg = load_prepared_imerg(args.imerg, selected_times, grid, imerg_factor)
+        if args.allow_calendar_day_imerg and args.background_day_offset != 0:
+            raise ValueError("calendar-day IMERG requires --background-day-offset 0 and calendar-labelled gauges")
+        imerg = load_prepared_imerg(
+            args.imerg, selected_times, grid, imerg_factor,
+            allow_calendar_day=args.allow_calendar_day_imerg,
+        )
         raw_imerg_mm = imerg["precipitation"].copy()
 
     corrected_imerg_mm, qm_meta = None, None
@@ -1708,6 +1717,7 @@ def main() -> None:
         "n_days": n_days,
         "members": args.members,
         "background_day_offset": args.background_day_offset,
+        "imerg_time_convention": "UTC calendar day (experimental)" if args.allow_calendar_day_imerg else "reporting window",
         "checkpoint": args.ckpt,
         "checkpoint_data": data_zarr,
         "checkpoint_original_data": checkpoint_data_zarr,

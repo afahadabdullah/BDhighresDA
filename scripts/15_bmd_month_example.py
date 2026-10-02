@@ -119,7 +119,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) -> dict:
+def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int,
+                        *, allow_calendar_day: bool = False) -> dict:
     """Load BMD-window IMERG and enforce exact temporal/date/grid alignment."""
     with xr.open_dataset(path) as dataset:
         required = {"precipitation", "randomError", "precipitation_cnt"}
@@ -158,42 +159,8 @@ def load_prepared_imerg(path: str | Path, times: np.ndarray, grid, factor: int) 
                     f"IMERG dates do not exactly match checkpoint dates: "
                     f"{imerg_time[[0, -1]]} versus {expected_time[[0, -1]]}"
                 )
-        end_hour = dataset.attrs.get("bmd_accumulation_end_hour_utc")
-        try:
-            end_hour = int(end_hour)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{path} does not declare a BMD accumulation end hour; regenerate it "
-                "from half-hourly IMERG with scripts/08_prepare_imerg_observations.py"
-            ) from exc
-        if end_hour != 3:
-            raise ValueError(
-                f"{path} ends its accumulation at {end_hour:02d}:00 UTC, but BMD daily "
-                "rainfall ends at 03:00 UTC; calendar-day IMERG cannot be assimilated"
-            )
-        source_frequency = str(dataset.attrs.get("source_frequency", ""))
-        alignment = str(dataset.attrs.get("bmd_window_alignment", ""))
-        if source_frequency != "half-hourly":
-            # The guard exists to stop a 00-00 UTC daily product being assimilated
-            # as though it were the 03-03 UTC BMD window. That is a real hazard and
-            # the check stays. But a daily product that has ALREADY been shifted
-            # onto the BMD convention is a different case, and it has to declare
-            # itself explicitly rather than be waved through.
-            if alignment != "day-shift":
-                raise ValueError(
-                    f"{path} was not prepared from half-hourly IMERG and cannot "
-                    "represent the exact BMD 03:00-03:00 UTC window. If it is a "
-                    "daily product already shifted onto the BMD convention, set "
-                    "the attribute bmd_window_alignment='day-shift' when writing "
-                    "it (see scripts/34_make_cpc_pseudo_satellite.py)."
-                )
-            print(
-                f"[bmd] {path} is a DAILY product aligned by whole-day shift, not "
-                "built from half-hourly data. A day shift approximates the 3-hour "
-                "window offset; it cannot reproduce it. Treat the resulting "
-                "observation-error estimates as optimistic.",
-                flush=True,
-            )
+        from bdhires.imerg import validate_prepared_time_convention
+        validate_prepared_time_convention(dataset, allow_calendar_day=allow_calendar_day)
 
         # A factor that does not divide the grid leaves a ragged edge. The writer
         # crops to the largest exact tiling, so the expected footprint centres must

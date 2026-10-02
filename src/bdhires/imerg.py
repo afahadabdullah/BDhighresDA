@@ -47,6 +47,28 @@ class ImergDaily:
     random_error_aggregation: str = "native daily product"
 
 
+def validate_prepared_time_convention(dataset: xr.Dataset, *, allow_calendar_day: bool = False) -> None:
+    """Keep reporting-window ingestion strict; explicitly opt into a calendar-day pilot."""
+    try:
+        end_hour = int(dataset.attrs["bmd_accumulation_end_hour_utc"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("prepared IMERG must declare an accumulation end hour") from exc
+    frequency = str(dataset.attrs.get("source_frequency", ""))
+    if allow_calendar_day:
+        if (end_hour != 0 or frequency != "daily"
+                or dataset.attrs.get("product") != "GPM_3IMERGDF"
+                or dataset.attrs.get("time_coordinate_semantics") != "UTC calendar day; window start"
+                or dataset.attrs.get("window_duration_hours") != 24):
+            raise ValueError("calendar-day pilot requires native daily IMERG with explicit 00–24 UTC start-date metadata")
+        return
+    if end_hour != 3:
+        raise ValueError("prepared IMERG must end at 03:00 UTC; calendar-day input requires explicit experimental opt-in")
+    if frequency != "half-hourly":
+        if dataset.attrs.get("bmd_window_alignment") != "day-shift":
+            raise ValueError("prepared IMERG must come from half-hourly data or declare bmd_window_alignment='day-shift'")
+        print("[imerg] daily input aligned by a day shift approximates the 3-hour window offset; errors may be optimistic", flush=True)
+
+
 def _dates(start: str | np.datetime64, end: str | np.datetime64) -> list[date]:
     first = date.fromisoformat(str(np.datetime64(start, "D")))
     last = date.fromisoformat(str(np.datetime64(end, "D")))
