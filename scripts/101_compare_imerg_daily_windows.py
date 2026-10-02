@@ -25,6 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 METHOD = "dense_s6_bwdb_r4"
 START, END = "2022-05-01", "2022-05-05"
+PRODUCTION_STATION_ROOT = "data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep"
 
 
 def shift_day(value):
@@ -81,6 +82,68 @@ def station_preparation_arguments(args, original, root):
             "--bmd-stations", args.bmd_catalog, "--bwdb-xlsx", args.bwdb,
             "--out", original, "--summary", root / "station_summary.csv",
             "--report", root / "station_preparation.json"]
+
+
+def reuse_production_gauges(args, p):
+    """Reuse the final seasonal station preparation, including its frozen error budget."""
+    import numpy as np
+    import pandas as pd
+    from bdhires.grids import BD
+    explicit = args.production_station_root is not None
+    if not explicit and (args.stations or args.bmd_data_dir
+                         or args.bmd_wide != "data/stations/Rainfall_daily_by_station_BMD.csv"):
+        return None
+    root = Path(args.production_station_root or PRODUCTION_STATION_ROOT)
+    table = root / "superob_prod_0.25.csv"
+    report = root / "superob_prod_0.25.json"
+    if not explicit and not table.exists() and not report.exists():
+        return None
+    for path in (table, report):
+        if not path.is_file():
+            raise FileNotFoundError(f"archived production station input missing: {path}")
+    budget = json.loads(report.read_text())
+    recommendation = budget.get("recommended_representativeness") or {}
+    representation = recommendation.get("superob_implied_representativeness")
+    if representation is None or not np.isfinite(representation) or not 0 <= representation < 10:
+        raise ValueError("archived production report must supply the measured superob representativeness")
+    if budget.get("cell_deg") != .25 or budget.get("stations_held_out") != 0:
+        raise ValueError("use the all-station 0.25° production table/report, not evaluation super-observations")
+    frame = pd.read_csv(table, parse_dates=["date"], dtype={"station_id": str})
+    required = {"station_id", "date", "lat", "lon", "precip_mm"}
+    if not required <= set(frame) or frame.duplicated(["station_id", "date"]).any():
+        raise ValueError("invalid archived production station schema or duplicate station-days")
+    season = pd.date_range("2022-05-01", "2022-09-30")
+    if frame.date.min() > season[0] or frame.date.max() < season[-1]:
+        raise ValueError("production station table must cover the full May–September 2022 season")
+    frame = frame.loc[frame.date.isin(season)].copy()
+    if (frame.precip_mm.dropna() < 0).any():
+        raise ValueError("archived production rainfall contains negative values")
+    # Match the older GPU launcher's default 50% SEASONAL coverage filter.
+    # Keep seasonally eligible stations even if they have no reports in these five days.
+    meta = frame.groupby("station_id").first()
+    coverage = frame.groupby("station_id").precip_mm.count() / len(season)
+    lo, la, hi, ha = BD.bbox
+    margin = BD.res / 2
+    eligible = meta.index[(coverage >= .5) & meta.lat.between(la + margin, ha - margin, inclusive="neither")
+                          & meta.lon.between(lo + margin, hi - margin, inclusive="neither")]
+    if len(eligible) < 5:
+        raise ValueError("fewer than five archived production stations survive the original seasonal filter")
+    keys = pd.MultiIndex.from_product([eligible, pd.date_range(START, END)], names=["station_id", "date"])
+    window = frame.set_index(["station_id", "date"]).reindex(keys).reset_index()
+    # Preserve missing rainfall. Only static metadata is filled from the seasonal table.
+    for name in ("lat", "lon", "name", "source", "accumulation_end_hour_utc"):
+        if name in window:
+            window[name] = window[name].fillna(window.station_id.map(meta[name]))
+    window.to_csv(p["gauges"], index=False, date_format="%Y-%m-%d")
+    p["superobs"].write_bytes(report.read_bytes())
+    print(f"[pilot] reusing archived production stations: {table}; {len(eligible)} stations; R representativeness={representation}", flush=True)
+    return {"budget": recommendation, "inputs": [table, report],
+            "provenance": {"mode": "archived production super-observations",
+                           "table": str(table), "report": str(report),
+                           "eligibility_period": ["2022-05-01", "2022-09-30"],
+                           "eligible_stations": len(eligible),
+                           "preparation_stats_provenance": budget.get("stats_provenance"),
+                           "note": "Preserves the archived error budget; its original preparation-statistics identity is recorded, not retroactively changed."}}
 
 
 def download_daily(directory):
@@ -176,37 +239,41 @@ def prepare(args):
     if str(checkpoint["cfg"]["data"]["stats"]) != str(args.stats):
         raise ValueError("--stats must match the checkpoint-bound statistics path")
     del checkpoint
-    original = p["root"] / "original_gauges.csv"
-    if args.stations:
-        frame = pd.read_csv(args.stations, parse_dates=["date"], dtype={"station_id": str})
-        required_columns = {"station_id", "lat", "lon", "date", "precip_mm"}
-        if not required_columns <= set(frame):
-            raise ValueError("--stations must be an original canonical daily gauge table")
-        frame = frame.loc[frame.date.between(START, END)].copy()
-        if frame.station_id.str.startswith("SOB_").any():
-            raise ValueError("supply original gauges, not an already aggregated super-observation table")
-        frame.to_csv(original, index=False)
+    archived = reuse_production_gauges(args, p)
+    original = None
+    if archived:
+        budget = archived["budget"]
     else:
-        run("99_prepare_production_stations.py",
-            *station_preparation_arguments(args, original, p["root"]))
-    frame = pd.read_csv(original, parse_dates=["date"], dtype={"station_id": str})
-    if frame.duplicated(["station_id", "date"]).any():
-        raise ValueError("duplicate original station-days")
-    # Apply the same >=50% five-day coverage and geographic eligibility to both cases.
-    frame = frame.loc[frame.lat.between(float(BD.lat[0]), float(BD.lat[-1]))
-                      & frame.lon.between(float(BD.lon[0]), float(BD.lon[-1]))].copy()
-    finite = np.isfinite(frame.precip_mm) & (frame.precip_mm >= 0)
-    frame.loc[~finite, "precip_mm"] = np.nan
-    counts = frame.groupby("station_id").precip_mm.count()
-    frame = frame.loc[frame.station_id.isin(counts[counts >= 3].index)].copy()
-    if frame.empty:
-        raise ValueError("no eligible original gauges in the pilot")
-    frame.to_csv(original, index=False)
-    run("87_superob_dense_gauges.py", "--stations", original, "--stats", args.stats,
-        "--cell-deg", .25, "--out", p["gauges"], "--report", p["superobs"])
-    budget = json.loads(p["superobs"].read_text())["recommended_representativeness"]
-    if budget is None:
-        raise ValueError("cannot establish measured super-observation error budget")
+        original = p["root"] / "original_gauges.csv"
+        if args.stations:
+            frame = pd.read_csv(args.stations, parse_dates=["date"], dtype={"station_id": str})
+            required_columns = {"station_id", "lat", "lon", "date", "precip_mm"}
+            if not required_columns <= set(frame):
+                raise ValueError("--stations must be an original canonical daily gauge table")
+            frame = frame.loc[frame.date.between(START, END)].copy()
+            if frame.station_id.str.startswith("SOB_").any():
+                raise ValueError("use --production-station-root for archived super-observations")
+            frame.to_csv(original, index=False)
+        else:
+            run("99_prepare_production_stations.py",
+                *station_preparation_arguments(args, original, p["root"]))
+        frame = pd.read_csv(original, parse_dates=["date"], dtype={"station_id": str})
+        if frame.duplicated(["station_id", "date"]).any():
+            raise ValueError("duplicate original station-days")
+        frame = frame.loc[frame.lat.between(float(BD.lat[0]), float(BD.lat[-1]))
+                          & frame.lon.between(float(BD.lon[0]), float(BD.lon[-1]))].copy()
+        finite = np.isfinite(frame.precip_mm) & (frame.precip_mm >= 0)
+        frame.loc[~finite, "precip_mm"] = np.nan
+        counts = frame.groupby("station_id").precip_mm.count()
+        frame = frame.loc[frame.station_id.isin(counts[counts >= 3].index)].copy()
+        if frame.empty:
+            raise ValueError("no eligible original gauges in the pilot")
+        frame.to_csv(original, index=False)
+        run("87_superob_dense_gauges.py", "--stations", original, "--stats", args.stats,
+            "--cell-deg", .25, "--out", p["gauges"], "--report", p["superobs"])
+        budget = json.loads(p["superobs"].read_text())["recommended_representativeness"]
+        if budget is None:
+            raise ValueError("cannot establish measured super-observation error budget")
     gauges = pd.read_csv(p["gauges"], parse_dates=["date"], dtype={"station_id": str})
     gauges["original_report_date"] = gauges.date.dt.strftime("%Y-%m-%d")
     gauges["date"] -= pd.Timedelta(days=1)
@@ -250,11 +317,15 @@ def prepare(args):
     enforce_complete_footprints(p["a"])
     enforce_complete_footprints(p["b"], calendar=True)
     production.validate_imerg(p["a"], START, END, factor=8)
-    inputs = [Path(args.ckpt), Path(args.stats), Path(args.config), original, p["gauges"],
+    inputs = [Path(args.ckpt), Path(args.stats), Path(args.config), p["gauges"], p["superobs"],
               p["shifted"], p["a"], p["b"], *daily_files]
     preparation_report = p["root"] / "station_preparation.json"
-    if not args.stations:
+    if original:
+        inputs.append(original)
+    if not args.stations and not archived:
         inputs.append(preparation_report)
+    if archived:
+        inputs.extend(archived["inputs"])
     if aligned:
         inputs.append(Path(aligned))
     manifest = {"gauge_report_dates": [START, END],
@@ -262,6 +333,8 @@ def prepare(args):
                 "members": 1, "method": METHOD, "data_zarr": args.data_zarr,
                 "statistics": args.stats, "checkpoint": args.ckpt,
                 "representativeness": budget["superob_implied_representativeness"],
+                "station_preparation": archived["provenance"] if archived else {
+                    "mode": "rebuilt five-day super-observations", "eligibility_period": [START, END]},
                 "case_a_seed": args.seed, "case_b_seed": args.seed + 1,
                 "seed_note": "sweep seeds add observation archive index; +1 offsets B's one-day earlier labels",
                 "input_sha256": {str(path): sha(path) for path in inputs},
@@ -392,6 +465,8 @@ def summarize(args):
     plot_comparison(p["root"], a, af, bf, valid, expected_a)
     lines = ["# Daily IMERG timing pilot: 1–5 May 2022 gauge records", "",
              "One member per day; matched CPC/ERA5 backgrounds, gauge values and random draws.", "",
+             f"Station preparation: {manifest.get('station_preparation', {}).get('mode', 'not recorded')}; "
+             f"gauge representativeness: {manifest.get('representativeness', 'not recorded')}.", "",
              "Differences below are calendar IMERG (B) minus reporting-window IMERG (A).", "",
              "| Quantity | MAE | RMSE | Mean difference |", "|---|---:|---:|---:|"]
     for key in ("analysis_mm_day", "five_day_total_mm", "imerg_precipitation_mm_day", "imerg_random_error_mm_day"):
@@ -440,7 +515,9 @@ def main(argv=None):
     parser.add_argument("--stats", default="data/processed/stats_cpc_v2.json")
     parser.add_argument("--config", default="configs/da.yaml")
     parser.add_argument("--data-zarr", default="data/processed/bd_wide_cpc.zarr")
-    parser.add_argument("--stations", help="optional original canonical BMD/BWDB table; otherwise read national sources")
+    station_mode = parser.add_mutually_exclusive_group()
+    station_mode.add_argument("--stations", help="optional original canonical BMD/BWDB table; overrides archive auto-detection")
+    station_mode.add_argument("--production-station-root", help="directory with existing superob_prod_0.25.csv/json; default archive auto-detected unless raw inputs explicitly selected")
     parser.add_argument("--bmd-wide", default="data/stations/Rainfall_daily_by_station_BMD.csv")
     parser.add_argument("--bmd-data-dir", help="explicit per-station BMD directory; automatically used if the default wide table is absent")
     parser.add_argument("--bmd-catalog", default="data/stations/data_2020_2025/Stations.csv")
@@ -455,6 +532,8 @@ def main(argv=None):
     modes.add_argument("--prepare-only", action="store_true")
     modes.add_argument("--summarize-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.production_station_root and args.bmd_data_dir:
+        parser.error("choose --production-station-root or --bmd-data-dir, not both")
     if args.dry_run:
         print("A: gauges May 1–5; background Apr 30–May 4 (offset -1); IMERG 03–03 UTC.")
         print("B: SAME gauges relabelled Apr 30–May 4; background offset 0; daily IMERG 00–24 UTC.")

@@ -25,6 +25,58 @@ spec.loader.exec_module(PILOT)
 
 
 class DailyWindowPilotTests(unittest.TestCase):
+    def test_reuses_production_centroids_seasonal_station_set_and_error_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "production"
+            source.mkdir()
+            season = pd.date_range("2022-05-01", "2022-09-30")
+            frames = []
+            for i in range(6):
+                values = np.full(len(season), 10. + i)
+                if i == 4:
+                    values[:5] = np.nan  # seasonal eligibility must retain this quiet station
+                if i == 5:
+                    values[5:] = np.nan  # five-day eligibility would incorrectly retain this station
+                frames.append(pd.DataFrame({"station_id": f"SOB_{i}", "date": season,
+                                            "lat": 23.0 + i * .1, "lon": 90.0 + i * .1,
+                                            "precip_mm": values, "source": "SUPEROB"}))
+            table = source / "superob_prod_0.25.csv"
+            pd.concat(frames).to_csv(table, index=False)
+            error_report = {"cell_deg": .25, "stations_held_out": 0,
+                            "recommended_representativeness": {"superob_implied_representativeness": .4321},
+                            "stats_provenance": {"path": "original_stats.json", "sha256": "historical_identity"}}
+            (source / "superob_prod_0.25.json").write_text(json.dumps(error_report))
+            output = root / "pilot"
+            output.mkdir()
+            args = SimpleNamespace(root=str(output), production_station_root=str(source), stations=None,
+                                   bmd_data_dir=None, bmd_wide="unused")
+            result = PILOT.reuse_production_gauges(args, PILOT.paths(args))
+            window = pd.read_csv(output / "gauges_reporting.csv")
+            self.assertEqual(set(window.station_id), {f"SOB_{i}" for i in range(5)})
+            self.assertEqual(len(window), 25)
+            self.assertTrue(window.loc[window.station_id == "SOB_4", "precip_mm"].isna().all())
+            np.testing.assert_array_equal(window.loc[window.station_id == "SOB_2", "precip_mm"], np.full(5, 12.))
+            np.testing.assert_array_equal(window.loc[window.station_id == "SOB_2", "lat"], np.full(5, 23.2))
+            self.assertEqual(result["budget"]["superob_implied_representativeness"], .4321)
+            self.assertEqual((output / "superobs.json").read_bytes(), (source / "superob_prod_0.25.json").read_bytes())
+            self.assertEqual(result["provenance"]["preparation_stats_provenance"], error_report["stats_provenance"])
+            self.assertEqual(result["provenance"]["eligibility_period"], ["2022-05-01", "2022-09-30"])
+
+    def test_production_reuse_requires_complete_all_station_archive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(root=str(root), production_station_root=str(root), stations=None,
+                                   bmd_data_dir=None, bmd_wide="unused")
+            (root / "superob_prod_0.25.csv").write_text("incomplete")
+            with self.assertRaisesRegex(FileNotFoundError, "archived production station input missing"):
+                PILOT.reuse_production_gauges(args, PILOT.paths(args))
+            (root / "superob_prod_0.25.json").write_text(json.dumps({
+                "cell_deg": .25, "stations_held_out": 20,
+                "recommended_representativeness": {"superob_implied_representativeness": .4}}))
+            with self.assertRaisesRegex(ValueError, "all-station"):
+                PILOT.reuse_production_gauges(args, PILOT.paths(args))
+
     def test_station_source_falls_back_when_wide_table_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

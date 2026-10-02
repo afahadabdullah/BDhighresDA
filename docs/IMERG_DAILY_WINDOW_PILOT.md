@@ -20,8 +20,12 @@ These are the **May 1–5 gauge reports**, not two different rainfall events.
 Using May 1–5 calendar days in B would require May 2–6 gauge reports and would
 move the experiment forward a day. The script shifts both BMD and BWDB to
 preserve the existing production network and rainfall values. It computes the
-super-observations once and only relabels the resulting dates for B. Station
-eligibility is identical: at least three valid reports in the five-day period.
+station observations once and only relabels their dates for B. In archive-reuse
+mode, station eligibility, centroids, rainfall values and the measured error
+budget come from the older May–September production preparation. When rebuilding
+from raw inputs, eligibility instead requires three valid reports in five days
+and the error budget is measured over those five days. Those modes must be
+distinguished when comparing this pilot to the historical production fields.
 
 The current source readers declare BMD support as `[D−1 00 UTC, D 00 UTC]`
 and BWDB as `[D−1 03 UTC, D 03 UTC]`. Current IMERG matches BWDB exactly;
@@ -111,7 +115,29 @@ explicit `--allow-calendar-day-imerg` option with truthful calendar metadata.
 
 Useful options:
 
-- The pilot prefers the wide BMD history CSV when present. If it is absent,
+- By default, when available, the pilot reuses
+  `data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep/superob_prod_0.25.csv`
+  and its `.json` error report. It applies the older GPU job's 50% coverage
+  threshold over the full May–September season, keeps its spatial centroids,
+  subsets the five days, and preserves the original measured representativeness
+  without re-aggregation or refitting. Stations that qualify for the season
+  remain in the pilot even when they have missing reports in its five days.
+- `--production-station-root /path/to/stations/2022_may_sep`: explicitly require
+  the existing all-station production CSV and JSON. Missing companions fail
+  clearly; evaluation super-observations with held-out stations are rejected.
+  The original preparation-statistics provenance is copied into the experiment
+  manifest, including any historical unresolved identity; reusing the table
+  does not retroactively validate that identity.
+- Explicit `--stations` or `--bmd-data-dir` selects rebuilding from raw data
+  and overrides archive auto-detection. For strict production-input reuse:
+
+  ```bash
+  sbatch slurm/imerg_daily_window_pilot.sbatch --download-imerg \
+    --production-station-root data/processed/v2_bmd_bwdb_superob_2021_2024/stations/2022_may_sep \
+    --root data/processed/imerg_daily_window_pilot_production_stations
+  ```
+
+- When rebuilding from raw inputs, the pilot prefers the wide BMD history CSV when present. If it is absent,
   it automatically uses the existing per-station CSVs in
   `data/stations/data_2020_2025/`, through the same reader/QC as the established
   May 2022 experiment. `Stations.csv` alone is only a coordinate catalogue;
@@ -136,7 +162,7 @@ Useful options:
 
 Default output: `data/processed/imerg_daily_window_pilot_may2022/`.
 
-- `experiment.json`: exact dates, seeds, measured gauge error budget and
+- `experiment.json`: exact dates, seeds, archived/rebuilt station mode, gauge error budget and
   SHA-256 identities of checkpoint, statistics and prepared observations.
 - `reporting.npz/json`, `calendar.npz/json`: sampler results and metadata.
 - `comparison.md/json`: pooled field differences, five-day total differences,
@@ -165,3 +191,12 @@ fits use assimilated observations and do not establish independent skill;
 CHIRPS is a common reference, not independent truth. Small differences in
 these five days motivate a larger pilot spanning intense storms, dry days
 and seasons before replacing half-hourly IMERG in 2001–2024 production.
+
+The older BMD-only archive (`v2_confirmatory_2021_2024`) used the per-station
+BMD directory and catalogue. The later final combined archive
+(`v2_bmd_bwdb_superob_2021_2024`) added the corrected BWDB workbook, aggregated
+the full seasonal station table, and used `superob_prod_0.25.csv/json` in its
+GPU production job. Its preparation launcher defaults to `stats.json` unless
+overridden; the historical report is needed to establish the actual statistics
+used. This pilot's raw rebuild explicitly uses `stats_cpc_v2.json`, while
+archive mode preserves the stored historical budget and records its provenance.
