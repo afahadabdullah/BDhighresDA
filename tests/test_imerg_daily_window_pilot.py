@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,70 @@ spec.loader.exec_module(PILOT)
 
 
 class DailyWindowPilotTests(unittest.TestCase):
+    def test_station_source_falls_back_when_wide_table_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "data/stations/data_2020_2025"
+            directory.mkdir(parents=True)
+            catalog = directory / "Stations.csv"
+            catalog.write_text("catalogue")
+            bwdb = root / "bwdb.xlsx"
+            bwdb.write_text("source")
+            args = SimpleNamespace(bmd_catalog=str(catalog), bwdb=str(bwdb),
+                                   bmd_wide=str(root / "missing_wide.csv"), bmd_data_dir=None)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with self.assertRaisesRegex(FileNotFoundError, "no per-station BMD CSVs"):
+                    PILOT.station_preparation_arguments(args, root / "out.csv", root)
+                (directory / "Dhaka.csv").write_text("date,precip_mm\n2022-05-01,10\n")
+                command = PILOT.station_preparation_arguments(args, root / "out.csv", root)
+                self.assertIn("--bmd-data-dir", command)
+                self.assertNotIn("--bmd-wide", command)
+                Path(args.bmd_wide).write_text("wide history")
+                command = PILOT.station_preparation_arguments(args, root / "out.csv", root)
+                self.assertIn("--bmd-wide", command)
+                args.bmd_data_dir = str(directory)
+                command = PILOT.station_preparation_arguments(args, root / "out.csv", root)
+                self.assertIn("--bmd-data-dir", command)
+            finally:
+                os.chdir(previous)
+
+    def test_station_directory_preparation_preserves_qc_windows_and_provenance(self):
+        spec = importlib.util.spec_from_file_location("_pilot_station_prep", ROOT / "scripts/99_prepare_production_stations.py")
+        prep = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prep)
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            catalog = folder / "Stations.csv"
+            catalog.write_text("StationNumber,Station,StationId,Latitude,Longitude\n1,Dhaka,0,23.76,90.38\n")
+            daily = folder / "Dhaka.csv"
+            daily.write_text("Datetime,Rainfall\n2022-05-01,10\n2022-05-02,***\n2022-05-03,12\n2022-05-04,13\n2022-05-05,14\n")
+            workbook = folder / "bwdb.xlsx"
+            workbook.write_text("source bytes")
+            dates = pd.date_range("2022-05-01", "2022-05-05")
+            bwdb = pd.DataFrame({"station_id": "BWDB_1", "name": "test", "lat": 23.8, "lon": 90.4,
+                                 "date": dates, "precip_mm": 20., "source": "BWDB", "accumulation_end_hour_utc": 3})
+            argv = ["prep", "--bmd-data-dir", str(folder), "--bmd-stations", str(catalog),
+                    "--bwdb-xlsx", str(workbook), "--start", "2022-05-01", "--end", "2022-05-05",
+                    "--min-bmd", "1", "--min-bwdb", "1", "--out", str(folder / "combined.csv"),
+                    "--summary", str(folder / "summary.csv"), "--report", str(folder / "manifest.json")]
+            with patch.object(sys, "argv", argv), patch.object(prep.prep82, "read_bwdb", return_value=(bwdb, {})):
+                prep.main()
+            combined = pd.read_csv(folder / "combined.csv")
+            bmd = combined.loc[combined.source == "BMD"]
+            self.assertEqual(len(bmd), 5)
+            self.assertTrue(np.isnan(bmd.iloc[1].precip_mm))
+            self.assertEqual(bmd.iloc[0].date, "2022-05-01")
+            self.assertTrue((bmd.accumulation_end_hour_utc == 0).all())
+            self.assertTrue((combined.loc[combined.source == "BWDB", "accumulation_end_hour_utc"] == 3).all())
+            manifest = json.loads((folder / "manifest.json").read_text())
+            self.assertEqual(manifest["input_sha256"][str(daily)], PILOT.sha(daily))
+            self.assertNotIn(str(folder / "combined.csv"), manifest["input_sha256"])
+            self.assertEqual(manifest["eligible_station_counts"], {"BMD": 1, "BWDB": 1})
+            with self.assertRaisesRegex(ValueError, "cannot replace the wide BMD history"):
+                prep.read_bmd(SimpleNamespace(bmd_data_dir=str(folder)), pd.Timestamp("2001-01-01"), pd.Timestamp("2001-01-05"))
+
     def test_calendar_ingestion_requires_truthful_metadata_and_explicit_opt_in(self):
         ds = xr.Dataset(attrs={"product": "GPM_3IMERGDF", "source_frequency": "daily",
                                "bmd_accumulation_end_hour_utc": 0, "window_duration_hours": 24,

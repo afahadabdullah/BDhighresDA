@@ -14,6 +14,10 @@ every eligible gauge, so this script:
   unchanged
 * writes NO holdout: every eligible station is assimilated.
 
+For a 2020–2025 pilot without the wide history, --bmd-data-dir uses the
+established per-station reader instead, with the same output schema and QC.
+This optional source cannot serve the earlier historical production years.
+
     python scripts/99_prepare_production_stations.py \
         --start 2005-04-01 --end 2005-06-30 \
         --out ROOT/stations/2005_q2/combined_daily.csv \
@@ -36,7 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from bdhires.bmd import (  # noqa: E402
-    EXTRA_STATION_COORDS, MISSING_TOKENS, SENTINELS, STATION_ALIASES, _station_key, read_station_catalog,
+    EXTRA_STATION_COORDS, MISSING_TOKENS, SENTINELS, STATION_ALIASES, _station_key,
+    read_station_catalog, read_station_dir_bmd,
 )
 
 _spec = importlib.util.spec_from_file_location("prep82", ROOT / "scripts/82_prepare_bmd_bwdb_may2022.py")
@@ -108,7 +113,14 @@ def read_bmd(args, start, end):
     station-days), with no day shift.  The legacy matrix ends during 2018 and the
     directory starts in 2020, so the wide table is the only source that covers
     2001-2020 without a gap.
+    An explicit --bmd-data-dir is supported for bounded 2020–2025 pilots only.
     """
+    directory = getattr(args, "bmd_data_dir", None)
+    if directory:
+        if start < pd.Timestamp("2020-01-01") or end > pd.Timestamp("2025-12-31"):
+            raise ValueError("the 2020–2025 station-directory source cannot replace the wide BMD history outside those years")
+        frame, qc = read_station_dir_bmd(directory, args.bmd_stations, start, end)
+        return frame, [{"station_directory": qc}]
     frame, qc = read_wide_bmd(Path(args.bmd_wide), Path(args.bmd_stations), start, end)
     if frame.duplicated(["station_id", "date"]).any():
         raise ValueError("duplicate BMD station-days")
@@ -119,6 +131,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--start", required=True); p.add_argument("--end", required=True)
     p.add_argument("--bmd-wide", default="data/stations/Rainfall_daily_by_station_BMD.csv")
+    p.add_argument("--bmd-data-dir", help="use existing per-station CSVs instead of the wide table, for 2020–2025 only")
     p.add_argument("--bmd-stations", default="data/stations/data_2020_2025/Stations.csv")
     p.add_argument("--bwdb-xlsx", default="data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx")
     p.add_argument("--bwdb-max-mm", type=float, default=500.0)
@@ -147,11 +160,15 @@ def main() -> None:
         raise SystemExit(f"ERROR: too few eligible gauges for {args.start}..{args.end}: {counts} "
                          f"(need BMD>={args.min_bmd}, BWDB>={args.min_bwdb})")
 
+    bmd_sources = ([path for path in sorted(Path(args.bmd_data_dir).glob("*.csv"))
+                    if path.resolve() != Path(args.bmd_stations).resolve()
+                    and not path.name.lower().endswith("stations.csv")]
+                   if args.bmd_data_dir else [Path(args.bmd_wide)])
+    inputs = [args.bwdb_xlsx, args.bmd_stations, *bmd_sources]
     for path in (args.out, args.summary, args.report):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(args.out, index=False, date_format="%Y-%m-%d")
     summary.to_csv(args.summary, index=False)
-    inputs = [args.bwdb_xlsx, args.bmd_stations, args.bmd_wide]
     report = {
         "mode": "production: every eligible station assimilated; no holdout",
         "period": {"start": str(start.date()), "end": str(end.date()), "days": int(len(dates))},

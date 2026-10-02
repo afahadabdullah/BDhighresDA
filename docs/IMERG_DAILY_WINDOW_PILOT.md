@@ -111,6 +111,15 @@ explicit `--allow-calendar-day-imerg` option with truthful calendar metadata.
 
 Useful options:
 
+- The pilot prefers the wide BMD history CSV when present. If it is absent,
+  it automatically uses the existing per-station CSVs in
+  `data/stations/data_2020_2025/`, through the same reader/QC as the established
+  May 2022 experiment. `Stations.csv` alone is only a coordinate catalogue;
+  daily station CSVs must also exist. Source files and hashes are recorded in
+  `station_preparation.json`. This fallback is limited to 2020–2025 and cannot
+  replace the historical source for 2001–2019 production.
+- `--bmd-data-dir /path/to/data_2020_2025`: explicitly select the per-station
+  source, even when the wide table exists. `--bmd-catalog` sets its catalogue.
 - `--stations /path/to/combined_daily.csv`: original canonical BMD/BWDB
   station table. Dates are filtered to May 1–5 and gauges are aggregated once.
   Already aggregated `SOB_` tables are rejected.

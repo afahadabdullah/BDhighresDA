@@ -56,6 +56,33 @@ def paths(args):
             "a": root / "imerg_reporting_s04.nc", "b": root / "imerg_calendar_s04.nc"}
 
 
+def station_preparation_arguments(args, original, root):
+    """Prefer the national wide table; use the established 2022 directory if absent."""
+    for path in (args.bmd_catalog, args.bwdb):
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"required gauge source missing: {path}")
+    directory = args.bmd_data_dir
+    if directory is None and not Path(args.bmd_wide).is_file():
+        directory = "data/stations/data_2020_2025"
+    if directory is not None:
+        files = [path for path in Path(directory).glob("*.csv")
+                 if path.resolve() != Path(args.bmd_catalog).resolve()
+                 and not path.name.lower().endswith("stations.csv")]
+        if not files:
+            raise FileNotFoundError(
+                f"no per-station BMD CSVs found in {directory}; provide --bmd-data-dir, "
+                "--bmd-wide, or --stations pointing to an existing original combined gauge table")
+        print(f"[pilot] using per-station BMD source: {directory}", flush=True)
+        source = ["--bmd-data-dir", directory]
+    else:
+        print(f"[pilot] using wide BMD history: {args.bmd_wide}", flush=True)
+        source = ["--bmd-wide", args.bmd_wide]
+    return ["--start", START, "--end", END, *source,
+            "--bmd-stations", args.bmd_catalog, "--bwdb-xlsx", args.bwdb,
+            "--out", original, "--summary", root / "station_summary.csv",
+            "--report", root / "station_preparation.json"]
+
+
 def download_daily(directory):
     """Fetch exactly five official daily granules, atomically; never a full year."""
     from bdhires.imerg import _open_granule, _require_mm_per_day
@@ -160,11 +187,8 @@ def prepare(args):
             raise ValueError("supply original gauges, not an already aggregated super-observation table")
         frame.to_csv(original, index=False)
     else:
-        run("99_prepare_production_stations.py", "--start", START, "--end", END,
-            "--bmd-wide", args.bmd_wide, "--bmd-stations", args.bmd_catalog,
-            "--bwdb-xlsx", args.bwdb, "--out", original,
-            "--summary", p["root"] / "station_summary.csv",
-            "--report", p["root"] / "station_preparation.json")
+        run("99_prepare_production_stations.py",
+            *station_preparation_arguments(args, original, p["root"]))
     frame = pd.read_csv(original, parse_dates=["date"], dtype={"station_id": str})
     if frame.duplicated(["station_id", "date"]).any():
         raise ValueError("duplicate original station-days")
@@ -228,6 +252,9 @@ def prepare(args):
     production.validate_imerg(p["a"], START, END, factor=8)
     inputs = [Path(args.ckpt), Path(args.stats), Path(args.config), original, p["gauges"],
               p["shifted"], p["a"], p["b"], *daily_files]
+    preparation_report = p["root"] / "station_preparation.json"
+    if not args.stations:
+        inputs.append(preparation_report)
     if aligned:
         inputs.append(Path(aligned))
     manifest = {"gauge_report_dates": [START, END],
@@ -415,6 +442,7 @@ def main(argv=None):
     parser.add_argument("--data-zarr", default="data/processed/bd_wide_cpc.zarr")
     parser.add_argument("--stations", help="optional original canonical BMD/BWDB table; otherwise read national sources")
     parser.add_argument("--bmd-wide", default="data/stations/Rainfall_daily_by_station_BMD.csv")
+    parser.add_argument("--bmd-data-dir", help="explicit per-station BMD directory; automatically used if the default wide table is absent")
     parser.add_argument("--bmd-catalog", default="data/stations/data_2020_2025/Stations.csv")
     parser.add_argument("--bwdb", default="data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx")
     parser.add_argument("--aligned-imerg", help="existing native or S04 reporting-window IMERG; auto-detects the May archive")
