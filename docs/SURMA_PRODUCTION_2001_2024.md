@@ -36,6 +36,11 @@ old seasonal test windows, not full calendar-year input availability.
 
 ## Audit PRISM first
 
+To prioritize overnight half-hourly IMERG acquisition, use the dedicated
+[resumable download job](IMERG_PRODUCTION_DOWNLOAD.md) before launching the
+full production chain. It validates and prepares all 288 native months at the
+paths this launcher reuses, with at most three concurrent NASA downloads.
+
 From the PRISM repository root:
 
 ```bash
