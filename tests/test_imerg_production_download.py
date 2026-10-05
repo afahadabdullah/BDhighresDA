@@ -323,7 +323,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.stdout.strip().splitlines()), 3)
         self.assertIn("--probe-only", result.stdout)
-        self.assertIn("--dependency=afterok:DRY_PROBE --array=0-23%3", result.stdout)
+        self.assertIn("--dependency=afterok:DRY_PROBE --array=0-23%15", result.stdout)
         self.assertIn("--year-array-worker 2001 2024", result.stdout)
         self.assertIn("--dependency=afterok:DRY_ARRAY", result.stdout)
         self.assertIn("--collect-years", result.stdout)

@@ -35,8 +35,9 @@ bash slurm/submit_imerg_production_download.sh --parallel-years
 Add `--account=YOUR_ACCOUNT` if required. Parallel mode submits a dependency
 chain: **fresh one-granule probe → year array → final collection audit**.
 The probe checks authenticated transfer, required variables, units and native
-regional grid before releasing 24 year tasks (`--array=0-23%3`). At most
-**three years run simultaneously, with one transfer worker each**. Each year
+regional grid before releasing 24 year tasks (`--array=0-23%15`). At most
+**15 years run simultaneously, with one transfer worker each**, as requested.
+Override the year-task limit with `IMERG_YEAR_CONCURRENCY` (1..24). Each year
 task has 2 CPUs, 12 GB memory and its own 24-hour wall limit; the probe and
 collector use 8 CPUs and 24 GB. All jobs run on `grace-cpuonly` without a GPU.
 The job uses the existing GH200 scientific environment:
@@ -55,11 +56,12 @@ credentials are not written to progress reports.
 
 Omitting `--parallel-years` retains one coordinator with at most
 **three serial download workers in total**, 8 CPUs, 24 GB memory and a 24-hour
-wall limit. Parallel years improve scheduling, isolation and per-year restart;
-they have the same maximum transfer concurrency as one coordinator.
+wall limit. `IMERG_DOWNLOAD_CONNECTIONS` controls this coordinator's workers;
+`IMERG_YEAR_CONCURRENCY` independently controls the year array's task limit.
 With the Requests transport, each worker reuses its HTTP session across
-granules and months. This follows
-[GES DISC's published three-connection maximum](https://forum.earthdata.nasa.gov/viewtopic.php?p=23888&sid=976eaeb9c72fd601c7f52271ce7fec9c).
+granules and months. For conservative transfer concurrency matching
+[GES DISC's three-connection guidance](https://forum.earthdata.nasa.gov/viewtopic.php?p=23888&sid=976eaeb9c72fd601c7f52271ce7fec9c),
+set `IMERG_YEAR_CONCURRENCY=3`; the requested default is now 15 active transfers.
 Do not run the old IMERG download arrays alongside this job: their connections
 would add to this total. Submit one workflow at a time. Shared archive and
 exclusive reporting-year locks permit disjoint year jobs and prevent
@@ -72,8 +74,15 @@ Optional examples:
 bash slurm/submit_imerg_production_download.sh --month=2022-05
 
 # Fewer connections, selected years, or a different wall limit.
-IMERG_START_YEAR=2021 IMERG_END_YEAR=2024 IMERG_DOWNLOAD_CONNECTIONS=2 \
+IMERG_START_YEAR=2021 IMERG_END_YEAR=2024 IMERG_YEAR_CONCURRENCY=2 \
   bash slurm/submit_imerg_production_download.sh --parallel-years --time=18:00:00
+```
+
+Raise an existing array's task limit without resubmitting or changing the
+collector's dependency:
+
+```bash
+scontrol update JobId=37938704 ArrayTaskThrottle=15
 ```
 
 Default paths can be overridden with `SURMA_PROD_IMERG_RAW`,

@@ -33,6 +33,8 @@ done
 [[ "${IMERG_DOWNLOAD_CONNECTIONS:-3}" =~ ^[123]$ ]] || { echo "ERROR: connections must be 1, 2 or 3" >&2; exit 2; }
 if (( TASK_PARALLEL )); then
     (( ! TASK_HAS_MONTH )) || { echo "ERROR: --parallel-years requires complete years, without --month" >&2; exit 2; }
+    TASK_YEAR_CONCURRENCY="${IMERG_YEAR_CONCURRENCY:-15}"
+    [[ "$TASK_YEAR_CONCURRENCY" =~ ^([1-9]|1[0-9]|2[0-4])$ ]] || { echo "ERROR: IMERG_YEAR_CONCURRENCY must be 1..24" >&2; exit 2; }
     TASK_YEAR_COUNT=$(( ${IMERG_END_YEAR:-2024} - ${IMERG_START_YEAR:-2001} + 1 ))
     TASK_STATE="${IMERG_DOWNLOAD_STATE:-data/processed/imerg_download_2001_2024}"
     TASK_SCRIPT=slurm/imerg_production_download.sbatch
@@ -49,7 +51,7 @@ if (( TASK_PARALLEL )); then
     }
     if (( TASK_DRY )); then
         submit_year_stage --job-name=imerg-hh-probe "$TASK_SCRIPT" "${TASK_ARGS[@]}" --connections 1 --probe-only
-        submit_year_stage --dependency=afterok:DRY_PROBE --array="0-$((TASK_YEAR_COUNT-1))%${IMERG_DOWNLOAD_CONNECTIONS:-3}" \
+        submit_year_stage --dependency=afterok:DRY_PROBE --array="0-$((TASK_YEAR_COUNT-1))%${TASK_YEAR_CONCURRENCY}" \
             --job-name=imerg-hh-year --cpus-per-task=2 --mem=12G --output='logs/imerg-hh-year-%A_%a.out' \
             "$TASK_SCRIPT" --year-array-worker "${IMERG_START_YEAR:-2001}" "${IMERG_END_YEAR:-2024}" "$TASK_STATE" "${TASK_ARGS[@]}"
         submit_year_stage --dependency=afterok:DRY_ARRAY --job-name=imerg-hh-collect "$TASK_SCRIPT" "${TASK_ARGS[@]}" --collect-years
@@ -57,11 +59,11 @@ if (( TASK_PARALLEL )); then
     fi
     mkdir -p logs
     TASK_PROBE="$(submit_year_stage --job-name=imerg-hh-probe "$TASK_SCRIPT" "${TASK_ARGS[@]}" --connections 1 --probe-only)"
-    TASK_ARRAY="$(submit_year_stage --dependency="afterok:$TASK_PROBE" --array="0-$((TASK_YEAR_COUNT-1))%${IMERG_DOWNLOAD_CONNECTIONS:-3}" \
+    TASK_ARRAY="$(submit_year_stage --dependency="afterok:$TASK_PROBE" --array="0-$((TASK_YEAR_COUNT-1))%${TASK_YEAR_CONCURRENCY}" \
         --job-name=imerg-hh-year --cpus-per-task=2 --mem=12G --output='logs/imerg-hh-year-%A_%a.out' \
         "$TASK_SCRIPT" --year-array-worker "${IMERG_START_YEAR:-2001}" "${IMERG_END_YEAR:-2024}" "$TASK_STATE" "${TASK_ARGS[@]}")"
     TASK_COLLECT="$(submit_year_stage --dependency="afterok:$TASK_ARRAY" --job-name=imerg-hh-collect "$TASK_SCRIPT" "${TASK_ARGS[@]}" --collect-years)"
-    echo "Probe: $TASK_PROBE; year array: $TASK_ARRAY (at most ${IMERG_DOWNLOAD_CONNECTIONS:-3} years, one worker each); final audit: $TASK_COLLECT"
+    echo "Probe: $TASK_PROBE; year array: $TASK_ARRAY (at most ${TASK_YEAR_CONCURRENCY} years, one worker each); final audit: $TASK_COLLECT"
     echo "Probe log: logs/imerg-hh-production-$TASK_PROBE.out"
     echo "Year logs: logs/imerg-hh-year-${TASK_ARRAY}_TASK.out; task 0 is ${IMERG_START_YEAR:-2001}"
     echo "Year progress: $TASK_STATE/years/YEAR/status.json"
