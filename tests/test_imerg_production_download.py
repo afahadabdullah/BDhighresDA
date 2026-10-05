@@ -127,7 +127,65 @@ class DownloadTests(unittest.TestCase):
             session.get.return_value = response(status=401)
             with self.assertRaises(DL.AuthenticationError):
                 DL.download_one(request, Path(temp), session)
-            self.assertEqual(session.get.call_count, 3)
+            self.assertEqual(session.get.call_count, 4)
+            session.cookies.clear.assert_called_once()
+
+    def test_expired_cookie_is_cleared_and_same_granule_retried(self):
+        import requests
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            request = DL.requests_for(MONTH)[0]
+            session = requests.Session()
+            session.cookies.set("expired", "fixture", domain="opendap.earthdata.nasa.gov")
+            denied = response(status=401)
+            def get(url, **kwargs):
+                self.assertEqual(url, request.url)
+                if session.cookies:
+                    return denied
+                denied.__exit__.assert_called_once()
+                return response()
+            with patch.object(session, "get", side_effect=get) as fetch:
+                self.assertEqual(DL.download_one(request, folder, session, retries=1), "downloaded")
+            self.assertEqual(fetch.call_count, 2)
+            self.assertFalse(session.cookies)
+            self.assertEqual((folder / request.output_name).read_bytes(), BINARY)
+            self.assertFalse(list(folder.glob("*.part")))
+
+    def test_persistent_401_and_forbidden_response_never_promote_or_loop(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(DL.time, "sleep") as sleep:
+            folder = Path(temp)
+            request = DL.requests_for(MONTH)[0]
+            for status, expected_calls in ((401, 2), (403, 1)):
+                session = Mock()
+                session.get.return_value = response(status=status)
+                # A partial file from an interrupted transfer must also be removed.
+                (folder / (request.output_name + ".part")).write_bytes(b"partial")
+                with self.assertRaisesRegex(DL.AuthenticationError, f"HTTP {status}"):
+                    DL.download_one(request, folder, session, retries=5)
+                self.assertEqual(session.get.call_count, expected_calls)
+                self.assertEqual(session.cookies.clear.call_count, expected_calls - 1)
+                self.assertFalse(list(folder.iterdir()))
+            sleep.assert_not_called()
+
+    def test_metadata_401_is_refreshed_before_schema_is_cached(self):
+        request = DL.requests_for(MONTH)[0]
+        for name in ("schema", "session"):
+            if hasattr(DL.LOCAL, name):
+                delattr(DL.LOCAL, name)
+        session = Mock()
+        metadata = response()
+        metadata.content = DMR.encode()
+        session.get.side_effect = [response(status=401), metadata]
+        try:
+            with patch.object(DL, "make_session", return_value=session):
+                DL.resolve_cloud_request(request, SimpleNamespace(transport="requests"))
+            session.cookies.clear.assert_called_once()
+            self.assertEqual(session.get.call_count, 2)
+            self.assertIn("randomError", DL.LOCAL.schema)
+        finally:
+            for name in ("schema", "session"):
+                if hasattr(DL.LOCAL, name):
+                    delattr(DL.LOCAL, name)
 
     def test_wget_fallback_preserves_resume_and_handles_auth_failure(self):
         request = DL.requests_for(MONTH)[0]

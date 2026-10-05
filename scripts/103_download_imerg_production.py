@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import date
 import fcntl
@@ -116,9 +116,7 @@ def resolve_cloud_request(request, args):
         else:
             if not hasattr(LOCAL, "session"):
                 LOCAL.session = make_session()
-            with LOCAL.session.get(metadata_url, timeout=(30, 180)) as response:
-                if response.status_code in (401, 403):
-                    raise AuthenticationError("Earthdata denied cloud OPeNDAP metadata access; check ~/.netrc and application authorization")
+            with authenticated_response(LOCAL.session, metadata_url, timeout=(30, 180)) as response:
                 response.raise_for_status()
                 document = response.content
         LOCAL.schema = schema_from_dmr(document)
@@ -138,6 +136,27 @@ def write_json(path, value):
 
 class AuthenticationError(RuntimeError):
     pass
+
+
+@contextmanager
+def authenticated_response(session, url, **kwargs):
+    """Retry a 401 once without stale cookies; persistent denial remains fatal."""
+    for attempt in range(2):
+        with session.get(url, **kwargs) as response:
+            if response.status_code == 401 and attempt == 0:
+                # Keep the netrc credentials and trusted-host redirect handling.
+                # Only this worker's in-memory cookies are discarded; the shared
+                # cookie file is untouched. Exiting the context closes the 401
+                # response before the pool's single connection is reused.
+                session.cookies.clear()
+                print("[auth] Earthdata HTTP 401; cleared session cookies; retrying once", flush=True)
+                continue
+            if response.status_code in (401, 403):
+                detail = " after clearing session cookies" if attempt else ""
+                raise AuthenticationError(
+                    f"Earthdata HTTP {response.status_code}{detail}; check ~/.netrc and GES DISC authorization")
+            yield response
+            return
 
 
 def make_session():
@@ -185,10 +204,7 @@ def download_one(request, output, session, retries=5):
     temporary = destination.with_name(destination.name + ".part")
     for attempt in range(retries):
         try:
-            with session.get(request.url, stream=True, timeout=(30, 180)) as response:
-                if response.status_code in (401, 403):
-                    raise AuthenticationError(
-                        f"Earthdata HTTP {response.status_code}; check ~/.netrc and GES DISC authorization")
+            with authenticated_response(session, request.url, stream=True, timeout=(30, 180)) as response:
                 if response.status_code == 404:
                     final_url = getattr(response, "url", None)
                     responding_host = urlparse(final_url if isinstance(final_url, str) else request.url).hostname

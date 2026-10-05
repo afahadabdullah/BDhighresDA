@@ -54,6 +54,14 @@ GES DISC/cloud OPeNDAP access are required. Preserve private credentials outside
 otherwise workers establish fresh authenticated sessions. Cookies and
 credentials are not written to progress reports.
 
+The Requests transport retries an HTTP 401 once after clearing that worker's
+in-memory session cookies, using the existing netrc credentials and redirect
+handling. This covers a stale-cookie failure during either metadata access or
+granule transfer. The shared `~/.urs_cookies` file is not modified. Persistent
+401 responses and HTTP 403 still stop the worker without issuing a readiness
+receipt. The log records `[auth]` when the cookie refresh is attempted; this
+does not establish that session expiry caused a particular failure.
+
 Omitting `--parallel-years` retains one coordinator with at most
 **three serial download workers in total**, 8 CPUs, 24 GB memory and a 24-hour
 wall limit. `IMERG_DOWNLOAD_CONNECTIONS` controls this coordinator's workers;
