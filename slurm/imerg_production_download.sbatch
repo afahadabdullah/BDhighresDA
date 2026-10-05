@@ -20,4 +20,18 @@ export PYTHONPATH="$PWD/src"
 [[ -f "$HOME/.netrc" ]] || { echo "ERROR: Earthdata ~/.netrc missing" >&2; exit 1; }
 "$TASK_PYTHON" -c 'import numpy, xarray, netCDF4'
 echo "IMERG half-hourly production download; job $SLURM_JOB_ID; host $(hostname)"
+if [[ "${1:-}" == "--year-array-worker" ]]; then
+    TASK_ARRAY_START="$2"
+    TASK_ARRAY_END="$3"
+    TASK_ARRAY_STATE="$4"
+    shift 4
+    TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Missing year array task ID}"
+    [[ "$TASK_INDEX" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid array task ID" >&2; exit 2; }
+    TASK_YEAR=$((TASK_ARRAY_START + TASK_INDEX))
+    (( TASK_YEAR <= TASK_ARRAY_END )) || { echo "ERROR: array task outside year range" >&2; exit 2; }
+    # One transfer at a time per year; the array itself limits total transfers.
+    set -- "$@" --start-year "$TASK_YEAR" --end-year "$TASK_YEAR" --connections 1 \
+        --state "$TASK_ARRAY_STATE/years/$TASK_YEAR"
+    echo "Year-array task $TASK_INDEX: reporting year $TASK_YEAR; one download worker"
+fi
 exec "$TASK_PYTHON" -u scripts/103_download_imerg_production.py "$@"

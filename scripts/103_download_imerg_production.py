@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import ExitStack
+from dataclasses import replace
 from datetime import date
 import fcntl
 import importlib.util
@@ -18,12 +20,16 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 BBOX = "20.3,87.6,26.7,94.0"
+CLOUD = "https://opendap.earthdata.nasa.gov"
+COLLECTION = "C2723754847-GES_DISC"
 LOCAL = threading.local()
 
 
@@ -49,6 +55,74 @@ def prepared_path(folder, month):
 def requests_for(month):
     return [HH.request_for(value, BBOX) for value in HH.bmd_interval_starts(
         date.fromisoformat(month["start"]), date.fromisoformat(month["end"]), 3)]
+
+
+def cloud_base(request):
+    identifier = HH.DATASET + ":" + request.source_name
+    return f"{CLOUD}/collections/{COLLECTION}/granules/{quote(identifier, safe='')}"
+
+
+def schema_from_dmr(document):
+    """Read actual variable paths/dimension order rather than assuming a Grid group."""
+    root = ET.fromstring(document)
+    variables = {}
+    def walk(group, prefix=""):
+        for child in group:
+            tag = child.tag.rsplit("}", 1)[-1]
+            name = child.attrib.get("name", "")
+            if tag == "Group":
+                walk(child, prefix + "/" + name)
+            elif name in ("precipitation", "randomError", "lat", "lon", "time"):
+                dimensions = [item.attrib.get("name", "").rsplit("/", 1)[-1]
+                              for item in child if item.tag.rsplit("}", 1)[-1] == "Dim"]
+                if tag not in ("Dimension", "Attribute"):
+                    variables[name] = (prefix + "/" + name, dimensions)
+    walk(root)
+    for name in ("precipitation", "randomError", "lat", "lon", "time"):
+        if name not in variables:
+            raise ValueError("Cloud IMERG metadata lacks " + name)
+    for name in ("precipitation", "randomError"):
+        if sorted(variables[name][1]) != ["lat", "lon", "time"]:
+            raise ValueError("Unsupported IMERG dimensions: " + name)
+    for name in ("lat", "lon", "time"):
+        if variables[name][1] != [name]:
+            raise ValueError("Unsupported IMERG coordinate dimensions: " + name)
+    return variables
+
+
+def cloud_request(request, schema):
+    # Global V07B centres: -179.95 + 0.1*i; -89.95 + 0.1*j.
+    # Native BD cells: 87.65..93.95 E and 20.35..26.65 N, 64 x 64.
+    slices = {"time": "[0:1:0]", "lon": "[2676:1:2739]", "lat": "[1103:1:1166]"}
+    projections = []
+    for name in ("precipitation", "randomError", "lat", "lon", "time"):
+        path, dimensions = schema[name]
+        projections.append(path + "".join(slices[dimension] for dimension in dimensions))
+    return replace(request, url=cloud_base(request) + ".dap.nc4?" + urlencode({"dap4.ce": ";".join(projections)}))
+
+
+def resolve_cloud_request(request, args):
+    if not hasattr(LOCAL, "schema"):
+        metadata_url = cloud_base(request) + ".dmr"
+        if getattr(args, "transport", "requests") == "wget":
+            with tempfile.TemporaryDirectory(dir=args.state) as folder:
+                path = Path(folder) / "schema.xml"
+                command = ["wget", "--auth-no-challenge=on", "--tries=3", "--timeout=120", "-q", "-O", str(path), metadata_url]
+                cookies = Path.home() / ".urs_cookies"
+                if cookies.is_file():
+                    command[1:1] = ["--load-cookies", str(cookies)]
+                subprocess.run(command, check=True)
+                document = path.read_bytes()
+        else:
+            if not hasattr(LOCAL, "session"):
+                LOCAL.session = make_session()
+            with LOCAL.session.get(metadata_url, timeout=(30, 180)) as response:
+                if response.status_code in (401, 403):
+                    raise AuthenticationError("Earthdata denied cloud OPeNDAP metadata access; check ~/.netrc and application authorization")
+                response.raise_for_status()
+                document = response.content
+        LOCAL.schema = schema_from_dmr(document)
+    return cloud_request(request, LOCAL.schema)
 
 
 def month_count(month):
@@ -82,7 +156,7 @@ def make_session():
             # Keep authentication only on the two explicitly trusted HTTPS hosts.
             target = urlparse(prepared_request.url)
             if target.scheme != "https" or target.hostname not in (
-                    "urs.earthdata.nasa.gov", urlparse(HH.SERVICE).hostname):
+                    "urs.earthdata.nasa.gov", urlparse(HH.SERVICE).hostname, urlparse(CLOUD).hostname):
                 prepared_request.headers.pop("Authorization", None)
             else:
                 prepared_request.prepare_auth(self.auth)
@@ -116,7 +190,11 @@ def download_one(request, output, session, retries=5):
                     raise AuthenticationError(
                         f"Earthdata HTTP {response.status_code}; check ~/.netrc and GES DISC authorization")
                 if response.status_code == 404:
-                    raise FileNotFoundError("GES DISC granule not found: " + request.output_name)
+                    final_url = getattr(response, "url", None)
+                    responding_host = urlparse(final_url if isinstance(final_url, str) else request.url).hostname
+                    raise FileNotFoundError("HTTP 404 from " + str(responding_host)
+                                            + " for " + request.output_name
+                                            + "; endpoint/subset failure does not establish a missing archive granule")
                 response.raise_for_status()
                 with temporary.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -183,18 +261,23 @@ def process_month(args, month, progress, stop):
         raw.mkdir(parents=True, exist_ok=True)
         granules = requests_for(month)
         manifest = raw / f"_urls_bmd_{month['start'].replace('-', '')}_{month['end'].replace('-', '')}_end03utc.txt"
-        manifest.write_text("\n".join(request.url for request in granules) + "\n")
+        # The old OTF URL is deliberately excluded: discover cloud variable paths
+        # once per worker, then write the actual DAP4 URLs as downloads are needed.
+        with manifest.open("w") as urls:
+            urls.write("# Cloud DAP4 subset URLs used for missing granules\n")
         for index, request in enumerate(granules, 1):
             if stop.is_set():
                 raise RuntimeError("Stopped after an Earthdata authentication failure")
             if HH.valid_netcdf(raw / request.output_name):
                 result = "cached"
-            elif getattr(args, "transport", "requests") == "wget":
-                result = download_wget(request, raw)
             else:
-                if not hasattr(LOCAL, "session"):
-                    LOCAL.session = make_session()
-                result = download_one(request, raw, LOCAL.session)
+                request = resolve_cloud_request(request, args)
+                with manifest.open("a") as urls:
+                    urls.write(request.url + "\n")
+                if getattr(args, "transport", "requests") == "wget":
+                    result = download_wget(request, raw)
+                else:
+                    result = download_one(request, raw, LOCAL.session)
             progress(result, 1)
             if index == 1 or index % 100 == 0 or index == len(granules):
                 log.write(f"[{index}/{len(granules)}] {result}: {request.output_name}\n")
@@ -222,13 +305,23 @@ def process_month(args, month, progress, stop):
 def run(args, months):
     raw = Path(args.raw)
     raw.mkdir(parents=True, exist_ok=True)
-    # An OS lock is released on exit/Slurm termination. It prevents duplicate
-    # coordinators on the same raw archive, even with different state folders.
-    with (raw / ".production_download.lock").open("a") as lock:
+    # Shared root lock excludes older single-coordinator versions, which held
+    # it exclusively. Exclusive reporting-year locks permit disjoint year jobs.
+    with ExitStack() as stack:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            root_lock = stack.enter_context((raw / ".production_download.lock").open("a"))
+            fcntl.flock(root_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            for year in sorted({month["start"][:4] for month in months}):
+                folder = raw / year
+                folder.mkdir(parents=True, exist_ok=True)
+                lock = stack.enter_context((folder / ".production_download.lock").open("a"))
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another production IMERG downloader already owns this raw archive") from None
+        if getattr(args, "probe_only", False):
+            return probe(args, months)
+        if getattr(args, "collect_years", False):
+            return collect_years(args, months)
         return run_locked(args, months)
 
 
@@ -240,7 +333,7 @@ def run_locked(args, months):
     required = sum(month_count(month) for month in months)
     summary = {"status": "running", "start": months[0]["start"], "end": months[-1]["end"],
                "required_granules": required, "connections": args.connections,
-               "transport": getattr(args, "transport", "requests"),
+               "transport": getattr(args, "transport", "requests"), "source": "cloud-opendap",
                "downloaded": 0, "cached": 0, "prepared_cache": 0, "months": {}}
     mutex = threading.Lock()
     started = time.monotonic()
@@ -300,6 +393,72 @@ def run_locked(args, months):
     print(f"[ready] All {len(months)} selected IMERG months validated: {ready}", flush=True)
 
 
+def probe(args, months):
+    """Fresh authenticated transfer and scientific check before releasing an array."""
+    state = Path(args.state)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "IMERG_READY.json").unlink(missing_ok=True)
+    write_json(state / "status.json", {"status": "probing", "source": "cloud-opendap"})
+    request = resolve_cloud_request(requests_for(months[0])[0], args)
+    with tempfile.TemporaryDirectory(dir=state) as folder:
+        output = Path(folder)
+        if args.transport == "wget":
+            download_wget(request, output)
+        else:
+            download_one(request, output, LOCAL.session)
+        with (state / "probe.out").open("a") as log:
+            scientific_command([Path(__file__), "--validate-granule", output / request.output_name], log)
+    write_json(state / "probe.json", {"status": "validated", "source": "cloud-opendap",
+                                     "granule": request.source_name, "subset_url": request.url})
+    print("[probe] Fresh cloud subset passed regional variable/unit/grid validation", flush=True)
+
+
+def collect_years(args, months):
+    """Audit every year receipt and prepared file before the full-period handoff."""
+    state = Path(args.state)
+    state.mkdir(parents=True, exist_ok=True)
+    ready = state / "IMERG_READY.json"
+    ready.unlink(missing_ok=True)
+    reports = {}
+    for year in sorted({month["start"][:4] for month in months}):
+        path = state / "years" / year / "IMERG_READY.json"
+        report = json.loads(path.read_text())
+        if (report.get("status") != "ready" or report.get("source") != "cloud-opendap"
+                or report.get("start") != year + "-01-01" or report.get("end") != year + "-12-31"):
+            raise ValueError("Incomplete year receipt: " + str(path))
+        reports[year] = report
+    merged = {}
+    with (state / "collection_validation.out").open("a") as log:
+        for month in months:
+            key = month["start"][:7]
+            recorded = reports[key[:4]]["months"].get(key, {})
+            path = prepared_path(args.daily, month)
+            if recorded.get("status") != "validated" or Path(recorded.get("file", "")).resolve() != path.resolve():
+                raise ValueError("Missing/mismatched year result: " + key)
+            validate_month(path, month, log)
+            merged[key] = recorded
+    summary = {"status": "ready", "source": "cloud-opendap", "start": months[0]["start"],
+               "end": months[-1]["end"], "required_granules": sum(month_count(month) for month in months),
+               "months": merged, "year_receipts": list(reports)}
+    write_json(state / "status.json", summary)
+    write_json(ready, summary)
+    print(f"[ready] All {len(months)} year-array months validated: {ready}")
+
+
+def validate_granule(path):
+    import numpy as np
+    from bdhires.imerg import _open_granule, _regional_array, _require_mm_per_hour, _coarse_centres
+    from bdhires.grids import BD
+    lat, lon = _coarse_centres(BD, 2)
+    with _open_granule(Path(path), required=frozenset({"precipitation", "randomError"})) as ds:
+        _require_mm_per_hour(ds, Path(path))
+        for name in ("precipitation", "randomError"):
+            values = _regional_array(ds, name, lat, lon)
+            if not np.any(np.isfinite(values) & (values >= 0)):
+                raise ValueError("No valid regional values in " + name)
+    print("Validated regional half-hourly granule " + str(path))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start-year", type=int, default=2001)
@@ -312,10 +471,18 @@ def main():
     parser.add_argument("--daily", default="data/processed")
     parser.add_argument("--state", default="data/processed/imerg_download_2001_2024")
     parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--probe-only", action="store_true")
+    mode.add_argument("--collect-years", action="store_true")
+    parser.add_argument("--validate-granule", help=argparse.SUPPRESS)
     parser.add_argument("--validate-file", help=argparse.SUPPRESS)
     parser.add_argument("--validate-start", help=argparse.SUPPRESS)
     parser.add_argument("--validate-end", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.validate_granule:
+        sys.path.insert(0, str(ROOT / "src"))
+        validate_granule(args.validate_granule)
+        return
     if args.validate_file:
         PROD.validate_imerg(Path(args.validate_file), args.validate_start, args.validate_end)
         print("Validated " + args.validate_file)
@@ -325,6 +492,8 @@ def main():
     if not 2001 <= args.start_year <= args.end_year <= 2024:
         parser.error("Year range must be within 2001..2024")
     months = PROD.monthly(args.start_year, args.end_year)
+    if args.collect_years and args.month:
+        parser.error("--collect-years requires complete years, without --month")
     if args.month:
         available = {month["start"][:7] for month in months}
         if not set(args.month) <= available:
@@ -336,9 +505,13 @@ def main():
     print(f"Interval starts: {first.start} through {last.start} UTC; reporting windows end 03 UTC")
     print(f"At most {args.connections} concurrent downloads; valid raw/prepared caches reused")
     print(f"HTTP transport: {args.transport}")
+    print(f"Source: cloud OPeNDAP collection {COLLECTION}; DAP4 regional NetCDF4 subsets")
     if args.dry_run:
         present = sum(prepared_path(args.daily, month).is_file() for month in months)
         print(f"Dry run: {present} prepared monthly files present (contents not validated); no writes/downloads")
+        return
+    if args.collect_years:
+        run(args, months)
         return
     if args.transport == "wget" and not shutil.which("wget"):
         parser.error("wget is unavailable; select an existing Python environment with requests installed")

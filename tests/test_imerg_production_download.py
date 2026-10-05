@@ -9,6 +9,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("_download_production_test", ROOT / "scripts/103_download_imerg_production.py")
@@ -16,6 +17,12 @@ DL = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(DL)
 MONTH = {"start": "2022-05-01", "end": "2022-05-31"}
 BINARY = b"\x89HDF\r\n\x1a\n" + b"x" * 1024
+DMR = '''<Dataset xmlns="http://xml.opendap.org/ns/DAP/4.0#">
+<Float32 name="precipitation"><Dim name="/time"/><Dim name="/lon"/><Dim name="/lat"/></Float32>
+<Float32 name="randomError"><Dim name="/time"/><Dim name="/lon"/><Dim name="/lat"/></Float32>
+<Float32 name="lat"><Dim name="/lat"/></Float32>
+<Float32 name="lon"><Dim name="/lon"/></Float32>
+<Int32 name="time"><Dim name="/time"/></Int32></Dataset>'''
 
 
 def response(body=BINARY, status=200):
@@ -27,6 +34,53 @@ def response(body=BINARY, status=200):
 
 
 class DownloadTests(unittest.TestCase):
+    def test_cloud_subset_uses_catalog_identity_actual_paths_and_native_cells(self):
+        request = DL.requests_for(MONTH)[0]
+        schema = DL.schema_from_dmr(DMR)
+        cloud = DL.cloud_request(request, schema)
+        parsed = urlparse(cloud.url)
+        self.assertEqual(parsed.hostname, "opendap.earthdata.nasa.gov")
+        self.assertIn("C2723754847-GES_DISC", parsed.path)
+        self.assertIn("GPM_3IMERGHH.07%3A", parsed.path)
+        self.assertTrue(parsed.path.endswith(".HDF5.dap.nc4"))
+        ce = parse_qs(parsed.query)["dap4.ce"][0]
+        self.assertIn("/precipitation[0:1:0][2676:1:2739][1103:1:1166]", ce)
+        self.assertIn("/randomError[0:1:0][2676:1:2739][1103:1:1166]", ce)
+        self.assertIn("/lat[1103:1:1166]", ce)
+        self.assertNotIn("HTTP_services.cgi", cloud.url)
+        self.assertEqual(cloud.output_name, request.output_name)
+
+    def test_cloud_metadata_accepts_group_paths_and_dimension_order_changes(self):
+        inner = DMR.split('>', 1)[1].rsplit('</Dataset>', 1)[0]
+        document = '<Dataset xmlns="http://xml.opendap.org/ns/DAP/4.0#"><Group name="Grid">' + inner + '</Group></Dataset>'
+        cloud = DL.cloud_request(DL.requests_for(MONTH)[0], DL.schema_from_dmr(document))
+        ce = parse_qs(urlparse(cloud.url).query)["dap4.ce"][0]
+        self.assertIn("/Grid/precipitation", ce)
+        document = DMR.replace('<Dim name="/lon"/><Dim name="/lat"/>', '<Dim name="/lat"/><Dim name="/lon"/>')
+        cloud = DL.cloud_request(DL.requests_for(MONTH)[0], DL.schema_from_dmr(document))
+        self.assertIn("/precipitation[0:1:0][1103:1:1166][2676:1:2739]", parse_qs(urlparse(cloud.url).query)["dap4.ce"][0])
+        with self.assertRaisesRegex(ValueError, "lacks randomError"):
+            DL.schema_from_dmr(DMR.replace('name="randomError"', 'name="otherError"'))
+
+    def test_cloud_schema_is_fetched_once_per_worker(self):
+        request = DL.requests_for(MONTH)[0]
+        for name in ("schema", "session"):
+            if hasattr(DL.LOCAL, name): delattr(DL.LOCAL, name)
+        session = Mock()
+        metadata = response()
+        metadata.content = DMR.encode()
+        session.get.return_value = metadata
+        args = SimpleNamespace(transport="requests")
+        try:
+            with patch.object(DL, "make_session", return_value=session):
+                DL.resolve_cloud_request(request, args)
+                DL.resolve_cloud_request(DL.requests_for(MONTH)[1], args)
+            self.assertEqual(session.get.call_count, 1)
+            self.assertTrue(session.get.call_args[0][0].endswith(".dmr"))
+        finally:
+            for name in ("schema", "session"):
+                if hasattr(DL.LOCAL, name): delattr(DL.LOCAL, name)
+
     def test_full_calendar_and_year_boundary(self):
         months = DL.PROD.monthly(2001, 2024)
         self.assertEqual(len(months), 288)
@@ -136,6 +190,54 @@ class DownloadTests(unittest.TestCase):
                         DL.run(args, [MONTH])
                 run.assert_not_called()
 
+    def test_year_locks_allow_disjoint_jobs_and_reject_overlapping_years(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = SimpleNamespace(raw=Path(temp))
+            folder = args.raw / "2022"
+            folder.mkdir()
+            with (folder / ".production_download.lock").open("a") as lock:
+                DL.fcntl.flock(lock, DL.fcntl.LOCK_EX | DL.fcntl.LOCK_NB)
+                with patch.object(DL, "run_locked") as run:
+                    DL.run(args, DL.PROD.monthly(2021, 2021))
+                    self.assertEqual(run.call_count, 1)
+                    with self.assertRaisesRegex(RuntimeError, "already owns"):
+                        DL.run(args, DL.PROD.monthly(2022, 2022))
+
+    def test_year_collection_requires_matching_receipts_and_revalidates_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            args = SimpleNamespace(state=folder / "state", daily=folder / "daily")
+            months = DL.PROD.monthly(2022, 2022)
+            report = {"status": "ready", "source": "cloud-opendap", "start": "2022-01-01", "end": "2022-12-31",
+                      "months": {m["start"][:7]: {"status": "validated", "file": str(DL.prepared_path(args.daily, m))} for m in months}}
+            receipt = args.state / "years/2022/IMERG_READY.json"
+            DL.write_json(receipt, report)
+            with patch.object(DL, "validate_month") as validate:
+                DL.collect_years(args, months)
+            self.assertEqual(validate.call_count, 12)
+            self.assertTrue((args.state / "IMERG_READY.json").is_file())
+            del report["months"]["2022-12"]
+            DL.write_json(receipt, report)
+            with patch.object(DL, "validate_month"):
+                with self.assertRaisesRegex(ValueError, "Missing/mismatched"):
+                    DL.collect_years(args, months)
+            self.assertFalse((args.state / "IMERG_READY.json").exists())
+
+    def test_probe_always_fetches_and_validates_a_fresh_subset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = SimpleNamespace(state=Path(temp), transport="requests")
+            DL.LOCAL.session = Mock()
+            try:
+                with patch.object(DL, "resolve_cloud_request", return_value=DL.requests_for(MONTH)[0]), \
+                     patch.object(DL, "download_one") as download, patch.object(DL, "scientific_command") as validate:
+                    DL.probe(args, [MONTH])
+                download.assert_called_once()
+                self.assertIn("--validate-granule", validate.call_args[0][0])
+                self.assertEqual(json.loads((args.state / "probe.json").read_text())["status"], "validated")
+                self.assertFalse((args.state / "IMERG_READY.json").exists())
+            finally:
+                del DL.LOCAL.session
+
     def test_preparation_failure_preserves_old_file_and_removes_pending(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -214,6 +316,35 @@ class DownloadTests(unittest.TestCase):
                                 env={**os.environ, "IMERG_DOWNLOAD_CONNECTIONS": "4"})
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("sbatch", result.stdout)
+
+    def test_year_array_is_probe_gated_capped_and_followed_by_audit(self):
+        result = subprocess.run(["bash", str(ROOT / "slurm/submit_imerg_production_download.sh"),
+                                 "--parallel-years", "--dry-run"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 3)
+        self.assertIn("--probe-only", result.stdout)
+        self.assertIn("--dependency=afterok:DRY_PROBE --array=0-23%3", result.stdout)
+        self.assertIn("--year-array-worker 2001 2024", result.stdout)
+        self.assertIn("--dependency=afterok:DRY_ARRAY", result.stdout)
+        self.assertIn("--collect-years", result.stdout)
+
+    def test_year_array_worker_forwards_exact_year_and_single_connection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / ".netrc").write_text("# placeholder, no credentials used by this test\n")
+            fake = folder / "python"
+            fake.write_text('#!/bin/bash\nif [[ "$1" == "-c" ]]; then exit 0; fi\nprintf "ARG:%s\\n" "$@"\n')
+            fake.chmod(0o755)
+            env = {**os.environ, "HOME": temp, "IMERG_PYTHON": str(fake),
+                   "SLURM_SUBMIT_DIR": str(ROOT), "SLURM_JOB_ID": "123", "SLURM_ARRAY_TASK_ID": "21"}
+            result = subprocess.run(["bash", str(ROOT / "slurm/imerg_production_download.sbatch"),
+                                     "--year-array-worker", "2001", "2024", "fixture-state",
+                                     "--connections", "3"], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ARG:--start-year\nARG:2022", result.stdout)
+            self.assertIn("ARG:--end-year\nARG:2022", result.stdout)
+            self.assertIn("ARG:--connections\nARG:1", result.stdout)
+            self.assertIn("ARG:fixture-state/years/2022", result.stdout)
 
     def test_failed_scheduler_submission_is_not_reported_as_success(self):
         with tempfile.TemporaryDirectory() as temp:

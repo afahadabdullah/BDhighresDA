@@ -6,6 +6,15 @@ and production validators. It preserves the established **03:00–03:00 UTC**
 reporting windows, rainfall integration and random-error quadrature. It does
 not change gauge dates, the CPCv2 checkpoint, normalization or DA settings.
 
+Acquisition now uses **cloud OPeNDAP** collection `C2723754847-GES_DISC`, as
+listed by NASA's current CMR catalog, rather than the older
+`gpm1/.../HTTP_services.cgi` subset service. The old request returned HTTP 404
+for granules that still appear in the catalog; that response does not establish
+a missing source file. The downloader reads the server's DMR metadata to learn
+variable/group paths and dimension order, then requests native 64 × 64 cells
+using `.dap.nc4?dap4.ce=...`. This is the
+[cloud subset syntax recommended by GES DISC](https://forum.earthdata.nasa.gov/viewtopic.php?p=26549&sid=37f9a70a67831b9ad4f79ebaec86e5f2).
+
 The complete calendar has 8,766 reporting days, 288 months and **420,768
 half-hourly granules**. Source intervals begin **2000-12-31 03:00 UTC** and
 finish with **2024-12-31 02:30 UTC**. January's previous-year boundary is stored
@@ -16,14 +25,21 @@ under the reporting year's raw directory, as in the production downloader.
 From the existing repository, update the branch containing these scripts:
 
 ```bash
+# Stop the previous failing coordinator if it is still running.
+scancel 37938702
 git pull --ff-only origin codex/imerg-daily-window-pilot
-bash slurm/submit_imerg_production_download.sh --dry-run
-bash slurm/submit_imerg_production_download.sh
+bash slurm/submit_imerg_production_download.sh --parallel-years --dry-run
+bash slurm/submit_imerg_production_download.sh --parallel-years
 ```
 
-Add `--account=YOUR_ACCOUNT` if required. This submits **one CPU job**, with
-8 CPUs, 24 GB memory and a 24-hour wall limit on `grace-cpuonly`. There is no
-GPU reservation. The job uses the existing GH200 scientific environment:
+Add `--account=YOUR_ACCOUNT` if required. Parallel mode submits a dependency
+chain: **fresh one-granule probe → year array → final collection audit**.
+The probe checks authenticated transfer, required variables, units and native
+regional grid before releasing 24 year tasks (`--array=0-23%3`). At most
+**three years run simultaneously, with one transfer worker each**. Each year
+task has 2 CPUs, 12 GB memory and its own 24-hour wall limit; the probe and
+collector use 8 CPUs and 24 GB. All jobs run on `grace-cpuonly` without a GPU.
+The job uses the existing GH200 scientific environment:
 `/home/afahad/nb/project/BDDA/envs/bdda-gh200/bin/python`. Override it with
 `IMERG_PYTHON` if necessary; do not run this ARM interpreter on an x86 login
 node. The job checks `numpy`, `xarray` and `netCDF4` before work. When `requests`
@@ -32,18 +48,22 @@ back to the existing `wget` downloader without installing packages. Force a
 transport with `--transport=requests` or `--transport=wget` if needed.
 
 An existing Earthdata `~/.netrc` entry for `urs.earthdata.nasa.gov` and authorized
-GES DISC access are required. Preserve private credentials outside Git and use
+GES DISC/cloud OPeNDAP access are required. Preserve private credentials outside Git and use
 `chmod 600 ~/.netrc`. Existing `~/.urs_cookies` are reused when readable;
 otherwise workers establish fresh authenticated sessions. Cookies and
 credentials are not written to progress reports.
 
-The coordinator runs at most **three serial download workers in total**.
+Omitting `--parallel-years` retains one coordinator with at most
+**three serial download workers in total**, 8 CPUs, 24 GB memory and a 24-hour
+wall limit. Parallel years improve scheduling, isolation and per-year restart;
+they have the same maximum transfer concurrency as one coordinator.
 With the Requests transport, each worker reuses its HTTP session across
 granules and months. This follows
 [GES DISC's published three-connection maximum](https://forum.earthdata.nasa.gov/viewtopic.php?p=23888&sid=976eaeb9c72fd601c7f52271ce7fec9c).
 Do not run the old IMERG download arrays alongside this job: their connections
-would add to this total. An advisory lock prevents two copies of the new
-coordinator from using the same raw archive simultaneously.
+would add to this total. Submit one workflow at a time. Shared archive and
+exclusive reporting-year locks permit disjoint year jobs and prevent
+overlapping downloads, including overlap with the older coordinator.
 
 Optional examples:
 
@@ -53,7 +73,7 @@ bash slurm/submit_imerg_production_download.sh --month=2022-05
 
 # Fewer connections, selected years, or a different wall limit.
 IMERG_START_YEAR=2021 IMERG_END_YEAR=2024 IMERG_DOWNLOAD_CONNECTIONS=2 \
-  bash slurm/submit_imerg_production_download.sh --time=18:00:00
+  bash slurm/submit_imerg_production_download.sh --parallel-years --time=18:00:00
 ```
 
 Default paths can be overridden with `SURMA_PROD_IMERG_RAW`,
@@ -68,7 +88,24 @@ The submitter prints the job ID and exact log path:
 tail -f logs/imerg-hh-production-JOBID.out
 cat data/processed/imerg_download_2001_2024/status.json
 tail -f data/processed/imerg_download_2001_2024/logs/2022-05.out
+
+# In year-array mode (task index = YEAR - IMERG_START_YEAR):
+tail -f logs/imerg-hh-year-ARRAYID_21.out  # 2022 for the default 2001 start
+cat data/processed/imerg_download_2001_2024/years/2022/status.json
+cat data/processed/imerg_download_2001_2024/probe.json
 ```
+
+The top-level status is `probing` until the array's final collector issues the
+full readiness receipt. Follow individual year reports while the array runs.
+If the probe fails, the array cannot start; inspect the probe job log and
+`probe.out` before fixing credentials/access and resubmitting. If a year task
+fails or times out, the collector cannot issue readiness. Cancel any old
+pending dependency jobs before resubmitting the same workflow. Valid files
+from completed or partially completed years are reused.
+
+Public CMR metadata and URL/schema construction are verified locally. The
+authenticated cloud transfer is checked by the PRISM probe, where Earthdata
+credentials are available; a local dry run does not certify remote transfer.
 
 `status.json` reports newly downloaded granules, raw/prepared cache credits,
 validated/failed months and elapsed time. After 100 new downloads it estimates
@@ -109,6 +146,9 @@ data/processed/imerg_download_2001_2024/IMERG_READY.json
 
 The readiness receipt is issued only after every **selected** month validates.
 A `--month` test produces a receipt for that selection, not the full archive.
+In array mode, each year writes `years/YEAR/IMERG_READY.json`; the final
+collector verifies all year receipts and revalidates every monthly file before
+writing the top-level receipt. A missing, failed or mismatched year blocks it.
 Before the full production run, check the default full-period receipt:
 
 ```bash
