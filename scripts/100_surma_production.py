@@ -23,6 +23,8 @@ CHECKPOINT_SHA = 'a04a3d9ae9109f905e06c32bfd55252daf1229d17c98b404e265064b89f210
 STATS_SHA = '96b4de3862d931e0b4dc9f2e895b944a3d696a90187b592782771e65d5a8ce07'
 CHANNELS = ['cpc_precip', 'cpc_valid', 'era5_tcwv', 'era5_cape', 'era5_u10', 'era5_v10', 'era5_msl']
 FINAL = 'dense_s6_bwdb_r4'
+# Confirmed in local raw files and NOAA PSL regional slices on 2026-10-06.
+KNOWN_CPC_GAPS = frozenset(['2004-09-10', '2007-02-26'])
 
 
 def sha(path):
@@ -132,7 +134,7 @@ class PredictorValidationError(ValueError):
                          f"{len({row['date'] for row in report['issues']})} day(s)")
 
 
-def validate_predictors(path, first, last):
+def validate_predictors(path, first, last, allow_known_cpc_gaps=False):
     import numpy as np
     import zarr
     store = zarr.open_group(str(path), mode='r')
@@ -162,6 +164,7 @@ def validate_predictors(path, first, last):
     channels = [names.index(name) for name in CHANNELS]
     issues=[]
     cpc_unavailable=[]
+    accepted_cpc_gaps=[]
     for index in selected:
         values = np.asarray(store['cond'][int(index)])[channels]
         day=str(times[index])
@@ -170,16 +173,54 @@ def validate_predictors(path, first, last):
             issues.append({'date':day,'reason':'non-finite predictors','channels':bad})
         if not np.any(values[CHANNELS.index('cpc_valid')][valid] > 0):
             cpc_unavailable.append(day)
-            issues.append({'date':day,'reason':'CPC conditioning entirely unavailable'})
+            native_missing=(np.all(values[CHANNELS.index('cpc_valid')][valid]==0)
+                            and np.all(values[CHANNELS.index('cpc_precip')][valid]==0))
+            if allow_known_cpc_gaps and day in KNOWN_CPC_GAPS and native_missing:
+                accepted_cpc_gaps.append(day)
+            else:
+                issues.append({'date':day,'reason':'CPC conditioning entirely unavailable'})
         if not np.isfinite(np.asarray(store['target'][int(index)])[valid]).all():
             issues.append({'date':day,'reason':'packed CHIRPS context is incomplete'})
-    result={'status':'invalid_requires_recovery' if issues else 'validated_all_days',
+    result={'status':('invalid_requires_recovery' if issues else
+                      'validated_all_days_with_known_cpc_gaps' if accepted_cpc_gaps else 'validated_all_days'),
             'path':str(path), 'first_background_date':str(required[0]),
             'last_date':str(required[-1]), 'days':len(required), 'selected_channels':CHANNELS,
-            'cpc_unavailable_dates':cpc_unavailable,'issues':issues}
+            'cpc_unavailable_dates':cpc_unavailable,'issues':issues,
+            'accepted_cpc_gap_dates':accepted_cpc_gaps,
+            'cpc_gap_policy':'known_source_gaps_native_mask' if allow_known_cpc_gaps else 'require_daily_cpc'}
     if issues:
         raise PredictorValidationError(result)
     return result
+
+
+def validate_production_predictors(args, path):
+    result=validate_predictors(path,args.start_year,args.end_year,
+                              getattr(args,'allow_known_cpc_gaps',False))
+    gaps=result['accepted_cpc_gap_dates']
+    if gaps:
+        # A newer raw file with coverage would make reuse of the packed gap
+        # inappropriate. Missing annual raw files need not be reacquired.
+        rows=diagnose_cpc_gaps(path,args.cpc,gaps)
+        result['cpc_source_diagnostics']=rows
+        for row in rows:
+            if row['status']=='raw_has_coverage_packed_does_not':
+                result['issues'].append({'date':row['date'],'reason':'raw CPC has coverage missing in packed store'})
+        if result['issues']:
+            result['status']='invalid_requires_recovery'
+            raise PredictorValidationError(result)
+        print('[audit] preserving native missing CPC masks on '+', '.join(gaps),flush=True)
+    return result
+
+
+def cpc_background_qc(period, predictor):
+    """Map missing background dates to the reporting days using offset -1."""
+    records=[{'background_date':day,
+              'reporting_date':(date.fromisoformat(day)+timedelta(days=1)).isoformat()}
+             for day in predictor.get('accepted_cpc_gap_dates',[])]
+    return {'policy':predictor.get('cpc_gap_policy','require_daily_cpc'),
+            'missing_cpc_days':[row for row in records
+                                if period['start']<=row['reporting_date']<=period['end']],
+            'note':'CPC precipitation placeholder and zero coverage preserved; no imputation. Other inputs remain required.'}
 
 
 def diagnose_cpc_gaps(path, folder, missing_dates):
@@ -389,7 +430,7 @@ def audit(args):
             report['fixed_inputs']=fixed_inputs(args,True)
             if predictor_metadata_ready(selected,args.start_year,args.end_year):
                 print('[audit] checking every predictor day',flush=True)
-                report['predictors']=validate_predictors(selected,args.start_year,args.end_year)
+                report['predictors']=validate_production_predictors(args,selected)
             for row in imerg:
                 path=Path(row['path'])
                 if path.is_file():
@@ -509,7 +550,7 @@ def pack(args):
             raise ValueError('missing trained static grid; recover data/static/static_wide.nc')
         run('04_regrid_and_pack.py','--start',args.start_year-1,'--end',args.end_year,
             '--era5',args.era5,'--chirps',args.chirps,'--cpc',args.cpc,'--static',args.static,'--out',selected)
-    result=validate_predictors(selected,args.start_year,args.end_year)
+    result=validate_production_predictors(args,selected)
     fixed=fixed_inputs(args,deep=True)
     if any(v['status'] not in ('verified','present') for v in fixed.values()):
         raise ValueError('required fixed inputs missing or identity differs: '+str(fixed))
@@ -580,6 +621,9 @@ def production(args):
         '--set',f'observations.gauges.representativeness={representation}',
         '--seed',202205,'--out',prefix.with_suffix('.npz'),'--report',prefix.with_suffix('.json'),
         '--assimilate-all-stations','--fields-zarr',fields)
+    import zarr
+    zarr.open_group(str(fields),mode='a').attrs['cpc_background_qc']=cpc_background_qc(p,predictor['predictors'])
+    zarr.consolidate_metadata(str(fields))
     verify_shard(args,p)
 
 
@@ -621,6 +665,10 @@ def verify_shard(args,p):
         raise ValueError('analysis method differs from evaluated profile: '+p['label'])
     if store.attrs['scope']!=scope:
         raise ValueError('field and station report scopes differ: '+p['label'])
+    cpc_qc=cpc_background_qc(p,predictor['predictors'])
+    recorded_cpc_qc=store.attrs.get('cpc_background_qc')
+    if recorded_cpc_qc != cpc_qc and (recorded_cpc_qc is not None or cpc_qc['missing_cpc_days']):
+        raise ValueError('production CPC missing-background flags differ: '+p['label'])
     with np.load(prefix.with_suffix('.npz'),allow_pickle=False) as dump:
         if dump['times'].astype('datetime64[D]').astype(str).tolist()!=actual or len(dump['eval_idx'])!=0:
             raise ValueError('station archive does not establish full all-station production')
@@ -632,7 +680,8 @@ def verify_shard(args,p):
                'checkpoint_sha256':sha(args.ckpt),'report_sha256':sha(prefix.with_suffix('.json')),
                'station_array_sha256':sha(prefix.with_suffix('.npz')),
                'prepared_manifest_sha256':sha(Path(args.root)/'prepared'/f"{p['label']}.json"),
-               'field_store':str(Path(args.root)/'gridded'/f"{p['label']}.zarr"),'days':len(actual)})
+               'field_store':str(Path(args.root)/'gridded'/f"{p['label']}.zarr"),'days':len(actual),
+               'cpc_background_qc':cpc_qc})
 
 
 def finalize(args):
@@ -642,7 +691,8 @@ def finalize(args):
         records.append(json.loads((Path(args.root)/'validated'/f"{p['label']}.json").read_text()))
     write_json(Path(args.root)/'production_manifest.json',{'status':'complete','model':'SURMA-Flow v1.0 CPCv2',
         'start':f'{args.start_year}-01-01','end':f'{args.end_year}-12-31','days':sum(r['days'] for r in records),
-        'members':30,'checkpoint_sha256':CHECKPOINT_SHA,'statistics_sha256':STATS_SHA,'shards':records})
+        'members':30,'checkpoint_sha256':CHECKPOINT_SHA,'statistics_sha256':STATS_SHA,'shards':records,
+        'missing_cpc_days':[row for record in records for row in record['cpc_background_qc']['missing_cpc_days']]})
 
 
 def main(argv=None):
@@ -664,6 +714,8 @@ def main(argv=None):
                    help='year download reports used by source-check')
     p.add_argument('--color',choices=['auto','always','never'],default='auto',
                    help='source-check colors (auto uses terminal detection; NO_COLOR disables auto)')
+    p.add_argument('--allow-known-cpc-gaps',action='store_true',
+                   help='preserve native zero coverage only for verified source gaps 2004-09-10 and 2007-02-26; flag outputs')
     p.add_argument('--task',type=int);p.add_argument('--deep',action='store_true');p.add_argument('--report')
     args=p.parse_args(argv)
     if args.end_year is None: args.end_year=2025 if args.stage=='source-check' else 2024

@@ -139,6 +139,35 @@ repacking is needed. When raw files are available, `cpc_source_diagnostics`
 reuses the packer's interpolation to distinguish a raw gap from raw coverage
 that is missing in the packed store. An interrupted job may leave `status: in_progress`; this
 does not establish successful validation.
+
+Two CPC source days, **2004-09-10** and **2007-02-26**, have no regional
+coverage in the local annual files or NOAA PSL's current regional OPeNDAP
+slices (checked 2026-10-06). To retain the packer's existing missing-data
+encoding for only these known days, explicitly opt in:
+
+```bash
+export SURMA_PROD_ALLOW_KNOWN_CPC_GAPS=1
+bash slurm/submit_surma_production_2001_2024.sh --audit-only
+```
+
+Keep this exported for the later preparation/full submission. The direct
+Python audit/pack equivalent is `--allow-known-cpc-gaps`. The default remains
+strict. The exception requires exactly zero CPC coverage and the packer's
+zero precipitation placeholder; it permits no non-finite ERA5/context data or
+other missing CPC days. No rainfall is interpolated, and the existing archive
+is opened read-only. If the raw CPC file now has coverage that the packed
+store lacks, the opt-in still fails and requires recovery.
+
+The CPCv2 model already takes `cpc_valid` as a conditioning channel. This
+permits inference with missing CPC; it does not establish equivalent skill for
+these days. The corresponding production dates are **2004-09-11** and
+**2007-02-27** because the background offset is -1. Their missing-CPC status is
+recorded in each affected field store's `cpc_background_qc` attributes, shard
+validation records and the final production manifest. Flag these dates in
+downstream evaluations. NOAA queries:
+[2004-09-10](https://psl.noaa.gov/thredds/dodsC/Datasets/cpc_global_precip/precip.2004.nc.ascii?precip%5B253%3A1%3A253%5D%5B120%3A1%3A151%5D%5B165%3A1%3A196%5D),
+[2007-02-26](https://psl.noaa.gov/thredds/dodsC/Datasets/cpc_global_precip/precip.2007.nc.ascii?precip%5B56%3A1%3A56%5D%5B120%3A1%3A151%5D%5B165%3A1%3A196%5D).
+
 For a fast metadata inventory on a login node, use its native Python:
 
 ```bash

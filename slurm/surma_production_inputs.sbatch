@@ -27,6 +27,11 @@ TASK_ARGS=("$TASK_STAGE"
   --imerg-raw "${SURMA_PROD_IMERG_RAW:-data/imerg_halfhourly}"
   --imerg-daily "${SURMA_PROD_IMERG_DAILY:-data/processed}")
 [[ -z "${SURMA_PROD_DATA_ZARR:-}" ]] || TASK_ARGS+=(--data-zarr "$SURMA_PROD_DATA_ZARR")
+case "${SURMA_PROD_ALLOW_KNOWN_CPC_GAPS:-0}" in
+  1) TASK_ARGS+=(--allow-known-cpc-gaps);;
+  0) ;;
+  *) echo "ERROR: SURMA_PROD_ALLOW_KNOWN_CPC_GAPS must be 0 or 1" >&2; exit 2;;
+esac
 case "$TASK_STAGE" in
   download-year|download-month|prepare) TASK_ARGS+=(--task "${SLURM_ARRAY_TASK_ID:?array required}");;
   audit) TASK_ARGS+=(--deep);;

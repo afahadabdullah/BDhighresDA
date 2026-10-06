@@ -150,6 +150,79 @@ class ProductionTests(unittest.TestCase):
             self.assertEqual(result['status'],'invalid_requires_recovery')
             self.assertEqual(len(calls),366)
 
+    def test_known_cpc_gap_opt_in_preserves_native_mask_and_rejects_other_defects(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            meta={'schema_version':1,'complete':True,'completed_years':[2003,2004],'cond_channels':PROD.CHANNELS}
+            (folder/'.zattrs').write_text(json.dumps(meta))
+            times=np.asarray(PROD.dates('2003-12-31','2004-12-31'),dtype='datetime64[ns]')
+            class Conditions:
+                unknown=False; placeholder=0.; bad_era5=False
+                def __getitem__(self,index):
+                    values=np.ones((7,256,256),np.float32)
+                    day=str(times[index].astype('datetime64[D]'))
+                    if day=='2004-09-10' or (self.unknown and day=='2004-09-11'):
+                        values[0]=self.placeholder;values[1]=0
+                        if self.bad_era5: values[2,0,0]=np.nan
+                    return values
+            conditions=Conditions()
+            fake=type('Store',(dict,),{'attrs':meta})({
+                'time':times,'valid':np.ones((256,256),np.uint8),'static':np.zeros((7,256,256),np.float32),
+                'lat':(16+.05*(np.arange(256)+.5)).astype(np.float32),
+                'lon':(84+.05*(np.arange(256)+.5)).astype(np.float32),
+                'cond':conditions,'target':np.broadcast_to(np.float32(0),(367,256,256))})
+            with patch.dict(sys.modules,{'zarr':SimpleNamespace(open_group=lambda *a,**k:fake)}):
+                with self.assertRaises(PROD.PredictorValidationError):
+                    PROD.validate_predictors(folder,2004,2004)
+                result=PROD.validate_predictors(folder,2004,2004,allow_known_cpc_gaps=True)
+                self.assertEqual(result['accepted_cpc_gap_dates'],['2004-09-10'])
+                self.assertEqual(result['status'],'validated_all_days_with_known_cpc_gaps')
+                conditions.unknown=True
+                with self.assertRaises(PROD.PredictorValidationError) as caught:
+                    PROD.validate_predictors(folder,2004,2004,True)
+                self.assertEqual(caught.exception.report['issues'][0]['date'],'2004-09-11')
+                conditions.unknown=False;conditions.placeholder=2.
+                with self.assertRaises(PROD.PredictorValidationError):
+                    PROD.validate_predictors(folder,2004,2004,True)
+                conditions.placeholder=0.;conditions.bad_era5=True
+                with self.assertRaises(PROD.PredictorValidationError) as caught:
+                    PROD.validate_predictors(folder,2004,2004,True)
+                self.assertEqual(caught.exception.report['issues'][0]['channels'],['era5_tcwv'])
+
+    def test_known_gap_reuse_rejected_when_raw_cpc_now_has_coverage(self):
+        args=SimpleNamespace(start_year=2004,end_year=2004,cpc='raw',allow_known_cpc_gaps=True)
+        result={'status':'validated_all_days_with_known_cpc_gaps','accepted_cpc_gap_dates':['2004-09-10'],
+                'cpc_unavailable_dates':['2004-09-10'],'issues':[]}
+        with patch.object(PROD,'validate_predictors',return_value=result) as validate, \
+             patch.object(PROD,'diagnose_cpc_gaps',return_value=[
+                 {'date':'2004-09-10','status':'raw_has_coverage_packed_does_not'}]):
+            with self.assertRaisesRegex(PROD.PredictorValidationError,'raw CPC has coverage'):
+                PROD.validate_production_predictors(args,'packed')
+        validate.assert_called_once_with('packed',2004,2004,True)
+
+    def test_cpc_gap_flags_use_next_reporting_date_and_respect_quarter(self):
+        predictor={'accepted_cpc_gap_dates':sorted(PROD.KNOWN_CPC_GAPS),
+                   'cpc_gap_policy':'known_source_gaps_native_mask'}
+        q3=PROD.cpc_background_qc({'start':'2004-07-01','end':'2004-09-30'},predictor)
+        self.assertEqual(q3['missing_cpc_days'],[
+            {'background_date':'2004-09-10','reporting_date':'2004-09-11'}])
+        q1=PROD.cpc_background_qc({'start':'2007-01-01','end':'2007-03-31'},predictor)
+        self.assertEqual(q1['missing_cpc_days'],[
+            {'background_date':'2007-02-26','reporting_date':'2007-02-27'}])
+        q4=PROD.cpc_background_qc({'start':'2004-10-01','end':'2004-12-31'},predictor)
+        self.assertEqual(q4['missing_cpc_days'],[])
+
+    def test_cpu_job_forwards_only_explicit_cpc_gap_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            python=Path(temp)/'python';python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n');python.chmod(0o755)
+            for value in ('0','1','bad'):
+                env={**os.environ,'SLURM_SUBMIT_DIR':str(ROOT),'PYTHON_BIN':str(python),
+                     'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':value}
+                result=subprocess.run(['bash',str(ROOT/'slurm/surma_production_inputs.sbatch'),'audit'],
+                                      env=env,cwd=ROOT,capture_output=True,text=True)
+                self.assertEqual(result.returncode,2 if value=='bad' else 0,result.stderr)
+                self.assertEqual('--allow-known-cpc-gaps' in result.stdout,value=='1')
+
     def test_failed_deep_audit_saves_inventory_and_predictor_diagnostics(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp)
@@ -298,7 +371,8 @@ class ProductionTests(unittest.TestCase):
         self.assertNotIn('--array',result.stderr)
 
     def test_invalid_concurrency_or_years_fail_before_submission(self):
-        for override in ({'SURMA_PROD_CONCURRENCY':'0'},{'SURMA_PROD_START_YEAR':'2000'}):
+        for override in ({'SURMA_PROD_CONCURRENCY':'0'},{'SURMA_PROD_START_YEAR':'2000'},
+                         {'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':'bad'}):
             result=subprocess.run(['bash',str(ROOT/'slurm/submit_surma_production_2001_2024.sh'),'--dry-run'],
                                   capture_output=True,text=True,cwd=ROOT,env={**os.environ,**override})
             self.assertNotEqual(result.returncode,0)
