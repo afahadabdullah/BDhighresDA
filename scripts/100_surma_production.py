@@ -122,6 +122,16 @@ def validate_imerg(path, start, end, factor=2):
             raise ValueError('IMERG finite precipitation lacks all 48 half-hours: '+str(path))
 
 
+class PredictorValidationError(ValueError):
+    """Keep complete daily diagnostics when a production gate fails."""
+    def __init__(self, report):
+        self.report = report
+        first = report['issues'][0]
+        super().__init__(f"{first['reason']} on {first['date']}; "
+                         f"{len(report['issues'])} issue(s) across "
+                         f"{len({row['date'] for row in report['issues']})} day(s)")
+
+
 def validate_predictors(path, first, last):
     import numpy as np
     import zarr
@@ -150,16 +160,63 @@ def validate_predictors(path, first, last):
         raise ValueError('seven finite checkpoint static channels are required')
     # Check all required days, one at a time, without loading the archive in RAM.
     channels = [names.index(name) for name in CHANNELS]
+    issues=[]
+    cpc_unavailable=[]
     for index in selected:
         values = np.asarray(store['cond'][int(index)])[channels]
+        day=str(times[index])
         if not np.isfinite(values[:,valid]).all():
-            raise ValueError('non-finite predictors on '+str(times[index]))
+            bad=[name for name,field in zip(CHANNELS,values) if not np.isfinite(field[valid]).all()]
+            issues.append({'date':day,'reason':'non-finite predictors','channels':bad})
         if not np.any(values[CHANNELS.index('cpc_valid')][valid] > 0):
-            raise ValueError('CPC conditioning entirely unavailable on '+str(times[index]))
+            cpc_unavailable.append(day)
+            issues.append({'date':day,'reason':'CPC conditioning entirely unavailable'})
         if not np.isfinite(np.asarray(store['target'][int(index)])[valid]).all():
-            raise ValueError('packed CHIRPS context is incomplete on '+str(times[index]))
-    return {'status':'validated_all_days','path':str(path), 'first_background_date':str(required[0]),
-            'last_date':str(required[-1]), 'days':len(required), 'selected_channels':CHANNELS}
+            issues.append({'date':day,'reason':'packed CHIRPS context is incomplete'})
+    result={'status':'invalid_requires_recovery' if issues else 'validated_all_days',
+            'path':str(path), 'first_background_date':str(required[0]),
+            'last_date':str(required[-1]), 'days':len(required), 'selected_channels':CHANNELS,
+            'cpc_unavailable_dates':cpc_unavailable,'issues':issues}
+    if issues:
+        raise PredictorValidationError(result)
+    return result
+
+
+def diagnose_cpc_gaps(path, folder, missing_dates):
+    """Compare packed gaps with raw CPC using the packer's own interpolation."""
+    import importlib.util
+    import numpy as np
+    import xarray as xr
+    import zarr
+    spec=importlib.util.spec_from_file_location('_production_packer',ROOT/'scripts/04_regrid_and_pack.py')
+    packer=importlib.util.module_from_spec(spec);spec.loader.exec_module(packer)
+    store=zarr.open_group(str(path),mode='r')
+    valid=np.asarray(store['valid'][:])>.5
+    rows=[]
+    for year in sorted({day[:4] for day in missing_dates}):
+        source=Path(folder)/f'precip.{year}.nc'
+        days=[day for day in missing_dates if day.startswith(year+'-')]
+        if not source.is_file():
+            rows.extend({'date':day,'source_path':str(source),'status':'raw_source_file_missing'} for day in days)
+            continue
+        with xr.open_dataset(source) as raw:
+            ds=packer._rename_coords(raw)
+            times=np.asarray(ds.time.values,dtype='datetime64[ns]').astype('datetime64[D]')
+            for day in days:
+                indices=np.flatnonzero(times==np.datetime64(day))
+                row={'date':day,'source_path':str(source)}
+                if len(indices)!=1:
+                    row.update(status='raw_source_date_missing_or_duplicated',date_matches=len(indices))
+                else:
+                    field=ds['precip'].isel(time=[int(indices[0])]).sel(
+                        lat=slice(packer.WIDE.lat_min-1,packer.WIDE.lat_max+1),
+                        lon=slice(packer.WIDE.lon_min-1,packer.WIDE.lon_max+1))
+                    _,coverage=packer.interpolate_cpc_condition(field,packer.WIDE.lat,packer.WIDE.lon)
+                    cells=int(np.count_nonzero(coverage[0][valid]>0))
+                    row.update(raw_supported_land_cells=cells,
+                        status='raw_has_coverage_packed_does_not' if cells else 'raw_source_also_unavailable')
+                rows.append(row)
+    return rows
 
 
 def fixed_inputs(args, deep=False):
@@ -311,14 +368,11 @@ def audit(args):
     for p in monthly(args.start_year,args.end_year):
         path=Path(args.imerg_daily)/f"imerg_bd_aligned_{p['start'].replace('-','')}_{p['end'].replace('-','')}.nc"
         row={**p,'path':str(path),'status':'present_unvalidated' if path.is_file() else 'download_and_prepare_required'}
-        if path.is_file() and args.deep:
-            try: validate_imerg(path,p['start'],p['end']); row['status']='validated'
-            except (ValueError,OSError) as exc: row.update(status='invalid_requires_recovery',reason=str(exc))
         imerg.append(row)
-    report={'scope':{'start':f'{args.start_year}-01-01','end':f'{args.end_year}-12-31',
+    report={'status':'in_progress','scope':{'start':f'{args.start_year}-01-01','end':f'{args.end_year}-12-31',
                      'days':len(dates(f'{args.start_year}-01-01',f'{args.end_year}-12-31')),
                      'quarterly_tasks':len(periods(args.start_year,args.end_year)), 'members':30},
-            'fixed_inputs':fixed_inputs(args,args.deep),'predictors':{'path':str(selected),
+            'fixed_inputs':fixed_inputs(args,False),'predictors':{'path':str(selected),
             'status':'metadata_ready_requires_deep_validation' if predictor_metadata_ready(selected,args.start_year,args.end_year) else 'pack_or_complete_required'},
             'annual_sources':raw,'imerg_months':imerg,
             'notes':['CPC/ERA5/CHIRPS annual sources are unnecessary to reacquire if the existing packed predictors validate.',
@@ -326,9 +380,36 @@ def audit(args):
                      'CHIRPS is needed by the existing packer/archive context, not assimilated as an observation.',
                      'BMD and BWDB daily support remains different by three hours, matching the evaluated method.',
                      'All eligible original gauges are assimilated in production; these grids are not withheld verification.']}
-    if args.deep and predictor_metadata_ready(selected,args.start_year,args.end_year):
-        report['predictors']=validate_predictors(selected,args.start_year,args.end_year)
-    write_json(args.report or Path(args.root)/'input_inventory.json',report)
+    report_path=args.report or Path(args.root)/'input_inventory.json'
+    # Persist the inventory before any scientific checks can fail. A killed job
+    # leaves an explicit in_progress record, never a successful audit receipt.
+    write_json(report_path,report)
+    try:
+        if args.deep:
+            report['fixed_inputs']=fixed_inputs(args,True)
+            if predictor_metadata_ready(selected,args.start_year,args.end_year):
+                print('[audit] checking every predictor day',flush=True)
+                report['predictors']=validate_predictors(selected,args.start_year,args.end_year)
+            for row in imerg:
+                path=Path(row['path'])
+                if path.is_file():
+                    try: validate_imerg(path,row['start'],row['end']); row['status']='validated'
+                    except (ValueError,OSError) as exc: row.update(status='invalid_requires_recovery',reason=str(exc))
+    except (ValueError,OSError,KeyError,ImportError) as exc:
+        if isinstance(exc,PredictorValidationError): report['predictors']=exc.report
+        report.update(status='failed',error=str(exc))
+        write_json(report_path,report)
+        if isinstance(exc,PredictorValidationError) and exc.report['cpc_unavailable_dates']:
+            try:
+                report['predictors']['cpc_source_diagnostics']=diagnose_cpc_gaps(
+                    selected,args.cpc,exc.report['cpc_unavailable_dates'])
+            except (ValueError,OSError,KeyError,ImportError) as diagnostic_error:
+                report['predictors']['cpc_source_diagnostic_error']=str(diagnostic_error)
+            write_json(report_path,report)
+        print(f'[audit] failure report written: {report_path}',flush=True)
+        raise
+    report['status']='completed'
+    write_json(report_path,report)
     print(json.dumps({'scope':report['scope'],'fixed_inputs':report['fixed_inputs'],
                       'predictors':report['predictors'],
                       'imerg_months_missing_or_invalid':sum(r['status'] in ('download_and_prepare_required','invalid_requires_recovery') for r in imerg),

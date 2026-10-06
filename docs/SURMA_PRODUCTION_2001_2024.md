@@ -128,6 +128,17 @@ The report checks the actual checkpoint/statistics identity, raw annual-file
 inventory and all 288 IMERG months. The CPU job deeply validates any present
 predictor store, including every requested daily predictor and the previous-day
 boundary. Missing inputs remain explicit. An audit does not download or sample.
+The inventory is saved before deep checks start. If validation fails, the job
+exits nonzero and updates the JSON to `status: failed` with the error. Predictor
+checks scan every requested day and list all daily problems in
+`predictors.issues`, including `predictors.cpc_unavailable_dates`. These are
+background dates; a background offset of -1 applies them to the next reporting
+day. Missing CPC coverage stays a production blocker. Compare the raw annual
+CPC files against the packed fields before deciding whether source recovery or
+repacking is needed. When raw files are available, `cpc_source_diagnostics`
+reuses the packer's interpolation to distinguish a raw gap from raw coverage
+that is missing in the packed store. An interrupted job may leave `status: in_progress`; this
+does not establish successful validation.
 For a fast metadata inventory on a login node, use its native Python:
 
 ```bash
