@@ -10,6 +10,7 @@ export SURMA_PROD_START_YEAR="${SURMA_PROD_START_YEAR:-2001}"
 export SURMA_PROD_END_YEAR="${SURMA_PROD_END_YEAR:-2024}"
 export SURMA_PROD_ROOT="${SURMA_PROD_ROOT:-data/processed/brishti05_production_2001_2024}"
 export SURMA_PROD_ALLOW_KNOWN_CPC_GAPS="${SURMA_PROD_ALLOW_KNOWN_CPC_GAPS:-0}"
+export SURMA_PROD_FILL_KNOWN_CPC_GAPS="${SURMA_PROD_FILL_KNOWN_CPC_GAPS:-0}"
 TASK_INPUT_CONCURRENCY="${SURMA_PROD_INPUT_CONCURRENCY:-2}"
 TASK_GPU_CONCURRENCY="${SURMA_PROD_CONCURRENCY:-2}"
 TASK_MODE=full TASK_DRY=0 TASK_EXTRA=(--export=ALL)
@@ -26,6 +27,8 @@ done
 [[ "$SURMA_PROD_START_YEAR" =~ ^[0-9]{4}$ && "$SURMA_PROD_END_YEAR" =~ ^[0-9]{4}$ ]] || { echo "ERROR: four-digit years required" >&2; exit 2; }
 [[ "$TASK_INPUT_CONCURRENCY" =~ ^[1-9][0-9]*$ && "$TASK_GPU_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: positive concurrency required" >&2; exit 2; }
 [[ "$SURMA_PROD_ALLOW_KNOWN_CPC_GAPS" =~ ^[01]$ ]] || { echo "ERROR: SURMA_PROD_ALLOW_KNOWN_CPC_GAPS must be 0 or 1" >&2; exit 2; }
+[[ "$SURMA_PROD_FILL_KNOWN_CPC_GAPS" =~ ^[01]$ ]] || { echo "ERROR: SURMA_PROD_FILL_KNOWN_CPC_GAPS must be 0 or 1" >&2; exit 2; }
+(( SURMA_PROD_ALLOW_KNOWN_CPC_GAPS + SURMA_PROD_FILL_KNOWN_CPC_GAPS <= 1 )) || { echo "ERROR: choose either native CPC masking or previous-day CPC filling" >&2; exit 2; }
 (( SURMA_PROD_START_YEAR >= 2001 && SURMA_PROD_START_YEAR <= SURMA_PROD_END_YEAR && SURMA_PROD_END_YEAR <= 2024 )) || { echo "ERROR: years must be within 2001..2024" >&2; exit 2; }
 TASK_YEARS=$((SURMA_PROD_END_YEAR-SURMA_PROD_START_YEAR+1))
 submit() {

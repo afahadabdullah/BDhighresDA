@@ -797,6 +797,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-zarr", default=None,
                         help="Explicit relocated/production predictor archive; checkpoint preprocessing and channel selection remain fixed")
     parser.add_argument("--background-day-offset", type=int, default=-1)
+    parser.add_argument("--fill-known-cpc-gaps", action="store_true",
+                        help="borrow previous-day CPC only for the verified 2004-09-10 and 2007-02-26 gaps; retain all other dates/fields")
     parser.add_argument(
         "--allow-calendar-day-imerg", action="store_true",
         help="experimental daily-IMERG comparison only: requires offset 0 and gauges relabelled to UTC calendar days",
@@ -1047,6 +1049,15 @@ def main() -> None:
     grid = get_grid(config["data"]["grid"])
     selected_channels = training_data.get("cond_channels")
 
+    fallback_store = None
+    if getattr(args,'fill_known_cpc_gaps',False):
+        import zarr
+        from bdhires.cpc_fallback import CPCFallbackStore, KNOWN_CPC_FALLBACKS
+        first_background=np.datetime64(args.start,'D')+np.timedelta64(args.background_day_offset,'D')
+        last_background=np.datetime64(args.end,'D')+np.timedelta64(args.background_day_offset,'D')
+        requested_gaps=[day for day in KNOWN_CPC_FALLBACKS
+                        if first_background<=np.datetime64(day,'D')<=last_background]
+        fallback_store = CPCFallbackStore(zarr.open_group(data_zarr, mode='r'),requested_dates=requested_gaps)
     dataset = PrecipDataset(
         DatasetConfig(
             root=data_zarr,
@@ -1063,6 +1074,7 @@ def main() -> None:
         cond_transform=CondTransform.from_stats(stats),
         residual=residual,
         climatology=load_climatology(data_stats, stats),
+        store=fallback_store,
     )
 
     times = dataset.time
@@ -1717,6 +1729,9 @@ def main() -> None:
         "n_days": n_days,
         "members": args.members,
         "background_day_offset": args.background_day_offset,
+        "cpc_gap_fallbacks": [row for row in fallback_store.fallbacks
+                              if row['background_date'] in set(background_times.astype('datetime64[D]').astype(str))]
+                             if fallback_store is not None else [],
         "imerg_time_convention": "UTC calendar day (experimental)" if args.allow_calendar_day_imerg else "reporting window",
         "checkpoint": args.ckpt,
         "checkpoint_data": data_zarr,

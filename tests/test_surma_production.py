@@ -212,16 +212,51 @@ class ProductionTests(unittest.TestCase):
         q4=PROD.cpc_background_qc({'start':'2004-10-01','end':'2004-12-31'},predictor)
         self.assertEqual(q4['missing_cpc_days'],[])
 
+    def test_previous_cpc_policy_records_donor_on_the_correct_reporting_day(self):
+        predictor={'accepted_cpc_gap_dates':['2004-09-10'],
+            'cpc_gap_policy':'known_source_gaps_previous_day_cpc',
+            'cpc_gap_fallbacks':[{'background_date':'2004-09-10','cpc_source_date':'2004-09-09'}]}
+        qc=PROD.cpc_background_qc({'start':'2004-07-01','end':'2004-09-30'},predictor)
+        self.assertEqual(qc['missing_cpc_days'],[{'background_date':'2004-09-10',
+            'reporting_date':'2004-09-11','cpc_source_date':'2004-09-09'}])
+        self.assertIn('ERA5 and observations retain',qc['note'])
+
+    def test_previous_cpc_policy_validates_donor_and_preserves_original_gap_diagnostics(self):
+        args=SimpleNamespace(start_year=2004,end_year=2004,cpc='raw',fill_known_cpc_gaps=True)
+        result={'status':'validated_all_days_with_known_cpc_gaps','accepted_cpc_gap_dates':['2004-09-10'],
+                'cpc_unavailable_dates':['2004-09-10'],'issues':[]}
+        sys.path.insert(0,str(ROOT/'src'))
+        import bdhires.cpc_fallback
+        fake=SimpleNamespace(fallbacks=[{'background_date':'2004-09-10','cpc_source_date':'2004-09-09'}])
+        with patch.object(PROD,'validate_predictors',return_value=result) as validate, \
+             patch.object(PROD,'diagnose_cpc_gaps',return_value=[
+                 {'date':'2004-09-10','status':'raw_source_also_unavailable'}]), \
+             patch.dict(sys.modules,{'zarr':SimpleNamespace(open_group=lambda *a,**k:{})}), \
+             patch.object(bdhires.cpc_fallback,'CPCFallbackStore',return_value=fake) as donor, \
+             redirect_stdout(io.StringIO()):
+            validated=PROD.validate_production_predictors(args,'packed')
+        validate.assert_called_once_with('packed',2004,2004,True)
+        donor.assert_called_once_with({},requested_dates=['2004-09-10'])
+        self.assertEqual(validated['cpc_gap_fallbacks'],fake.fallbacks)
+        self.assertEqual(validated['cpc_unavailable_dates'],['2004-09-10'])
+        self.assertEqual(validated['cpc_gap_policy'],'known_source_gaps_previous_day_cpc')
+
     def test_cpu_job_forwards_only_explicit_cpc_gap_opt_in(self):
         with tempfile.TemporaryDirectory() as temp:
             python=Path(temp)/'python';python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n');python.chmod(0o755)
             for value in ('0','1','bad'):
                 env={**os.environ,'SLURM_SUBMIT_DIR':str(ROOT),'PYTHON_BIN':str(python),
-                     'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':value}
+                     'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':value,'SURMA_PROD_FILL_KNOWN_CPC_GAPS':'0'}
                 result=subprocess.run(['bash',str(ROOT/'slurm/surma_production_inputs.sbatch'),'audit'],
                                       env=env,cwd=ROOT,capture_output=True,text=True)
                 self.assertEqual(result.returncode,2 if value=='bad' else 0,result.stderr)
                 self.assertEqual('--allow-known-cpc-gaps' in result.stdout,value=='1')
+            env.update(SURMA_PROD_ALLOW_KNOWN_CPC_GAPS='0',SURMA_PROD_FILL_KNOWN_CPC_GAPS='1')
+            result=subprocess.run(['bash',str(ROOT/'slurm/surma_production_inputs.sbatch'),'audit'],
+                                  env=env,cwd=ROOT,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('--fill-known-cpc-gaps',result.stdout)
+            self.assertNotIn('--allow-known-cpc-gaps',result.stdout)
 
     def test_failed_deep_audit_saves_inventory_and_predictor_diagnostics(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -372,7 +407,9 @@ class ProductionTests(unittest.TestCase):
 
     def test_invalid_concurrency_or_years_fail_before_submission(self):
         for override in ({'SURMA_PROD_CONCURRENCY':'0'},{'SURMA_PROD_START_YEAR':'2000'},
-                         {'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':'bad'}):
+                         {'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':'bad'},
+                         {'SURMA_PROD_FILL_KNOWN_CPC_GAPS':'bad'},
+                         {'SURMA_PROD_ALLOW_KNOWN_CPC_GAPS':'1','SURMA_PROD_FILL_KNOWN_CPC_GAPS':'1'}):
             result=subprocess.run(['bash',str(ROOT/'slurm/submit_surma_production_2001_2024.sh'),'--dry-run'],
                                   capture_output=True,text=True,cwd=ROOT,env={**os.environ,**override})
             self.assertNotEqual(result.returncode,0)

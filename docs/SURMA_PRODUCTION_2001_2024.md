@@ -142,29 +142,37 @@ does not establish successful validation.
 
 Two CPC source days, **2004-09-10** and **2007-02-26**, have no regional
 coverage in the local annual files or NOAA PSL's current regional OPeNDAP
-slices (checked 2026-10-06). To retain the packer's existing missing-data
-encoding for only these known days, explicitly opt in:
+slices (checked 2026-10-06). Production can borrow only the previous day's
+CPC fields for these two known gaps:
 
 ```bash
-export SURMA_PROD_ALLOW_KNOWN_CPC_GAPS=1
+export SURMA_PROD_ALLOW_KNOWN_CPC_GAPS=0
+export SURMA_PROD_FILL_KNOWN_CPC_GAPS=1
 bash slurm/submit_surma_production_2001_2024.sh --audit-only
 ```
 
 Keep this exported for the later preparation/full submission. The direct
-Python audit/pack equivalent is `--allow-known-cpc-gaps`. The default remains
-strict. The exception requires exactly zero CPC coverage and the packer's
-zero precipitation placeholder; it permits no non-finite ERA5/context data or
-other missing CPC days. No rainfall is interpolated, and the existing archive
-is opened read-only. If the raw CPC file now has coverage that the packed
-store lacks, the opt-in still fails and requires recovery.
+Python audit/pack equivalent is `--fill-known-cpc-gaps`. The default remains
+strict. Donor dates are **2004-09-09** and **2007-02-25**, respectively. Only
+`cpc_precip` and `cpc_valid` are borrowed, through a read-only daily array view
+during inference. ERA5, seasonal encodings, CHIRPS context, model background
+dates, gauges and IMERG retain their intended dates. The exported CPC input is
+the borrowed field actually used. Donor fields must be finite, have coverage
+and satisfy the CPC value/coverage ranges. The exception requires exactly zero
+original CPC coverage and the packer's zero precipitation placeholder; it
+permits no non-finite ERA5/context data or other missing CPC days. If raw CPC
+now has coverage that the packed store lacks, the opt-in still fails and
+requires recovery.
 
-The CPCv2 model already takes `cpc_valid` as a conditioning channel. This
-permits inference with missing CPC; it does not establish equivalent skill for
-these days. The corresponding production dates are **2004-09-11** and
+Assimilation may correct an imperfect CPC-conditioned background, but it does
+not guarantee removal of the donor-day error. The corresponding production dates are **2004-09-11** and
 **2007-02-27** because the background offset is -1. Their missing-CPC status is
 recorded in each affected field store's `cpc_background_qc` attributes, shard
 validation records and the final production manifest. Flag these dates in
-downstream evaluations. NOAA queries:
+downstream evaluations. To preserve native missing CPC instead of borrowing,
+use `SURMA_PROD_FILL_KNOWN_CPC_GAPS=0` and
+`SURMA_PROD_ALLOW_KNOWN_CPC_GAPS=1` (direct Python:
+`--allow-known-cpc-gaps`). These policies are mutually exclusive. NOAA queries:
 [2004-09-10](https://psl.noaa.gov/thredds/dodsC/Datasets/cpc_global_precip/precip.2004.nc.ascii?precip%5B253%3A1%3A253%5D%5B120%3A1%3A151%5D%5B165%3A1%3A196%5D),
 [2007-02-26](https://psl.noaa.gov/thredds/dodsC/Datasets/cpc_global_precip/precip.2007.nc.ascii?precip%5B56%3A1%3A56%5D%5B120%3A1%3A151%5D%5B165%3A1%3A196%5D).
 

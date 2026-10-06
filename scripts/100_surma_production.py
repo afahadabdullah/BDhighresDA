@@ -194,8 +194,9 @@ def validate_predictors(path, first, last, allow_known_cpc_gaps=False):
 
 
 def validate_production_predictors(args, path):
+    fill=getattr(args,'fill_known_cpc_gaps',False)
     result=validate_predictors(path,args.start_year,args.end_year,
-                              getattr(args,'allow_known_cpc_gaps',False))
+                              fill or getattr(args,'allow_known_cpc_gaps',False))
     gaps=result['accepted_cpc_gap_dates']
     if gaps:
         # A newer raw file with coverage would make reuse of the packed gap
@@ -208,7 +209,15 @@ def validate_production_predictors(args, path):
         if result['issues']:
             result['status']='invalid_requires_recovery'
             raise PredictorValidationError(result)
-        print('[audit] preserving native missing CPC masks on '+', '.join(gaps),flush=True)
+        if fill:
+            import zarr
+            sys.path.insert(0,str(ROOT/'src'))
+            from bdhires.cpc_fallback import CPCFallbackStore
+            fallback=CPCFallbackStore(zarr.open_group(str(path),mode='r'),requested_dates=gaps)
+            result.update(cpc_gap_policy='known_source_gaps_previous_day_cpc',cpc_gap_fallbacks=fallback.fallbacks)
+            print('[audit] previous-day CPC substitutions: '+str(fallback.fallbacks),flush=True)
+        else:
+            print('[audit] preserving native missing CPC masks on '+', '.join(gaps),flush=True)
     return result
 
 
@@ -217,10 +226,14 @@ def cpc_background_qc(period, predictor):
     records=[{'background_date':day,
               'reporting_date':(date.fromisoformat(day)+timedelta(days=1)).isoformat()}
              for day in predictor.get('accepted_cpc_gap_dates',[])]
+    donors={row['background_date']:row['cpc_source_date'] for row in predictor.get('cpc_gap_fallbacks',[])}
+    for row in records:
+        if row['background_date'] in donors: row['cpc_source_date']=donors[row['background_date']]
     return {'policy':predictor.get('cpc_gap_policy','require_daily_cpc'),
             'missing_cpc_days':[row for row in records
                                 if period['start']<=row['reporting_date']<=period['end']],
-            'note':'CPC precipitation placeholder and zero coverage preserved; no imputation. Other inputs remain required.'}
+            'note':('Only CPC channels borrowed from previous day; ERA5 and observations retain their intended dates.'
+                    if donors else 'CPC precipitation placeholder and zero coverage preserved; no imputation. Other inputs remain required.')}
 
 
 def diagnose_cpc_gaps(path, folder, missing_dates):
@@ -613,6 +626,7 @@ def production(args):
     if representation is None or not 0<=float(representation)<10:
         raise ValueError('unavailable measured super-observation representativeness')
     run('51_check_sqrt_da_gradient.py')
+    fallback_args=['--fill-known-cpc-gaps'] if predictor['predictors'].get('cpc_gap_policy')=='known_source_gaps_previous_day_cpc' else []
     run('28_simultaneous_method_sweep.py','--config','configs/da.yaml','--ckpt',args.ckpt,'--data-zarr',data_zarr,
         '--stations',folder/'superob_prod_0.25.csv','--imerg',Path(args.root)/'imerg_s04'/f"{p['label']}.nc",
         '--start',p['start'],'--end',p['end'],'--background-day-offset',-1,'--members',30,
@@ -620,7 +634,7 @@ def production(args):
         '--set','observations.imerg.factor=8','--set','observations.imerg.error_corr_cells=0.75',
         '--set',f'observations.gauges.representativeness={representation}',
         '--seed',202205,'--out',prefix.with_suffix('.npz'),'--report',prefix.with_suffix('.json'),
-        '--assimilate-all-stations','--fields-zarr',fields)
+        '--assimilate-all-stations','--fields-zarr',fields,*fallback_args)
     import zarr
     zarr.open_group(str(fields),mode='a').attrs['cpc_background_qc']=cpc_background_qc(p,predictor['predictors'])
     zarr.consolidate_metadata(str(fields))
@@ -669,6 +683,10 @@ def verify_shard(args,p):
     recorded_cpc_qc=store.attrs.get('cpc_background_qc')
     if recorded_cpc_qc != cpc_qc and (recorded_cpc_qc is not None or cpc_qc['missing_cpc_days']):
         raise ValueError('production CPC missing-background flags differ: '+p['label'])
+    expected_fallbacks=[{'background_date':row['background_date'],'cpc_source_date':row['cpc_source_date']}
+                        for row in cpc_qc['missing_cpc_days'] if 'cpc_source_date' in row]
+    if scope.get('cpc_gap_fallbacks',[]) != expected_fallbacks:
+        raise ValueError('production CPC donor dates differ: '+p['label'])
     with np.load(prefix.with_suffix('.npz'),allow_pickle=False) as dump:
         if dump['times'].astype('datetime64[D]').astype(str).tolist()!=actual or len(dump['eval_idx'])!=0:
             raise ValueError('station archive does not establish full all-station production')
@@ -714,8 +732,11 @@ def main(argv=None):
                    help='year download reports used by source-check')
     p.add_argument('--color',choices=['auto','always','never'],default='auto',
                    help='source-check colors (auto uses terminal detection; NO_COLOR disables auto)')
-    p.add_argument('--allow-known-cpc-gaps',action='store_true',
+    gap_policy=p.add_mutually_exclusive_group()
+    gap_policy.add_argument('--allow-known-cpc-gaps',action='store_true',
                    help='preserve native zero coverage only for verified source gaps 2004-09-10 and 2007-02-26; flag outputs')
+    gap_policy.add_argument('--fill-known-cpc-gaps',action='store_true',
+                   help='borrow previous-day CPC for only the two verified gaps; keep ERA5/observation dates and record donor dates')
     p.add_argument('--task',type=int);p.add_argument('--deep',action='store_true');p.add_argument('--report')
     args=p.parse_args(argv)
     if args.end_year is None: args.end_year=2025 if args.stage=='source-check' else 2024

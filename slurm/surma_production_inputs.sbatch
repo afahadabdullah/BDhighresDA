@@ -32,6 +32,11 @@ case "${SURMA_PROD_ALLOW_KNOWN_CPC_GAPS:-0}" in
   0) ;;
   *) echo "ERROR: SURMA_PROD_ALLOW_KNOWN_CPC_GAPS must be 0 or 1" >&2; exit 2;;
 esac
+case "${SURMA_PROD_FILL_KNOWN_CPC_GAPS:-0}" in
+  1) TASK_ARGS+=(--fill-known-cpc-gaps);;
+  0) ;;
+  *) echo "ERROR: SURMA_PROD_FILL_KNOWN_CPC_GAPS must be 0 or 1" >&2; exit 2;;
+esac
 case "$TASK_STAGE" in
   download-year|download-month|prepare) TASK_ARGS+=(--task "${SLURM_ARRAY_TASK_ID:?array required}");;
   audit) TASK_ARGS+=(--deep);;
