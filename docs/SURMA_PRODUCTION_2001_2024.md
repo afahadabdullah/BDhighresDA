@@ -14,9 +14,16 @@ verification experiments.
 The local source-file audit on 2026-10-02 found BMD and BWDB observations for
 **every quarter in 2001–2024**, with at least 34 eligible BMD and 188 eligible
 BWDB gauges in each quarter after the existing QC and 50% coverage criterion.
+These historical counts used the uncorrected wide BMD file and old coordinates;
+they must be rechecked for the corrected inputs below.
 The 2001 Q1 preparation has 35 BMD / 229 BWDB gauges, and 2024 Q4 has
 42 BMD / 265 BWDB gauges. These are checks of the local national source files;
 the PRISM preflight repeats the checks on its actual copies and records hashes.
+
+The corrected-input audit on 2026-10-06 passed all 96 quarters, still with
+minimum counts of 34 BMD and 188 BWDB. With the 51-location catalogue,
+2024 Q4 now has 50 eligible BMD and 265 BWDB gauges. This establishes gauge
+coverage, not availability of the model, predictors or IMERG on PRISM.
 
 The desktop checkout has no learned checkpoint, CPCv2 statistics, packed
 predictor Zarr, annual gridded sources or prepared IMERG months. Their status
@@ -27,12 +34,52 @@ old seasonal test windows, not full calendar-year input availability.
 |---|---|---|
 | Evaluated CPCv2 weights | `runs/prior_h100_cpc_v2/best.pt` | Existing PRISM training artifact; pinned SHA-256 is checked. |
 | Trained normalization/transform | `data/processed/stats_cpc_v2.json` | Existing evaluated artifact; preserve its content and checkpoint-bound path. |
-| BMD daily history | `data/stations/Rainfall_daily_by_station_BMD.csv` | Existing private source covers early years as well as 2020–2024. |
-| BMD coordinates | `data/stations/data_2020_2025/Stations.csv` | Existing catalogue and explicit aliases. |
+| BMD daily history | `data/stations/Rainfall_daily_by_station_BMD_corrected.csv` | Corrected private wide archive; read dates as-is. |
+| BMD coordinates | `data/stations/BMD_production_station_catalog.csv` | Reviewed 51-location companion catalogue; no legacy-coordinate fallback. |
 | BWDB daily history | `data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx` | Existing private workbook, same reader/QC as the model paper. |
 | CPC + ERA5 predictors and static channels | `data/processed/bd_wide_cpc.zarr` | Reuse if complete; otherwise acquire annual sources and build a separate production predictor store. |
 | Original static grid for rebuilding | `data/static/static_wide.nc` | Recover the grid used to pack the trained model's inputs. |
 | Native, 03 UTC daily IMERG | `data/processed/imerg_bd_aligned_YYYYMMDD_YYYYMMDD.nc` | Missing months are downloaded from V07B half-hours and accumulated with script 08. |
+
+## Station files for production
+
+Place the corrected BMD rainfall CSV, `BMD_production_station_catalog.csv`,
+and `BWDB_Rainfall_2000_2025_corrected.xlsx` together in `data/stations/`.
+Keep the catalogue manifest beside them for provenance. These files are private
+inputs and are not distributed by Git; upload them separately to PRISM.
+
+The corrected BMD CSV already strips padded headers, coalesces Chuadanga,
+maps trace rainfall to zero, and shifts source dates from 2024 onward forward
+one day. Scripts 99 and 100 read those corrected dates unchanged. Do not shift
+them again. The catalogue preserves existing project station IDs, revises
+Rajarhat to 25.80 N, 89.55 E, and assigns local project IDs 43–52 to ten newly
+mapped sites. Rounded coordinates and retained site uncertainties remain in
+its metadata; these are not all GPS-surveyed instrument locations.
+
+Seven rainfall columns are excluded until their exact locations are resolved:
+Ashuganj, Dighinala, Kawkhali, Mawan, Narayanganj, Saint Martin, and Teltulia.
+The exclusion list appears in the gauge audit/preparation QC. Production uses
+`--bmd-catalog-only` by default, so old fallback coordinates cannot reintroduce
+an excluded site. Script 99 requires that flag when called directly:
+
+```bash
+python scripts/99_prepare_production_stations.py \
+  --start 2024-10-01 --end 2024-12-31 \
+  --bmd-wide data/stations/Rainfall_daily_by_station_BMD_corrected.csv \
+  --bmd-stations data/stations/BMD_production_station_catalog.csv \
+  --bmd-catalog-only \
+  --bwdb-xlsx data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx \
+  --out data/processed/station_check_2024_q4/combined_daily.csv \
+  --summary data/processed/station_check_2024_q4/station_summary.csv \
+  --report data/processed/station_check_2024_q4/preparation_manifest.json
+```
+
+`climate_data_bangladesh_corrected.csv` is a separate NOAA diagnostic source;
+do not merge its overlapping airport records into the BMD/BWDB production gauge
+network. The corrected BMD archive ends on 2025-09-01 and BWDB in early September,
+so they do not establish complete 2025 coverage. Production remains 2001–2024.
+Rebuild quarterly combined tables and super-observations with these inputs;
+do not reuse station tables prepared from the original wide file.
 
 ## Audit PRISM first
 

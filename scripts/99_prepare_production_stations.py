@@ -18,6 +18,10 @@ For a 2020–2025 pilot without the wide history, --bmd-data-dir uses the
 established per-station reader instead, with the same output schema and QC.
 This optional source cannot serve the earlier historical production years.
 
+Corrected production inputs use Rainfall_daily_by_station_BMD_corrected.csv
+with BMD_production_station_catalog.csv and --bmd-catalog-only. Dates in this
+file already incorporate the 2024+ correction and are never shifted here.
+
     python scripts/99_prepare_production_stations.py \
         --start 2005-04-01 --end 2005-06-30 \
         --out ROOT/stations/2005_q2/combined_daily.csv \
@@ -66,8 +70,9 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_wide_bmd(path: Path, catalog_csv: Path, start, end, max_mm: float = 1000.0):
-    """Read the wide Date x station table; return canonical long form and a QC report."""
+def read_wide_bmd(path: Path, catalog_csv: Path, start, end, max_mm: float = 1000.0,
+                  catalog_only: bool = False):
+    """Read wide rainfall as dated; a reviewed catalogue can disable legacy extras."""
     with Path(path).open(encoding="utf-8-sig") as handle:
         header = next(i for i, line in enumerate(handle) if line.split(",")[0].strip().lower() == "date")
     raw = pd.read_csv(path, skiprows=header, dtype=str, keep_default_na=False)
@@ -77,9 +82,10 @@ def read_wide_bmd(path: Path, catalog_csv: Path, start, end, max_mm: float = 100
     raw, dates = raw.loc[keep], dates.loc[keep]
     catalog = read_station_catalog(catalog_csv)
     cat = {row["station_key"]: row for _, row in catalog.iterrows()}
-    for key, info in EXTRA_STATION_COORDS.items():
-        cat.setdefault(key, pd.Series({"station_id": info["station_id"], "catalog_name": info["catalog_name"],
-                                       "lat": info["lat"], "lon": info["lon"]}))
+    if not catalog_only:
+        for key, info in EXTRA_STATION_COORDS.items():
+            cat.setdefault(key, pd.Series({"station_id": info["station_id"], "catalog_name": info["catalog_name"],
+                                           "lat": info["lat"], "lon": info["lon"]}))
     frames, unmatched, used = [], [], {}
     for column in raw.columns[1:]:
         key = _station_key(column.split(".")[0])
@@ -101,27 +107,34 @@ def read_wide_bmd(path: Path, catalog_csv: Path, start, end, max_mm: float = 100
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
         columns=["station_id", "name", "lat", "lon", "date", "precip_mm"])
     return out, {"source": str(path), "format": "wide daily table", "stations_matched": len(frames),
+                 "coordinate_policy": "catalogue only" if catalog_only else "catalogue plus legacy extras",
+                 "date_policy": "input dates unchanged; no reader day shift",
                  "columns_unmatched_skipped": unmatched}
 
 
 def read_bmd(args, start, end):
     """BMD records for [start, end] from the wide daily table (one source, 1975-2025).
 
-    The wide table was checked against the two readers used elsewhere: values are
+    The original wide table was checked against the two readers used elsewhere: values are
     identical to the legacy station-month matrix (Jun-Sep 2017, 35 stations, 4,270
     station-days) and to the per-station 2020-2025 directory (Jun-Sep 2020, 4,514
-    station-days), with no day shift.  The legacy matrix ends during 2018 and the
+    station-days), with no day shift in those historical comparisons. Corrected
+    production dates are read as-is, including the supplied 2024+ correction.
+    The legacy matrix ends during 2018 and the
     directory starts in 2020, so the wide table is the only source that covers
     2001-2020 without a gap.
     An explicit --bmd-data-dir is supported for bounded 2020–2025 pilots only.
     """
     directory = getattr(args, "bmd_data_dir", None)
     if directory:
+        if getattr(args, "bmd_catalog_only", False):
+            raise ValueError("--bmd-catalog-only is supported only with --bmd-wide")
         if start < pd.Timestamp("2020-01-01") or end > pd.Timestamp("2025-12-31"):
             raise ValueError("the 2020–2025 station-directory source cannot replace the wide BMD history outside those years")
         frame, qc = read_station_dir_bmd(directory, args.bmd_stations, start, end)
         return frame, [{"station_directory": qc}]
-    frame, qc = read_wide_bmd(Path(args.bmd_wide), Path(args.bmd_stations), start, end)
+    frame, qc = read_wide_bmd(Path(args.bmd_wide), Path(args.bmd_stations), start, end,
+                            catalog_only=getattr(args, "bmd_catalog_only", False))
     if frame.duplicated(["station_id", "date"]).any():
         raise ValueError("duplicate BMD station-days")
     return frame, [{"wide": qc}]
@@ -133,6 +146,8 @@ def main() -> None:
     p.add_argument("--bmd-wide", default="data/stations/Rainfall_daily_by_station_BMD.csv")
     p.add_argument("--bmd-data-dir", help="use existing per-station CSVs instead of the wide table, for 2020–2025 only")
     p.add_argument("--bmd-stations", default="data/stations/data_2020_2025/Stations.csv")
+    p.add_argument("--bmd-catalog-only", action=argparse.BooleanOptionalAction, default=False,
+                   help="use only explicit catalogue stations; do not add legacy fallback coordinates")
     p.add_argument("--bwdb-xlsx", default="data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx")
     p.add_argument("--bwdb-max-mm", type=float, default=500.0)
     p.add_argument("--grid", default="bd")

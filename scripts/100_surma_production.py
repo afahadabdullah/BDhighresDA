@@ -366,7 +366,7 @@ def audit_gauges(args):
     spec=importlib.util.spec_from_file_location('_production_stations',ROOT/'scripts/99_prepare_production_stations.py')
     mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
     start,end=pd.Timestamp(f'{args.start_year}-01-01'),pd.Timestamp(f'{args.end_year}-12-31')
-    bmd,_=mod.read_bmd(args,start,end);bmd['source']='BMD'
+    bmd,bmd_qc=mod.read_bmd(args,start,end);bmd['source']='BMD'
     bwdb,_=mod.prep82.read_bwdb(Path(args.bwdb),start,end,500.)
     rows=[]
     for frame in (bmd,bwdb):
@@ -383,6 +383,7 @@ def audit_gauges(args):
                 raise ValueError(f'{q}: too few eligible {source} gauges ({stations}); inspect original coverage')
             rows.append({'quarter':str(q),'source':source,'days':n,'eligible_stations':stations})
     result={'status':'all_quarters_passed','quarter_counts':rows,
+            'bmd_source_qc':bmd_qc,
             'minimum_by_source':{s:min(r['eligible_stations'] for r in rows if r['source']==s) for s in ('BMD','BWDB')},
             'source_hashes':{str(p):sha(p) for p in (args.bmd_wide,args.bmd_stations,args.bwdb)}}
     write_json(args.report or Path(args.root)/'gauge_coverage.json',result)
@@ -442,6 +443,7 @@ def prepare(args):
     folder=Path(args.root)/'stations'/p['label']; folder.mkdir(parents=True,exist_ok=True)
     run('99_prepare_production_stations.py','--start',p['start'],'--end',p['end'],
         '--bmd-wide',args.bmd_wide,'--bmd-stations',args.bmd_stations,'--bwdb-xlsx',args.bwdb,
+        '--bmd-catalog-only' if getattr(args,'bmd_catalog_only',True) else '--no-bmd-catalog-only',
         '--out',folder/'combined_daily.csv','--summary',folder/'station_summary.csv',
         '--report',folder/'preparation_manifest.json')
     run('87_superob_dense_gauges.py','--stations',folder/'combined_daily.csv','--stats',args.stats,
@@ -569,8 +571,10 @@ def main(argv=None):
     p.add_argument('--root',default='data/processed/brishti05_production_2001_2024')
     p.add_argument('--data-zarr'); p.add_argument('--ckpt',default='runs/prior_h100_cpc_v2/best.pt')
     p.add_argument('--stats',default='data/processed/stats_cpc_v2.json')
-    p.add_argument('--bmd-wide',default='data/stations/Rainfall_daily_by_station_BMD.csv')
-    p.add_argument('--bmd-stations',default='data/stations/data_2020_2025/Stations.csv')
+    p.add_argument('--bmd-wide',default='data/stations/Rainfall_daily_by_station_BMD_corrected.csv')
+    p.add_argument('--bmd-stations',default='data/stations/BMD_production_station_catalog.csv')
+    p.add_argument('--bmd-catalog-only',action=argparse.BooleanOptionalAction,default=True,
+                   help='use only reviewed catalogue coordinates (default); legacy fallback requires explicit opt-in')
     p.add_argument('--bwdb',default='data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx')
     p.add_argument('--era5',default='data/raw/era5');p.add_argument('--cpc',default='data/raw/cpc')
     p.add_argument('--chirps',default='data/raw/chirps');p.add_argument('--static',default='data/static/static_wide.nc')

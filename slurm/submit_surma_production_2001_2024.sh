@@ -55,8 +55,8 @@ if (( ! TASK_DRY )); then
   # cannot recreate the evaluated weights, normalization or private observations.
   for task_required in "${SURMA_PROD_CKPT:-runs/prior_h100_cpc_v2/best.pt}" \
     "${SURMA_PROD_STATS:-data/processed/stats_cpc_v2.json}" \
-    "${SURMA_PROD_BMD_WIDE:-data/stations/Rainfall_daily_by_station_BMD.csv}" \
-    "${SURMA_PROD_BMD_CATALOG:-data/stations/data_2020_2025/Stations.csv}" \
+    "${SURMA_PROD_BMD_WIDE:-data/stations/Rainfall_daily_by_station_BMD_corrected.csv}" \
+    "${SURMA_PROD_BMD_CATALOG:-data/stations/BMD_production_station_catalog.csv}" \
     "${SURMA_PROD_BWDB:-data/stations/BWDB_Rainfall_2000_2025_corrected.xlsx}"; do
     [[ -s "$task_required" ]] || { echo "ERROR: required project artifact missing: $task_required" >&2; exit 1; }
   done
