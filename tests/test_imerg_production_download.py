@@ -151,6 +151,37 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual((folder / request.output_name).read_bytes(), BINARY)
             self.assertFalse(list(folder.glob("*.part")))
 
+    def test_subset_404_retries_same_granule_and_promotes_only_success(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(DL.time, "sleep") as sleep:
+            folder = Path(temp)
+            request = DL.requests_for(MONTH)[0]
+            session = Mock()
+            denied = response(status=404)
+            denied.url = request.url
+            session.get.side_effect = [denied, denied, response()]
+            self.assertEqual(DL.download_one(request, folder, session), "downloaded")
+            self.assertEqual(session.get.call_count, 3)
+            self.assertTrue(all(call.args[0] == request.url for call in session.get.call_args_list))
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+            self.assertEqual((folder / request.output_name).read_bytes(), BINARY)
+            self.assertFalse(list(folder.glob("*.part")))
+            session.cookies.clear.assert_not_called()
+
+    def test_persistent_subset_404_is_bounded_and_never_fabricates_a_granule(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(DL.time, "sleep") as sleep:
+            folder = Path(temp)
+            request = DL.requests_for(MONTH)[0]
+            session = Mock()
+            denied = response(status=404)
+            denied.url = "https://opendap.earthdata.nasa.gov/fixture"
+            session.get.return_value = denied
+            (folder / (request.output_name + ".part")).write_bytes(b"partial")
+            with self.assertRaisesRegex(FileNotFoundError, "HTTP 404 from opendap.*persisted after 5 attempts"):
+                DL.download_one(request, folder, session)
+            self.assertEqual(session.get.call_count, 5)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4, 8, 16])
+            self.assertFalse(list(folder.iterdir()))
+
     def test_persistent_401_and_forbidden_response_never_promote_or_loop(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(DL.time, "sleep") as sleep:
             folder = Path(temp)

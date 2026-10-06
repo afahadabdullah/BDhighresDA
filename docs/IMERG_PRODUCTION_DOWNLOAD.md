@@ -62,6 +62,12 @@ granule transfer. The shared `~/.urs_cookies` file is not modified. Persistent
 receipt. The log records `[auth]` when the cookie refresh is attempted; this
 does not establish that session expiry caused a particular failure.
 
+Cloud subset HTTP 404 responses receive the same five-attempt retry budget as
+other transfer errors, with waits of 2, 4, 8 and 16 seconds. The log records
+`[retry]` for each retry. A persistent 404 still fails that month; granules are
+never replaced with zero rainfall or skipped to obtain readiness. A subset
+404 alone does not demonstrate that the source granule is absent from CMR.
+
 Omitting `--parallel-years` retains one coordinator with at most
 **three serial download workers in total**, 8 CPUs, 24 GB memory and a 24-hour
 wall limit. `IMERG_DOWNLOAD_CONNECTIONS` controls this coordinator's workers;

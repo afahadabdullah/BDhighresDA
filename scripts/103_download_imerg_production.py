@@ -138,6 +138,10 @@ class AuthenticationError(RuntimeError):
     pass
 
 
+class SubsetNotFoundError(FileNotFoundError):
+    pass
+
+
 @contextmanager
 def authenticated_response(session, url, **kwargs):
     """Retry a 401 once without stale cookies; persistent denial remains fatal."""
@@ -208,7 +212,7 @@ def download_one(request, output, session, retries=5):
                 if response.status_code == 404:
                     final_url = getattr(response, "url", None)
                     responding_host = urlparse(final_url if isinstance(final_url, str) else request.url).hostname
-                    raise FileNotFoundError("HTTP 404 from " + str(responding_host)
+                    raise SubsetNotFoundError("HTTP 404 from " + str(responding_host)
                                             + " for " + request.output_name
                                             + "; endpoint/subset failure does not establish a missing archive granule")
                 response.raise_for_status()
@@ -222,12 +226,18 @@ def download_one(request, output, session, retries=5):
             return "downloaded"
         except Exception as exc:
             temporary.unlink(missing_ok=True)
-            if isinstance(exc, (AuthenticationError, FileNotFoundError)):
+            if isinstance(exc, AuthenticationError):
                 raise
             if attempt + 1 == retries:
+                if isinstance(exc, SubsetNotFoundError):
+                    raise SubsetNotFoundError(f"{exc}; persisted after {retries} attempts") from None
                 # Do not print response bodies, credentials or authentication URLs.
                 raise RuntimeError(f"{request.output_name}: failed after {retries} attempts ({type(exc).__name__})") from None
-            time.sleep(min(60, 2 ** (attempt + 1)))
+            delay = min(60, 2 ** (attempt + 1))
+            if isinstance(exc, SubsetNotFoundError):
+                print(f"[retry] {request.output_name}: HTTP 404 on attempt {attempt + 1}/{retries}; "
+                      f"retrying in {delay}s", flush=True)
+            time.sleep(delay)
 
 
 def download_wget(request, output):
