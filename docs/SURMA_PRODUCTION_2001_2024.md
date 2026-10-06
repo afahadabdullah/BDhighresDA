@@ -286,6 +286,27 @@ squeue -u "$USER"
 tail -f logs/surma-prod-01-24-JOBID_TASKID.out
 ```
 
+For a terminal summary of completed quarters/days, per-year completion, current
+Slurm states and progress in running logs, use native login-node Python:
+
+```bash
+python3 scripts/104_surma_production_status.py --jobs PILOT_ARRAY_ID PRODUCTION_ARRAY_ID
+```
+
+Only matching validation receipts and completed output artifacts count towards
+the completion percentage. Sampling days logged by active jobs are displayed
+separately because those quarterly outputs may not yet be saved/validated.
+Failed attempts do not contribute to sampling progress; when multiple attempts
+exist, the latest parent job ID per quarter is used. Use `--details` for every
+quarter, `--json` for machine-readable output, and `--root` for another archive.
+Without `--jobs`, the script reports filesystem completion only. No scientific
+packages are needed, and the script does not modify or re-audit data arrays.
+To refresh every minute:
+
+```bash
+watch -n 60 'python3 scripts/104_surma_production_status.py --jobs PILOT_ARRAY_ID PRODUCTION_ARRAY_ID'
+```
+
 GPU jobs request 48 hours per quarter. Actual timing has not been measured
 for a full calendar-year production run; inspect a pilot before increasing
 concurrency. A one-year pilot exercises both wet and dry seasons:
