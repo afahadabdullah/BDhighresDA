@@ -2,6 +2,8 @@
 # NOTE: leading slash -- otherwise this would also ignore src/bdhires/data/
 /data/
 !/data/.gitkeep
+# Derived station observations and diagnostics also stay local.
+/output/bwdb_analysis/
 /runs/
 /results/
 /logs/
