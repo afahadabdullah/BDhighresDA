@@ -1,5 +1,7 @@
 """Production calendar, prerequisite gates and scheduler dependencies."""
 import importlib.util
+import io
+from contextlib import redirect_stdout
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,49 @@ PROD=importlib.util.module_from_spec(spec);spec.loader.exec_module(PROD)
 
 
 class ProductionTests(unittest.TestCase):
+    def test_source_check_distinguishes_variables_empty_files_and_matching_receipts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            packed=folder/'packed.zarr'; packed.mkdir()
+            (packed/'.zattrs').write_text(json.dumps({'schema_version':1,'complete':False,
+                'completed_years':[2024], 'cond_channels':['cpc_precip','era5_tcwv']}))
+            (packed/'cond').mkdir(); (packed/'cond'/'.zarray').write_text('{}')
+            (folder/'precip.2024.nc').write_bytes(b'raw CPC fixture')
+            (folder/'era5_daily_2024.nc').touch()  # empty files cannot be credited
+            months=PROD.monthly(2024,2024)
+            first,second=[folder/f"imerg_bd_aligned_{m['start'].replace('-','')}_{m['end'].replace('-','')}.nc" for m in months[:2]]
+            first.write_bytes(b'prepared fixture'); second.write_bytes(b'prepared fixture')
+            PROD.write_json(folder/'years/2024/status.json',{'months':{
+                '2024-01':{'status':'validated','file':str(first)},
+                '2024-02':{'status':'validated','file':str(folder/'different.nc')},
+                '2024-03':{'status':'validated','file':str(folder/'absent.nc')}}})
+            args=SimpleNamespace(start_year=2024,end_year=2025,root=folder,data_zarr=str(packed),
+                static=folder/'static.nc',cpc=folder,era5=folder,chirps=folder,
+                imerg_daily=folder,imerg_state=folder)
+            output=io.StringIO()
+            with patch.object(PROD,'fixed_inputs',return_value={}),redirect_stdout(output):
+                PROD.source_check(args)
+            rows={line.split()[0]:line.split()[1:] for line in output.getvalue().splitlines()
+                  if line.split() and line.split()[0] in ('2023','2024','2025')}
+            self.assertEqual(rows['2024'],['P1','RAW','P1','MISS','MISS','MISS','MISS','MISS','2/12','1/12'])
+            self.assertEqual(rows['2025'],['MISS']*8+['0/12','0/12'])
+            self.assertEqual(rows['2023'][-2:],['--','--'])
+            self.assertIn('not deep validation',output.getvalue())
+
+    def test_source_check_accepts_2025_without_scientific_packages_or_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            command=[sys.executable,'-S',str(ROOT/'scripts/100_surma_production.py'),
+                     'source-check','--start-year','2024']
+            result=subprocess.run(command,cwd=temp,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('Source years checked: 2024..2025',result.stdout)
+            self.assertIn('2025 ',result.stdout)
+            self.assertEqual(list(Path(temp).iterdir()),[])
+            result=subprocess.run([sys.executable,'-S',str(ROOT/'scripts/100_surma_production.py'),
+                'production','--end-year','2025','--task','0'],cwd=temp,capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('production years must be within 2001..2024',result.stderr)
+
     def test_calendar_covers_all_days_including_leap_days(self):
         blocks=PROD.periods(2001,2024)
         self.assertEqual(len(blocks),96)

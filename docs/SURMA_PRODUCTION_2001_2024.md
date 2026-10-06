@@ -36,6 +36,22 @@ old seasonal test windows, not full calendar-year input availability.
 
 ## Audit PRISM first
 
+For an immediate terminal table on a login node, using only standard Python:
+
+```bash
+python3 scripts/100_surma_production.py source-check --start-year 2001 --end-year 2025
+```
+
+The table includes 2000 as preceding-year predictor context, each CPC/ERA5
+conditioning variable, CHIRPS context and prepared/recorded IMERG month counts.
+Shared model, statistics, station and static inputs are listed with their paths.
+`P1`/`P2` identify packed-store metadata for a year/channel; `RAW` means only
+that the expected annual file is nonempty. Neither replaces a deep audit.
+Use `--data-zarr`, `--cpc`, `--era5`, `--chirps`, `--imerg-daily` or
+`--imerg-state` for relocated sources. This command submits no jobs, writes no
+files and defaults to checking through 2025. Production stages retain their
+existing 2001–2024 range.
+
 To prioritize overnight half-hourly IMERG acquisition, use the dedicated
 [resumable download job](IMERG_PRODUCTION_DOWNLOAD.md) before launching the
 full production chain. It validates and prepares all 288 native months at the

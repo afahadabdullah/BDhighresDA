@@ -184,6 +184,98 @@ def fixed_inputs(args, deep=False):
     return result
 
 
+def source_check(args):
+    """Print a read-only source inventory; no scientific imports or Slurm job."""
+    def present(path):
+        path=Path(path)
+        return path.is_file() and path.stat().st_size>0
+
+    candidates=([Path(args.data_zarr)] if args.data_zarr else
+                [Path('data/processed/bd_wide_cpc.zarr'),Path(args.root)/'predictors.zarr'])
+    packed=[]
+    print('SOURCE CHECK: file presence and recorded metadata; not deep validation')
+    print(f'Source years checked: {args.start_year}..{args.end_year}; '
+          f'{args.start_year-1} is preceding-year predictor context')
+    print('\nShared inputs:')
+    for name,record in fixed_inputs(args).items():
+        print(f"  {name:14} {record['status']:58} {record['path']}")
+    print(f"  {'static grid':14} {'PRESENT' if present(args.static) else 'MISSING':58} {args.static}")
+    print('  Station file presence does not establish daily/yearly gauge coverage.')
+    print('\nPacked source candidates:')
+    for index,path in enumerate(candidates,1):
+        try:
+            meta=attrs(path)
+            if not isinstance(meta,dict): raise ValueError('invalid packed metadata object')
+            years=meta.get('completed_years',[])
+            channels=meta.get('cond_channels',[])
+            if not isinstance(years,list) or not isinstance(channels,list):
+                raise ValueError('invalid completed_years/cond_channels metadata')
+            packed.append((index,path,meta,set(years),set(channels)))
+            print(f'  P{index}: {path}; complete={meta.get("complete",False)}; '
+                  f'recorded years={years}; channels={channels}')
+        except (OSError,ValueError,TypeError) as exc:
+            print(f'  P{index}: {path}; unreadable metadata ({type(exc).__name__})')
+
+    def packed_source(year,array,channel=None):
+        for index,path,meta,years,channels in packed:
+            if (meta.get('schema_version')==1 and year in years
+                    and (channel is None or channel in channels)
+                    and (path/array/'.zarray').is_file()):
+                return f'P{index}'
+        return None
+
+    header=f"{'YEAR':<6}"+''.join(f'{name:>9}' for name in
+        ('CPC_P','CPC_V','TCWV','CAPE','U10','V10','MSL','CHIRPS','IM_FILES','IM_REC'))
+    print('\n'+header)
+    print('-'*len(header))
+    totals=[0,0]
+    for year in range(args.start_year-1,args.end_year+1):
+        raw_cpc=present(Path(args.cpc)/f'precip.{year}.nc')
+        raw_era5=present(Path(args.era5)/f'era5_daily_{year}.nc')
+        raw_chirps=present(Path(args.chirps)/f'chirps_wide_{year}.nc')
+        cells=[packed_source(year,'cond',channel) or ('RAW' if
+               (raw_cpc if channel.startswith('cpc_') else raw_era5) else 'MISS')
+               for channel in CHANNELS]
+        cells.append(packed_source(year,'target') or ('RAW' if raw_chirps else 'MISS'))
+        files=recorded=0
+        if year>=args.start_year:
+            report=Path(args.imerg_state)/'years'/str(year)/'status.json'
+            try:
+                state=json.loads(report.read_text()) if report.is_file() else {}
+                if not isinstance(state,dict): raise ValueError('invalid IMERG report object')
+                records=state.get('months',{})
+                if not isinstance(records,dict): records={}
+            except (OSError,ValueError):
+                records={}
+                print(f'  NOTE: unreadable IMERG report: {report}')
+            for month in monthly(year,year):
+                path=Path(args.imerg_daily)/f"imerg_bd_aligned_{month['start'].replace('-','')}_{month['end'].replace('-','')}.nc"
+                exists=present(path)
+                files+=exists
+                record=records.get(month['start'][:7],{})
+                if (exists and isinstance(record,dict) and record.get('status')=='validated'
+                        and isinstance(record.get('file'),str) and record['file']
+                        and Path(record['file']).resolve()==path.resolve()):
+                    recorded+=1
+            totals[0]+=files; totals[1]+=recorded
+            cells.extend((f'{files}/12',f'{recorded}/12'))
+        else:
+            cells.extend(('--','--'))
+        print(f'{year:<6}'+''.join(f'{cell:>9}' for cell in cells))
+    print('\nP1/P2 = that variable/year is recorded in packed metadata; arrays not revalidated.')
+    print('RAW = nonempty annual source file exists; variables/dates/values not inspected.')
+    print('MISS = neither a recorded packed source nor the expected raw file was found.')
+    print('IM_FILES = prepared monthly files present; IM_REC = matching validation records, not a fresh audit.')
+    print(f'IMERG totals: {totals[0]}/{12*(args.end_year-args.start_year+1)} files; '
+          f'{totals[1]} matching month validation records.')
+    print('\nRaw source patterns:')
+    print(f'  CPC:    {args.cpc}/precip.YEAR.nc -> cpc_precip; cpc_valid is derived during packing')
+    print(f'  ERA5:   {args.era5}/era5_daily_YEAR.nc -> tcwv, cape, u10, v10, msl')
+    print(f'  CHIRPS: {args.chirps}/chirps_wide_YEAR.nc -> precipitation target/context')
+    print(f'  IMERG:  {args.imerg_daily}/imerg_bd_aligned_START_END.nc -> precipitation, randomError')
+    print(f'  IMERG validation reports: {args.imerg_state}/years/YEAR/status.json')
+
+
 def audit(args):
     selected=choose_data(args)
     raw=[]
@@ -451,8 +543,8 @@ def finalize(args):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('stage',choices=['audit','audit-gauges','preflight','choose-data','download-year','download-month','pack','prepare','production','finalize'])
-    p.add_argument('--start-year',type=int,default=2001);p.add_argument('--end-year',type=int,default=2024)
+    p.add_argument('stage',choices=['source-check','audit','audit-gauges','preflight','choose-data','download-year','download-month','pack','prepare','production','finalize'])
+    p.add_argument('--start-year',type=int,default=2001);p.add_argument('--end-year',type=int)
     p.add_argument('--root',default='data/processed/brishti05_production_2001_2024')
     p.add_argument('--data-zarr'); p.add_argument('--ckpt',default='runs/prior_h100_cpc_v2/best.pt')
     p.add_argument('--stats',default='data/processed/stats_cpc_v2.json')
@@ -462,9 +554,14 @@ def main(argv=None):
     p.add_argument('--era5',default='data/raw/era5');p.add_argument('--cpc',default='data/raw/cpc')
     p.add_argument('--chirps',default='data/raw/chirps');p.add_argument('--static',default='data/static/static_wide.nc')
     p.add_argument('--imerg-raw',default='data/imerg_halfhourly');p.add_argument('--imerg-daily',default='data/processed')
+    p.add_argument('--imerg-state',default=os.environ.get('IMERG_DOWNLOAD_STATE','data/processed/imerg_download_2001_2024'),
+                   help='year download reports used by source-check')
     p.add_argument('--task',type=int);p.add_argument('--deep',action='store_true');p.add_argument('--report')
     args=p.parse_args(argv)
-    if not 2001<=args.start_year<=args.end_year<=2024: p.error('production years must be within 2001..2024')
+    if args.end_year is None: args.end_year=2025 if args.stage=='source-check' else 2024
+    last_allowed=2025 if args.stage=='source-check' else 2024
+    if not 2001<=args.start_year<=args.end_year<=last_allowed:
+        p.error(f'{args.stage} years must be within 2001..{last_allowed}')
     limits={'download-year':args.end_year-args.start_year+2,'download-month':12*(args.end_year-args.start_year+1),
             'prepare':4*(args.end_year-args.start_year+1),'production':4*(args.end_year-args.start_year+1)}
     if args.stage in limits and (args.task is None or not 0<=args.task<limits[args.stage]):
