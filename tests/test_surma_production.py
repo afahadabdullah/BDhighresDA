@@ -42,7 +42,7 @@ class ProductionTests(unittest.TestCase):
             output=io.StringIO()
             with patch.object(PROD,'fixed_inputs',return_value={}),redirect_stdout(output):
                 PROD.source_check(args)
-            rows={line.split()[0]:line.split()[1:] for line in output.getvalue().splitlines()
+            rows={line.split()[0]:[cell.lstrip('✓✗') for cell in line.split()[1:]] for line in output.getvalue().splitlines()
                   if line.split() and line.split()[0] in ('2023','2024','2025')}
             self.assertEqual(rows['2024'],['P1','RAW','P1','MISS','MISS','MISS','MISS','MISS','2/12','1/12'])
             self.assertEqual(rows['2025'],['MISS']*8+['0/12','0/12'])

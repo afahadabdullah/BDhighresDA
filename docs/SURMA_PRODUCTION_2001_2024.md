@@ -52,6 +52,12 @@ Use `--data-zarr`, `--cpc`, `--era5`, `--chirps`, `--imerg-daily` or
 files and defaults to checking through 2025. Production stages retain their
 existing 2001–2024 range.
 
+Present sources have green `✓` marks; missing sources and incomplete IMERG
+years have red `✗` marks with the month counts retained. Colors appear
+automatically in an interactive terminal. Use `--color always` to force ANSI
+colors or `--color never` for plain text; `NO_COLOR` disables automatic colors.
+Symbols and counts remain visible when output is redirected.
+
 To prioritize overnight half-hourly IMERG acquisition, use the dedicated
 [resumable download job](IMERG_PRODUCTION_DOWNLOAD.md) before launching the
 full production chain. It validates and prepares all 288 native months at the

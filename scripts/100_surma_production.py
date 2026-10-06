@@ -186,6 +186,24 @@ def fixed_inputs(args, deep=False):
 
 def source_check(args):
     """Print a read-only source inventory; no scientific imports or Slurm job."""
+    mode=getattr(args,'color','auto')
+    color=(mode=='always' or (mode=='auto' and sys.stdout.isatty()
+           and 'NO_COLOR' not in os.environ and os.environ.get('TERM')!='dumb'))
+
+    def mark(text,ok,width=0,right=False):
+        label=('✓' if ok else '✗')+str(text)
+        label=label.rjust(width) if right else label.ljust(width)
+        return f'\033[{32 if ok else 31}m{label}\033[0m' if color else label
+
+    def cell(text):
+        if text=='--': return text.rjust(9)
+        if '/' in text:
+            count,total=map(int,text.split('/'))
+            ok=count==total
+        else:
+            ok=text=='RAW' or text.startswith('P')
+        return mark(text,ok,9,right=True)
+
     def present(path):
         path=Path(path)
         return path.is_file() and path.stat().st_size>0
@@ -198,8 +216,10 @@ def source_check(args):
           f'{args.start_year-1} is preceding-year predictor context')
     print('\nShared inputs:')
     for name,record in fixed_inputs(args).items():
-        print(f"  {name:14} {record['status']:58} {record['path']}")
-    print(f"  {'static grid':14} {'PRESENT' if present(args.static) else 'MISSING':58} {args.static}")
+        label=mark(record['status'],record['status'] in ('verified','present'),58)
+        print(f"  {name:14} {label} {record['path']}")
+    exists=present(args.static)
+    print(f"  {'static grid':14} {mark('PRESENT' if exists else 'MISSING',exists,58)} {args.static}")
     print('  Station file presence does not establish daily/yearly gauge coverage.')
     print('\nPacked source candidates:')
     for index,path in enumerate(candidates,1):
@@ -211,10 +231,10 @@ def source_check(args):
             if not isinstance(years,list) or not isinstance(channels,list):
                 raise ValueError('invalid completed_years/cond_channels metadata')
             packed.append((index,path,meta,set(years),set(channels)))
-            print(f'  P{index}: {path}; complete={meta.get("complete",False)}; '
+            print(f'  {mark(f"P{index}",meta.get("complete") is True)}: {path}; complete={meta.get("complete",False)}; '
                   f'recorded years={years}; channels={channels}')
         except (OSError,ValueError,TypeError) as exc:
-            print(f'  P{index}: {path}; unreadable metadata ({type(exc).__name__})')
+            print(f'  {mark(f"P{index}",False)}: {path}; unreadable metadata ({type(exc).__name__})')
 
     def packed_source(year,array,channel=None):
         for index,path,meta,years,channels in packed:
@@ -261,8 +281,9 @@ def source_check(args):
             cells.extend((f'{files}/12',f'{recorded}/12'))
         else:
             cells.extend(('--','--'))
-        print(f'{year:<6}'+''.join(f'{cell:>9}' for cell in cells))
-    print('\nP1/P2 = that variable/year is recorded in packed metadata; arrays not revalidated.')
+        print(f'{year:<6}'+''.join(cell(value) for value in cells))
+    print(f'\n{mark(" present/complete",True)}; {mark(" missing/incomplete or identity mismatch",False)}; -- = not applicable.')
+    print('P1/P2 = that variable/year is recorded in packed metadata; arrays not revalidated.')
     print('RAW = nonempty annual source file exists; variables/dates/values not inspected.')
     print('MISS = neither a recorded packed source nor the expected raw file was found.')
     print('IM_FILES = prepared monthly files present; IM_REC = matching validation records, not a fresh audit.')
@@ -556,6 +577,8 @@ def main(argv=None):
     p.add_argument('--imerg-raw',default='data/imerg_halfhourly');p.add_argument('--imerg-daily',default='data/processed')
     p.add_argument('--imerg-state',default=os.environ.get('IMERG_DOWNLOAD_STATE','data/processed/imerg_download_2001_2024'),
                    help='year download reports used by source-check')
+    p.add_argument('--color',choices=['auto','always','never'],default='auto',
+                   help='source-check colors (auto uses terminal detection; NO_COLOR disables auto)')
     p.add_argument('--task',type=int);p.add_argument('--deep',action='store_true');p.add_argument('--report')
     args=p.parse_args(argv)
     if args.end_year is None: args.end_year=2025 if args.stage=='source-check' else 2024
