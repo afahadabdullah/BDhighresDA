@@ -105,6 +105,45 @@ overrides when subsequently submitting the CPCv2 production launcher.
 
 ## Follow progress and resume
 
+### Recovery from concurrent year-job SIGKILLs
+
+The PRISM accounting supplied on 2026-10-06 shows the remaining workers on
+`gg001` killed together at 02:23:56, immediately after a sibling completed;
+the retry workers on `gg002` were killed at 02:55:12 while another sibling
+completed successfully. Exit `0:9` establishes SIGKILL, but the accounting does
+not establish an OOM, an administrator action, or a specific Slurm cleanup bug.
+The configured wall limit was 24 hours, not the observed few minutes. Ask NCCS
+to inspect the node and Slurm logs for these events; application retries cannot
+repair the scheduler or node configuration.
+
+As a mitigation, resume in **one exclusive Slurm allocation**:
+
+```bash
+git pull --ff-only origin codex/imerg-daily-window-pilot
+# Remove the currently blocked collector, if it is still pending.
+scancel 37939173
+bash slurm/submit_imerg_production_download.sh --serial-years --exclusive
+```
+
+This runs a fresh transfer probe, processes reporting years sequentially with
+at most three concurrent HTTP workers inside the current year, then audits all
+year receipts and monthly files in the same job. Valid caches are reused;
+completed years are revalidated rather than redownloaded. Year status files
+remain under `years/YEAR/`, so `source-check` keeps working. A failed probe or
+year stops the job and prevents final collection. There is no separate year
+array or pending collector in this mode.
+
+`--exclusive` requests a node that is not shared with other running jobs, as
+described by [Slurm](https://slurm.schedmd.com/sbatch.html#OPT_exclusive); partition
+policy takes precedence. It reserves the node's CPUs, can increase queue wait,
+and is a test mitigation rather than proof that the underlying problem is fixed.
+The three-connection transfer cap and requested 24 GB memory stay the same.
+Do not run another IMERG download workflow concurrently with this recovery job.
+
+`--serial-years` cannot be combined with `--parallel-years` or a single-month
+selection. All acquisition paths, the station files and production settings
+remain unchanged. This update contains only scripts, tests and documentation.
+
 The submitter prints the job ID and exact log path:
 
 ```bash

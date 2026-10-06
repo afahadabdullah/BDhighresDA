@@ -6,6 +6,7 @@ cd "$TASK_SCRIPT_DIR/.."
 TASK_EXTRA=(--export=ALL)
 TASK_DRY=0
 TASK_PARALLEL=0
+TASK_SERIAL=0
 TASK_HAS_MONTH=0
 TASK_ARGS=(--start-year "${IMERG_START_YEAR:-2001}" --end-year "${IMERG_END_YEAR:-2024}"
            --connections "${IMERG_DOWNLOAD_CONNECTIONS:-3}"
@@ -16,7 +17,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) TASK_DRY=1;;
         --parallel-years) TASK_PARALLEL=1;;
-        --account=*|--time=*) TASK_EXTRA+=("$1");;
+        --serial-years) TASK_SERIAL=1;;
+        --account=*|--time=*|--exclusive) TASK_EXTRA+=("$1");;
         --transport=auto|--transport=requests|--transport=wget) TASK_ARGS+=(--transport "${1#--transport=}");;
         --month=*)
             TASK_MONTH="${1#--month=}"
@@ -24,13 +26,19 @@ while [[ $# -gt 0 ]]; do
             [[ "${IMERG_START_YEAR:-2001}" =~ ^[0-9]{4}$ && "${IMERG_END_YEAR:-2024}" =~ ^[0-9]{4}$ ]] || { echo "ERROR: four-digit years required" >&2; exit 2; }
             (( ${TASK_MONTH:0:4} >= ${IMERG_START_YEAR:-2001} && ${TASK_MONTH:0:4} <= ${IMERG_END_YEAR:-2024} )) || { echo "ERROR: month is outside the year range" >&2; exit 2; }
             TASK_HAS_MONTH=1; TASK_ARGS+=(--month "$TASK_MONTH");;
-        *) echo "ERROR: unsupported option $1; use --parallel-years, --dry-run, --account=NAME, --time=HH:MM:SS, --month=YYYY-MM, --transport=auto|requests|wget" >&2; exit 2;;
+        *) echo "ERROR: unsupported option $1; use --parallel-years, --serial-years, --exclusive, --dry-run, --account=NAME, --time=HH:MM:SS, --month=YYYY-MM, --transport=auto|requests|wget" >&2; exit 2;;
     esac
     shift
 done
 [[ "${IMERG_START_YEAR:-2001}" =~ ^[0-9]{4}$ && "${IMERG_END_YEAR:-2024}" =~ ^[0-9]{4}$ ]] || { echo "ERROR: four-digit years required" >&2; exit 2; }
 (( ${IMERG_START_YEAR:-2001} >= 2001 && ${IMERG_START_YEAR:-2001} <= ${IMERG_END_YEAR:-2024} && ${IMERG_END_YEAR:-2024} <= 2024 )) || { echo "ERROR: years must be within 2001..2024" >&2; exit 2; }
 [[ "${IMERG_DOWNLOAD_CONNECTIONS:-3}" =~ ^[123]$ ]] || { echo "ERROR: connections must be 1, 2 or 3" >&2; exit 2; }
+(( ! (TASK_PARALLEL && TASK_SERIAL) )) || { echo "ERROR: --serial-years and --parallel-years are mutually exclusive" >&2; exit 2; }
+if (( TASK_SERIAL )); then
+    (( ! TASK_HAS_MONTH )) || { echo "ERROR: --serial-years requires complete years, without --month" >&2; exit 2; }
+    TASK_ARGS=(--serial-years-worker "${IMERG_START_YEAR:-2001}" "${IMERG_END_YEAR:-2024}"
+               "${IMERG_DOWNLOAD_STATE:-data/processed/imerg_download_2001_2024}" "${TASK_ARGS[@]}")
+fi
 if (( TASK_PARALLEL )); then
     (( ! TASK_HAS_MONTH )) || { echo "ERROR: --parallel-years requires complete years, without --month" >&2; exit 2; }
     TASK_YEAR_CONCURRENCY="${IMERG_YEAR_CONCURRENCY:-15}"
@@ -81,5 +89,9 @@ TASK_JOB="${TASK_JOB%%;*}"
 echo "Download job: $TASK_JOB"
 echo "Follow: tail -f logs/imerg-hh-production-$TASK_JOB.out"
 echo "Progress: ${IMERG_DOWNLOAD_STATE:-data/processed/imerg_download_2001_2024}/status.json"
+if (( TASK_SERIAL )); then
+    echo "One Slurm job: fresh probe, sequential years, then final collection audit."
+    echo "Year progress: ${IMERG_DOWNLOAD_STATE:-data/processed/imerg_download_2001_2024}/years/YEAR/status.json"
+fi
 echo "IMERG ready: ${IMERG_DOWNLOAD_STATE:-data/processed/imerg_download_2001_2024}/IMERG_READY.json"
 echo "Resume after a timeout/failure: rerun this submission with the same options."

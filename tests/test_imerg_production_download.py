@@ -417,6 +417,69 @@ class DownloadTests(unittest.TestCase):
         self.assertIn("--dependency=afterok:DRY_ARRAY", result.stdout)
         self.assertIn("--collect-years", result.stdout)
 
+    def test_serial_year_submission_is_one_exclusive_job_and_rejects_mixed_modes(self):
+        script = ROOT / "slurm/submit_imerg_production_download.sh"
+        result = subprocess.run(["bash", str(script), "--serial-years", "--exclusive", "--dry-run"],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 1)
+        self.assertIn("--exclusive", result.stdout)
+        self.assertIn("--serial-years-worker 2001 2024", result.stdout)
+        self.assertIn("--connections 3", result.stdout)
+        self.assertNotIn("--array", result.stdout)
+        self.assertNotIn("--dependency", result.stdout)
+        for conflicting in ("--parallel-years", "--month=2022-05"):
+            result = subprocess.run(["bash", str(script), "--serial-years", conflicting, "--dry-run"],
+                                    cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("sbatch", result.stdout)
+
+    def run_serial_worker(self, failing_year=""):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / ".netrc").write_text("# placeholder; no credentials used\n")
+            fake = folder / "python"
+            fake.write_text('''#!/bin/bash
+if [[ "$1" == "-c" ]]; then exit 0; fi
+printf "CALL\\n"; printf "ARG:%s\\n" "$@"
+task_previous=""; task_year=""; task_mode=""
+for task_arg in "$@"; do
+  if [[ "$task_previous" == "--start-year" ]]; then task_year="$task_arg"; fi
+  case "$task_arg" in --probe-only|--collect-years) task_mode="$task_arg";; esac
+  task_previous="$task_arg"
+done
+if [[ -n "${FAIL_SERIAL_YEAR:-}" && "$task_year" == "$FAIL_SERIAL_YEAR" && -z "$task_mode" ]]; then exit 17; fi
+''')
+            fake.chmod(0o755)
+            env = {**os.environ, "HOME": temp, "IMERG_PYTHON": str(fake), "FAIL_SERIAL_YEAR": failing_year,
+                   "SLURM_SUBMIT_DIR": str(ROOT), "SLURM_JOB_ID": "123"}
+            return subprocess.run(["bash", str(ROOT / "slurm/imerg_production_download.sbatch"),
+                                   "--serial-years-worker", "2022", "2023", "fixture-state",
+                                   "--connections", "3"], cwd=ROOT, env=env, capture_output=True, text=True)
+
+    def test_serial_worker_probes_then_preserves_year_receipts_and_collects(self):
+        result = self.run_serial_worker()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = result.stdout.split("CALL\n")[1:]
+        self.assertEqual(len(calls), 4)
+        self.assertIn("ARG:--probe-only", calls[0])
+        self.assertIn("ARG:--connections\nARG:1", calls[0])
+        for call, year in zip(calls[1:3], (2022, 2023)):
+            self.assertIn(f"ARG:--start-year\nARG:{year}", call)
+            self.assertIn(f"ARG:--end-year\nARG:{year}", call)
+            self.assertIn(f"ARG:fixture-state/years/{year}", call)
+            self.assertIn("ARG:--connections\nARG:3", call)
+        self.assertIn("ARG:--collect-years", calls[3])
+        self.assertIn("ARG:--start-year\nARG:2022", calls[3])
+        self.assertIn("ARG:--end-year\nARG:2023", calls[3])
+        self.assertIn("ARG:--state\nARG:fixture-state", calls[3])
+
+    def test_serial_worker_stops_after_year_failure_without_collection(self):
+        result = self.run_serial_worker("2022")
+        self.assertEqual(result.returncode, 17)
+        self.assertNotIn("ARG:--collect-years", result.stdout)
+        self.assertNotIn("Serial reporting year 2023", result.stdout)
+
     def test_year_array_worker_forwards_exact_year_and_single_connection(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
