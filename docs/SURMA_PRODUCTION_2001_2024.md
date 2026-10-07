@@ -361,6 +361,54 @@ it aside before retrying. Sampling currently restarts an interrupted quarter
 rather than resuming within the quarter. If a dependency job fails, dependent
 jobs remain blocked; resolve the logged input failure before resubmission.
 
+## Production diagnostics after final validation
+
+Queue evaluation now using the **final CPU validation job ID**, rather than
+an individual GPU task. For the current production chain:
+
+```bash
+git pull --ff-only origin codex/imerg-daily-window-pilot
+bash slurm/submit_surma_production_evaluation.sh 37940179
+```
+
+The CPU job uses `afterok:37940179`, so it starts only after final validation
+succeeds. It requests 8 CPUs, 48 GB RAM and 24 hours on `grace-cpuonly`, using
+the existing GH200 environment. It creates 15 PNG/PDF figure sets with CSV
+source tables, a compressed original gauge-day table, monthly/annual map
+arrays, a README explaining interpretation, and `evaluation.json` at:
+
+```text
+results/surma_production_2001_2024_diagnostics/
+```
+
+Figures cover daily and monthly BMD/BWDB fits against analysis, background,
+CPC, IMERG and CHIRPS; rainfall distributions and wet-day exceedance;
+seasonal/yearly fit metrics; monthly, annual and seasonal climatology;
+spatial/temporal variability; wet-day frequency, heavy-rain days, annual
+maximum daily rainfall and dry spells; station fit maps; ensemble spread,
+fair CRPS and 90% interval coverage; product agreement on the fine grid and
+IMERG footprints; and descriptive annual-total trends. The exact saved
+super-observation ensemble fits are tabulated separately.
+
+These are **assimilated gauge fits and product agreement**, not independent
+validation. Original stations contributed to super-observations; IMERG was
+assimilated; CPC conditioned the prior; CHIRPS was the training target.
+Temporal support remains as archived: CPC conditioning D−1, IMERG reporting
+windows, CHIRPS calendar D, and the BMD/BWDB three-hour reporting difference.
+The evaluator checks completion receipts and gauge/station provenance,
+processes fields quarter by quarter, and never alters production inputs.
+
+To customize before submitting, set `SURMA_PROD_ROOT`, `SURMA_EVAL_OUT`,
+`SURMA_EVAL_BOUNDARY`, or an optional `SURMA_EVAL_START_YEAR` /
+`SURMA_EVAL_END_YEAR` subset. The complete production manifest is still
+required. To evaluate an already completed archive directly:
+
+```bash
+python scripts/105_evaluate_surma_production.py \
+  --root data/processed/brishti05_production_2001_2024 \
+  --out-dir results/surma_production_2001_2024_diagnostics
+```
+
 ## Overrides
 
 Set these before invoking the wrapper:
