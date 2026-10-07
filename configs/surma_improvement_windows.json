@@ -1,0 +1,12 @@
+{
+  "windows": [
+    {"label": "historical_2003_wet", "start": "2003-06-01", "end": "2003-06-15", "role": "historical"},
+    {"label": "historical_2007_dry", "start": "2007-02-15", "end": "2007-03-01", "role": "historical"},
+    {"label": "tune_2019_wet", "start": "2019-07-01", "end": "2019-07-15", "role": "tune"},
+    {"label": "tune_2020_dry", "start": "2020-11-01", "end": "2020-11-15", "role": "tune"},
+    {"label": "test_2021_wet", "start": "2021-07-01", "end": "2021-07-15", "role": "test"},
+    {"label": "test_2023_wet", "start": "2023-06-01", "end": "2023-06-15", "role": "test"},
+    {"label": "test_2023_dry", "start": "2023-01-01", "end": "2023-01-15", "role": "test"},
+    {"label": "test_2024_wet", "start": "2024-08-01", "end": "2024-08-15", "role": "test"}
+  ]
+}

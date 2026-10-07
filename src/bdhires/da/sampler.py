@@ -322,7 +322,14 @@ def assimilate(
                 u1, g1 = guide(x_eul, tb1)
                 v1 = guided_velocity(u1, g1, tb1, flow, gcfg, x_eul)
             else:
-                v1 = prior_velocity(x_eul, tb1)
+                u1 = prior_velocity(x_eul, tb1)
+                v1 = u1
+            # Heun must evaluate the same tempered drift at both endpoints.
+            # The T=1 production path is unchanged; older T>1 experiments
+            # omitted this term at the second endpoint.
+            if cfg.prior_temperature != 1.0 and t1 >= cfg.temperature_t_start:
+                kappa = 1.0 - 1.0 / cfg.prior_temperature
+                v1 = v1 + kappa * flow.x0_hat(x_eul, tb1, u1) / max(t1, 1e-3)
             x = x + dt * 0.5 * (v + v1)
         else:
             x = x + dt * v

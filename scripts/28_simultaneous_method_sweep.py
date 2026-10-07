@@ -153,6 +153,8 @@ class Variant:
     imerg_min_gauge_distance_km: float | None = None
     huber_delta: float | None = None
     prior_temperature: float | None = None  # None -> config value
+    noise_scale: float | None = None
+    heun: bool | None = None
     n_steps: int | None = None
     n_corrections: int | None = None
     guidance_spread_cells: float | None = None
@@ -722,7 +724,20 @@ def _unique_variants(variants: list[Variant]) -> list[Variant]:
         unique.append(variant)
     return unique
 
+# A separate research group: never changes the frozen production contract.
+# Euler without noise is required to separate stochasticity from changing solver.
+_IMPROVEMENT_BASE = V2_BMD_BWDB_SUPEROB_WINNER[0]
+V2_PRODUCTION_IMPROVEMENT = [
+    CORE[0],
+    _IMPROVEMENT_BASE,
+    replace(_IMPROVEMENT_BASE, name="improve_t115", prior_temperature=1.15),
+    replace(_IMPROVEMENT_BASE, name="improve_t125", prior_temperature=1.25),
+    replace(_IMPROVEMENT_BASE, name="improve_euler", heun=False, noise_scale=0.0),
+    replace(_IMPROVEMENT_BASE, name="improve_noise015", heun=False, noise_scale=0.15),
+]
+
 GROUPS = {
+    "v2_production_improvement": V2_PRODUCTION_IMPROVEMENT,
     "core": CORE,
     "tempering": TEMPERING,
     "bias": BIAS,
@@ -747,7 +762,7 @@ GROUPS = {
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
         + V2_CONFIRMATORY + V2_HUBER3_WINNER + V2_COMPARISON + V2_GAUGE_AUTHORITY
-        + V2_DENSE_GAUGE + V2_DENSE_GAUGE_ENSRF
+        + V2_DENSE_GAUGE + V2_DENSE_GAUGE_ENSRF + V2_PRODUCTION_IMPROVEMENT
     ),
 }
 
@@ -1366,6 +1381,10 @@ def main() -> None:
             sampler = replace(sampler, seed=day_seed)
             if variant.prior_temperature is not None:
                 sampler = replace(sampler, prior_temperature=variant.prior_temperature)
+            if variant.noise_scale is not None:
+                sampler = replace(sampler, noise_scale=variant.noise_scale)
+            if variant.heun is not None:
+                sampler = replace(sampler, heun=variant.heun)
             if variant.n_steps is not None:
                 sampler = replace(sampler, n_steps=variant.n_steps)
             if variant.n_corrections is not None:
