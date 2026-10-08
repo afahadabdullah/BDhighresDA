@@ -194,6 +194,8 @@ def diagnose(args, current=False):
                     "prob100": float((values[day, :, site] >= 100).mean())})
         original = I.read_gauges([original_path(w)])
         superobs = I.read_gauges([w["stations"]])
+        original = original[original.date.between(w["start"], w["end"])]
+        superobs = superobs[superobs.date.between(w["start"], w["end"])]
         aggregation = aggregation_rows(original, superobs, held)
         aggregation["window"], aggregation["role"] = w["label"], w["role"]
         aggregations.append(aggregation)
@@ -281,9 +283,9 @@ def prepare(args):
     print(f"[prepared] {len(cases)} windows; {len(held)} unchanged withheld stations; {masked} additional masked days; {out}")
 
 
-def run(args):
+def run(args, group=GROUP, variants=VARIANTS):
     out = Path(args.out_dir); plan, changed = load_archive(out, strict_code=True)
-    if plan.get("group") != GROUP or plan["variants"] != VARIANTS:
+    if plan.get("group") != group or plan["variants"] != variants:
         raise ValueError("not a prepared tail pilot")
     if args.task is not None and not 0 <= args.task < len(plan["windows"]):
         raise ValueError("task outside window range")
@@ -301,7 +303,7 @@ def run(args):
         command = ["--config", plan["config"], "--ckpt", plan["checkpoint"], "--data-zarr", plan["predictors"],
             "--stations", w["stations"], "--imerg", w["imerg"], "--start", w["start"], "--end", w["end"],
             "--members", plan["members"], "--seed", plan["seed"], "--min-coverage", plan["min_coverage"],
-            "--holdout-station-ids-file", plan["holdout"], "--background-day-offset", -1, "--group", GROUP,
+            "--holdout-station-ids-file", plan["holdout"], "--background-day-offset", -1, "--group", group,
             "--set", "observations.imerg.factor=8", "--set", "observations.imerg.error_corr_cells=0.75",
             "--set", "sampler.noise_scale=0.0", "--set", "sampler.heun=true",
             "--set", f"observations.gauges.representativeness={w['representation']}", "--out", arrays, "--report", report]
@@ -309,7 +311,7 @@ def run(args):
         I.run_script("28_simultaneous_method_sweep.py", *command)
         scope = json.loads(report.read_text())["scope"]
         if (scope["start"] != w["start"] or scope["end"] != w["end"] or scope["members"] != plan["members"]
-                or scope["group"] != GROUP or scope["assimilate_all_stations"]
+                or scope["group"] != group or scope["assimilate_all_stations"]
                 or set(scope["withheld_station_ids"]) != held_ids(plan)
                 or I.sha(scope["checkpoint_stats"]) != I.sha(plan["stats"])):
             raise ValueError("sampler scope differs from frozen tail plan")

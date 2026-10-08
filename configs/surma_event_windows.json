@@ -1,0 +1,29 @@
+{
+  "purpose": "Source-matched, unflagged, neighbor-supported withheld heavy-event attribution; selected after seeing pilot results, not independent skill validation.",
+  "windows": [
+    {
+      "label": "event_2019_july",
+      "parent_window": "tune_2019_wet",
+      "start": "2019-07-08",
+      "end": "2019-07-10"
+    },
+    {
+      "label": "event_2019_bmd",
+      "parent_window": "tune_2019_wet",
+      "start": "2019-07-12",
+      "end": "2019-07-12"
+    },
+    {
+      "label": "event_2021_july",
+      "parent_window": "test_2021_wet",
+      "start": "2021-07-01",
+      "end": "2021-07-03"
+    },
+    {
+      "label": "event_2024_august",
+      "parent_window": "test_2024_wet",
+      "start": "2024-08-01",
+      "end": "2024-08-02"
+    }
+  ]
+}

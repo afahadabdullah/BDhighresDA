@@ -245,3 +245,53 @@ improvements in heavy-rain probabilities and misses without worsening dry-day
 false alarms, ordinary rainfall or uncertainty. The small observed extreme
 sample does not establish a robust tail improvement by itself. No automatic
 production rerun is submitted.
+
+## Event-level attribution after the likelihood pilot
+
+Run `scripts/108_surma_event_attribution.py review` to trace the downloaded
+aggregation and heavy-event tables to the supplied corrected BMD/BWDB archives.
+It checks downloaded prepared inputs and completed-result hashes, reports
+existing QC overlaps, and lists both nearby raw gauges and actual assimilated
+superobs. If the uncorrected BWDB workbook is available, it also checks that
+compilation (accounting for the reviewed CL9 date correction). Archive agreement
+is provenance corroboration, not independent verification of rainfall truth.
+No station-day is automatically deleted or shifted.
+
+The review writes `data/processed/surma_event_review/`. It selects candidates
+with observed rainfall >=100 mm, matching source values, no existing event flag,
+and at least two of the five nearest valid BWDB stations within 50 km reporting
+>=50 mm. This support rule does not prove a point observation is a grid average;
+BMD/BWDB still have different three-hour daily support. Nearby gauges excluded
+by the withheld buffer can corroborate an event without constraining the model.
+
+```bash
+python scripts/108_surma_event_attribution.py review
+python scripts/108_surma_event_attribution.py prepare
+SURMA_IMPROVE_CONCURRENCY=4 bash slurm/submit_surma_events.sh
+```
+
+The default configuration has four short windows, nine days total: July 8-10
+and July 12, 2019; July 1-3, 2021; August 1-2, 2024. The selected dates avoid
+the pilot's currently flagged input station-days. Preparation refuses flagged
+windows, changed review inputs, changed withheld observations, and overlapping
+dates. Station identities, observations and amounts stay in ignored data/results
+paths; the tracked configuration contains dates and parent-window labels only.
+
+The four variants are background, production gauges alone, production S04 IMERG
+alone, and unchanged `dense_s6_bwdb_r4`. The parent superobs, error budget,
+checkpoint, retained/withheld split, physical observation perturbations and
+date-based seeds remain matched. The parent error budget is deliberately frozen,
+including any influence from flagged days elsewhere in the parent window, so
+this experiment isolates stream removal rather than error-budget recalculation.
+For the gauges-only arm, whole-gradient spreading equals the combined arm's
+gauge-component spreading (6 cells); satellite spreading stays zero. Stream
+gamma and BWDB error inflation remain identical to their combined-arm values.
+
+The dependent summary writes `data/processed/surma_event_attribution/summary/`,
+including `selected_event_attribution.csv`. The mean difference between combined
+and gauges-only estimates the conditional effect of adding IMERG; combined minus
+IMERG-only estimates the conditional effect of adding gauges. These effects need
+not add linearly. The windows were selected after seeing results, so they diagnose
+mechanisms and do not establish archive-wide skill or automatically select a
+production method. A separate original-gauge versus superob experiment is still
+needed to isolate aggregation itself.

@@ -746,8 +746,21 @@ V2_TAIL_IMPROVEMENT = [
     replace(_IMPROVEMENT_BASE, name="tail_gauge_w075", gauge_weight=0.75,
             note="gauge likelihood weight 0.75; brackets sensitivity to gauge trust"),
 ]
+# Remove one likelihood at a time while retaining the production stream's
+# gamma, spreading, error inflation, robustness and sampler settings.
+V2_EVENT_ATTRIBUTION = [
+    CORE[0],
+    replace(_IMPROVEMENT_BASE, name="event_gauges_only", streams="gauges",
+            gauge_component_spread_cells=None, guidance_spread_cells=6.0,
+            note="production gauges alone; same superobs, BWDB R x4 and gamma"),
+    replace(_IMPROVEMENT_BASE, name="event_imerg_only", streams="imerg",
+            gauge_component_spread_cells=None, guidance_spread_cells=0.0,
+            note="production S04 IMERG alone; same satellite errors and gamma"),
+    _IMPROVEMENT_BASE,
+]
 
 GROUPS = {
+    "v2_event_attribution": V2_EVENT_ATTRIBUTION,
     "v2_tail_improvement": V2_TAIL_IMPROVEMENT,
     "v2_production_improvement": V2_PRODUCTION_IMPROVEMENT,
     "core": CORE,
