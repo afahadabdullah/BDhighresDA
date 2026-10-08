@@ -18,6 +18,6 @@ TASK_PYTHON="${PYTHON_BIN:-${ENV_PREFIX:-/home/afahad/nb/project/BDDA/envs/bdda-
 export PYTHONNOUSERSITE=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 unset PYTHONHOME
 "$TASK_PYTHON" -c 'import torch; assert torch.cuda.is_available(), "CUDA unavailable"'
-"$TASK_PYTHON" -u scripts/106_surma_improvement.py run \
+"$TASK_PYTHON" -u "${SURMA_IMPROVE_SCRIPT:-scripts/106_surma_improvement.py}" run \
     --out-dir "${SURMA_IMPROVE_OUT:-data/processed/surma_improvement_pilot}" \
     --task "${SLURM_ARRAY_TASK_ID:?array task required}"

@@ -152,6 +152,7 @@ class Variant:
     imerg_weight: float = 1.0
     imerg_min_gauge_distance_km: float | None = None
     huber_delta: float | None = None
+    gauge_huber_delta: float | None = None
     prior_temperature: float | None = None  # None -> config value
     noise_scale: float | None = None
     heun: bool | None = None
@@ -735,8 +736,19 @@ V2_PRODUCTION_IMPROVEMENT = [
     replace(_IMPROVEMENT_BASE, name="improve_euler", heun=False, noise_scale=0.0),
     replace(_IMPROVEMENT_BASE, name="improve_noise015", heun=False, noise_scale=0.15),
 ]
+V2_TAIL_IMPROVEMENT = [
+    CORE[0],
+    _IMPROVEMENT_BASE,
+    replace(_IMPROVEMENT_BASE, name="tail_gauge_huber5", gauge_huber_delta=5.0,
+            note="relax gauge Huber only; satellite robustness remains at 3"),
+    replace(_IMPROVEMENT_BASE, name="tail_gauge_w125", gauge_weight=1.25,
+            note="gauge likelihood weight 1.25; shared observation perturbations"),
+    replace(_IMPROVEMENT_BASE, name="tail_gauge_w075", gauge_weight=0.75,
+            note="gauge likelihood weight 0.75; brackets sensitivity to gauge trust"),
+]
 
 GROUPS = {
+    "v2_tail_improvement": V2_TAIL_IMPROVEMENT,
     "v2_production_improvement": V2_PRODUCTION_IMPROVEMENT,
     "core": CORE,
     "tempering": TEMPERING,
@@ -762,7 +774,7 @@ GROUPS = {
         + V2_GAUGES_CORE + V2_GAUGES_SPREAD + V2_GAUGES_ENSRF
         + V2_GAUGES_REFINE + V2_INGESTION_S04 + V2_SIMULTANEOUS_REFINE
         + V2_CONFIRMATORY + V2_HUBER3_WINNER + V2_COMPARISON + V2_GAUGE_AUTHORITY
-        + V2_DENSE_GAUGE + V2_DENSE_GAUGE_ENSRF + V2_PRODUCTION_IMPROVEMENT
+        + V2_DENSE_GAUGE + V2_DENSE_GAUGE_ENSRF + V2_PRODUCTION_IMPROVEMENT + V2_TAIL_IMPROVEMENT
     ),
 }
 
@@ -1004,6 +1016,10 @@ def main() -> None:
 
     variants = resolve_variants(args.group, args.variants)
     for variant in variants:
+        if variant.gauge_huber_delta is not None and (
+            not variant.uses_gauges or variant.gauge_huber_delta <= 0
+        ):
+            raise ValueError(f"{variant.name}: positive gauge Huber threshold requires gauges")
         if variant.n_steps is not None and variant.n_steps < 2:
             raise ValueError(f"{variant.name}: n_steps must be at least 2")
         if variant.n_corrections is not None and variant.n_corrections < 0:
@@ -1594,6 +1610,17 @@ def main() -> None:
                     ]
                 )
             guidance = replace(guidance, gamma=gamma_vector)
+            if variant.gauge_huber_delta is not None:
+                if variant.streams == "gauges":
+                    guidance = replace(guidance, huber_delta=variant.gauge_huber_delta)
+                else:
+                    if guidance.huber_delta is None:
+                        raise ValueError("per-stream Huber requires a finite satellite Huber threshold")
+                    delta_vector = torch.cat([
+                        torch.full((len(assim_idx),), variant.gauge_huber_delta, device=device),
+                        torch.full(satellite_R.shape, float(guidance.huber_delta), device=device),
+                    ])
+                    guidance = replace(guidance, huber_delta=delta_vector)
 
             # --- two-step: satellite in the sampler, gauges by EnSRF afterwards -----
             if variant.algorithm == "twostep_ensrf":

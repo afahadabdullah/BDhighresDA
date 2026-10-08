@@ -15,5 +15,5 @@ TASK_PYTHON="${PYTHON_BIN:-${ENV_PREFIX:-/home/afahad/nb/project/BDDA/envs/bdda-
 [[ -x "$TASK_PYTHON" ]] || { echo "ERROR: Python not found: $TASK_PYTHON" >&2; exit 1; }
 export PYTHONNOUSERSITE=1 PYTHONPATH="$PWD/src"
 unset PYTHONHOME
-"$TASK_PYTHON" -u scripts/106_surma_improvement.py summarize \
+"$TASK_PYTHON" -u "${SURMA_IMPROVE_SCRIPT:-scripts/106_surma_improvement.py}" summarize \
     --out-dir "${SURMA_IMPROVE_OUT:-data/processed/surma_improvement_pilot}"

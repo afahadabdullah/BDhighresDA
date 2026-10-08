@@ -42,7 +42,7 @@ class GuidanceConfig:
     t_start: float = 0.10        # do not guide below this t (variance explodes)
     t_end: float = 0.999         # stop guiding very close to t = 1
     clip_norm: float | None = 50.0   # per-sample grad-norm clip, guards blow-ups
-    huber_delta: float | None = None  # if set, use a Huber (robust) cost in place of L2
+    huber_delta: float | torch.Tensor | None = None  # scalar or per-observation Huber threshold
     spread_cells: float = 0.0
     """Gaussian spreading length for the guidance gradient, in grid cells.
 
@@ -180,12 +180,17 @@ def guidance_grad(
                 gamma_parts = torch.split(gamma, sizes, dim=-1)
             else:
                 gamma_parts = (gamma,) * len(sizes)
+            delta = cfg.huber_delta
+            if torch.is_tensor(delta) and delta.ndim and delta.shape[-1] == sum(sizes):
+                delta_parts = torch.split(delta, sizes, dim=-1)
+            else:
+                delta_parts = (delta,) * len(sizes)
 
             component_grads = []
-            for index, (hx, yy, rr, gg, spread) in enumerate(
-                zip(hx_parts, y_parts, R_parts, gamma_parts, component_spreads)
+            for index, (hx, yy, rr, gg, dd, spread) in enumerate(
+                zip(hx_parts, y_parts, R_parts, gamma_parts, delta_parts, component_spreads)
             ):
-                component_cfg = replace(cfg, gamma=gg, spread_cells=0.0)
+                component_cfg = replace(cfg, gamma=gg, huber_delta=dd, spread_cells=0.0)
                 ll = obs_log_likelihood(yy, hx, rr, t, component_cfg).sum()
                 (component_grad,) = torch.autograd.grad(
                     ll, x, retain_graph=index < len(hx_parts) - 1

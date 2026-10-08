@@ -160,3 +160,88 @@ Heun now applies the temperature drift at both evaluations. Temperature 1.0
 used the incomplete second evaluation and should not be mixed with this pilot.
 The sampler/noise experiment is a hypothesis: broader tails need not improve
 the rainfall mean, storm location or probabilistic reliability.
+
+## Next round: diagnose heavy rainfall and gauge likelihood
+
+The first 120-day pilot did not justify production changes: temperature/noise
+did not improve ensemble-mean heavy-event detection, and temperature reduced
+field coverage despite increasing spread. The following next steps reuse saved
+results before another separate experiment. No architecture change is involved.
+
+```bash
+python scripts/107_surma_tail_diagnostics.py diagnose
+```
+
+Read `data/processed/surma_tail_pilot/diagnostics_before/`:
+
+- `intensity_scores.csv`: common-sample withheld bias, CRPS, spread, interval
+  width and below/above interval misses in dry, 1–10, 10–50, 50–100 and >=100 mm
+  observed rainfall bins, separately by network and case role.
+- `heavy_events.csv`: individual withheld events with the ensemble mean, 5/95%
+  quantiles, maximum member and 50/100-mm probabilities. A maximum-member hit
+  only shows that an event is possible in the ensemble, not that it is skillful.
+- `aggregation_extremes.csv`: original assimilated heavy observations versus
+  their actual super-observation or passthrough record. Withheld gauges are
+  excluded from this aggregation comparison. Never compare a held-out gauge to
+  an unrelated nearby super-observation as if it contained that gauge.
+- `review_flags_for_pilot.csv`: only existing QC candidates affecting retained
+  or withheld stations in these windows. Review original source records and
+  nearby gauges before confirming an exclusion.
+
+This postprocessing verifies the saved plan, data and completion hashes. It
+permits old runtime code hashes to differ **for reading completed results only**,
+recording those changes. New sampling still requires current code hashes. Do
+not modify the old plan or its reviewed-exclusions file, which remain provenance
+for the first experiment. After pulling the new code, use script 107 to inspect
+the completed first experiment; script 106 deliberately rejects sampling with
+changed code under its old plan.
+
+Create a separate review file so the original pilot remains reproducible:
+
+```bash
+cp data/processed/surma_improvement_pilot/qc/reviewed_exclusions.csv \
+   data/processed/surma_tail_pilot/reviewed_exclusions_round2.csv
+```
+
+Edit the copied CSV only for confirmed invalid observations. Leaving it empty
+applies zero corrections and keeps the next experiment provisional. Source,
+coordinate, unit or date corrections require preparing a new station-source
+version; the next runner masks explicitly reviewed intervals only.
+
+```bash
+python scripts/107_surma_tail_diagnostics.py prepare \
+  --exclusions data/processed/surma_tail_pilot/reviewed_exclusions_round2.csv
+
+SURMA_IMPROVE_CONCURRENCY=4 bash slurm/submit_surma_tail.sh
+```
+
+The runner reuses exactly the first experiment's eligible original stations,
+withheld IDs, spatial buffer, dates, checkpoint and random seeds. It rebuilds
+super-observations and error budgets after new exclusions. It refuses to change
+the held-out fold silently if exclusions leave inadequate held-out coverage.
+Cases previously marked `test` become `retest` because their results are already
+known; a fresh assessment remains necessary before claiming improvement.
+
+The GPU group has a background and four analysis arms:
+
+| Analysis | Change from current settings |
+|---|---|
+| `dense_s6_bwdb_r4` | Baseline on the same next-round QC inputs |
+| `tail_gauge_huber5` | Gauge Huber threshold 3 -> 5; IMERG remains at 3 |
+| `tail_gauge_w125` | Gauge likelihood weight 1 -> 1.25 |
+| `tail_gauge_w075` | Gauge likelihood weight 1 -> 0.75 |
+
+Temperature stays 1.0 and additional sampler noise stays 0. Observation
+perturbations are shared across variants. A likelihood weight scales both gauge
+R and early-time inflation in the cost; it does not claim that instrument errors
+have changed. Do not combine changes in this first comparison.
+Because Huber is nonlinear, a weight of 1.25 does not multiply every large
+residual's robust cost by exactly 1.25.
+
+The dependent CPU job writes `data/processed/surma_tail_pilot/summary/` with the
+same detailed diagnostics. Compare within this round; if QC changes, a direct
+comparison against first-round scores confounds QC and method changes. Require
+improvements in heavy-rain probabilities and misses without worsening dry-day
+false alarms, ordinary rainfall or uncertainty. The small observed extreme
+sample does not establish a robust tail improvement by itself. No automatic
+production rerun is submitted.
