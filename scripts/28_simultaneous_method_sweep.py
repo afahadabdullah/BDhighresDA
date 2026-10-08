@@ -759,7 +759,23 @@ V2_EVENT_ATTRIBUTION = [
     _IMPROVEMENT_BASE,
 ]
 
+# Bounded data-ingestion comparison; the driver supplies the station mesh and
+# measured error budget. No model, sampler or likelihood-weight tuning.
+V2_INGESTION_LOCAL = [
+    CORE[0],
+    replace(_IMPROVEMENT_BASE, name="ingest_s3", gauge_component_spread_cells=3.0,
+            note="local gauge influence; all other production settings retained"),
+]
+V2_INGESTION_FINE = [
+    CORE[0],
+    replace(_IMPROVEMENT_BASE, name="ingest_s6",
+            note="finer gauge aggregation with conservative point-error floor"),
+    V2_INGESTION_LOCAL[1],
+]
+
 GROUPS = {
+    "v2_ingestion_local": V2_INGESTION_LOCAL,
+    "v2_ingestion_fine": V2_INGESTION_FINE,
     "v2_event_attribution": V2_EVENT_ATTRIBUTION,
     "v2_tail_improvement": V2_TAIL_IMPROVEMENT,
     "v2_production_improvement": V2_PRODUCTION_IMPROVEMENT,

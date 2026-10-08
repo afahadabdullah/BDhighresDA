@@ -295,3 +295,15 @@ not add linearly. The windows were selected after seeing results, so they diagno
 mechanisms and do not establish archive-wide skill or automatically select a
 production method. A separate original-gauge versus superob experiment is still
 needed to isolate aggregation itself.
+
+
+## Consolidated ingestion comparison
+
+Run `python scripts/109_surma_ingestion.py launch --concurrency 4` once on PRISM.
+It prepares and submits three new ingestion recipes together, reuses the completed
+baseline, and automatically writes a selection report after the array finishes.
+The four total recipes compare 0.25/0.10-degree gauge averaging and six/three-cell
+gauge influence, with conservative errors for finer cells. Development windows
+choose one candidate; separate retest windows can reject it. The current method
+is retained if the fixed scoring gates fail. No model retraining or production
+rerun is performed. See [the workflow instructions](docs/surma_ingestion_selection.md).
