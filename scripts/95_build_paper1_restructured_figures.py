@@ -8,7 +8,7 @@ in the repository. No training, sampling or re-scoring of ensembles happens here
 
 Inputs (all relative to the repository root)
     paper1_cpcv2/bangladesh/superob-final/   Bangladesh-only scores (132 sites, 29,401 pairs)
-    paper1_cpcv2/superob-final/              archive-domain scores (133 sites, 29,615 pairs)
+    paper1_updated_evidence_v2/              full-archive Bangladesh-only rerun (script 96), incl. gridded means
     configs/geography/geoBoundaries-BGD-ADM0.geojson
     data/stations/data_2020_2025/Stations.csv, output/bwdb_analysis/bwdb_stations_with_distance.csv
 
@@ -122,7 +122,11 @@ stn = pd.read_csv(BD / "gridded/long_term_withheld_station_scores.csv")
 temp = pd.read_csv(BD / "temporal_withheld_scores.csv")
 audit = pd.read_csv(BD / "station_country_audit.csv")
 audit = audit[audit.inside_bangladesh]
-grids = np.load(WD / "gridded/temporal_mean_variability_grids.npz", allow_pickle=True)
+EV = ROOT / "paper1_updated_evidence_v2"       # full-archive Bangladesh-only rerun (script 96, PRISM)
+evd = pd.read_csv(EV / "evaluation/superob-final/daily_withheld_scores.csv")
+strata = pd.read_csv(EV / "withheld_product_strata.csv")
+net = pd.read_csv(EV / "additional/network_geometry.csv")
+grids = np.load(EV / "evaluation/superob-final/gridded/temporal_mean_variability_grids.npz", allow_pickle=True)
 LAT, LON = grids["lat"], grids["lon"]
 ORDER = [A, "imerg", "cpc", "chirps", "background"]
 numbers = {}
@@ -198,9 +202,9 @@ def fig01():
     arrow((66.5, 56.6), (63.5, 56.6), "#4E8B57"); ax.text(65.0, 58.0, r"$x_1$", fontsize=7, color="#4E8B57", ha="center")
     # training note
     card(86.0, 46.2, 12.2, 22.5, "#C8862A", "#FFF8EC")
-    ax.text(87.0, 67.2, "No observation\nenters training", fontsize=7.4, fontweight="bold", color="#8A5A12",
+    ax.text(87.0, 67.2, "Assimilated\nobservations\nare not used\nin training", fontsize=7.0, fontweight="bold", color="#8A5A12",
             va="top", linespacing=1.2, zorder=7)
-    ax.text(87.0, 61.6, "Gauges and\nsatellite rain are\nused only in\nphase 2, so the\nobserving network\ncan change with\nno retraining.",
+    ax.text(87.0, 57.4, "BMD/BWDB gauges\nand IMERG enter\nonly in phase 2,\nso the network\ncan change with\nno retraining.",
             fontsize=6.3, color=C["ink"], va="top", linespacing=1.38, zorder=7)
 
     # frozen weights link
@@ -208,13 +212,11 @@ def fig01():
     ax.text(48.6, 40.6, "frozen weights θ", fontsize=6.8, color=C["ink"], va="center", ha="right", style="italic")
 
     # ---- Phase 2
-    bmd = pd.read_csv(ROOT / "data/stations/data_2020_2025/Stations.csv")
-    bw = pd.read_csv(ROOT / "output/bwdb_analysis/bwdb_stations_with_distance.csv")
-    bmd = bmd[inside(bmd.Latitude.values, bmd.Longitude.values)]
-    bw = bw[inside(bw.Latitude.values, bw.Longitude.values)]
-    pts = [(bw.Latitude, bw.Longitude, dict(s=2.2, c=C["imerg"], lw=0, alpha=0.75)),
-           (bmd.Latitude, bmd.Longitude, dict(s=7, c=C["accent"], lw=0.3, ec="white", marker="s"))]
-    mapcard(2.2, 4.0, "Rain gauges", "     BMD       BWDB", None, red, "0.25° super-observations", pts=pts, w=15.3, h=27.6)
+    r21 = net[(net.period == "2021_may_sep") & (net.role == "retained")]
+    bw = r21[r21.station_id.str.startswith("BWDB")]; bmd = r21[r21.station_id.str.startswith("BMD")]
+    pts = [(bw.lat, bw.lon, dict(s=2.6, c=C["imerg"], lw=0, alpha=0.8)),
+           (bmd.lat, bmd.lon, dict(s=7, c=C["accent"], lw=0.3, ec="white", marker="s"))]
+    mapcard(2.2, 4.0, "Rain gauges", "     BMD       BWDB", None, red, f"{len(r21)} retained (2021)", pts=pts, w=15.3, h=27.6)
     ax.scatter([3.9], [27.3], s=9, c=C["accent"], marker="s", lw=0, zorder=8); ax.scatter([9.9], [27.3], s=6, c=C["imerg"], lw=0, zorder=8)
     mapcard(18.6, 4.0, "Satellite", "IMERG, 0.4° means", block_mean(sm["imerg"], 8), red, "area-mean operator", w=15.3, h=27.6)
 
@@ -350,30 +352,31 @@ def fig04():
     ttl(ax, "a", "Every scored month, 2021–2024")
     numbers["fig04_monthly_rmse"] = {p: {m: round(float(g.loc[p, m]), 3) for m in g.columns} for p in g.index}
 
-    # daily scores by year (2021, 2022 exact; 2023-24 = Bangladesh pooled minus 2021 and 2022)
-    yr = {}
-    for m in ["background", A]:
-        p = daily[(daily.group == "pooled") & (daily.method == m)].iloc[0]
-        a = wide[(wide.group == "period") & (wide.method == m)].set_index("label")
-        k = ["2021_may_sep", "2022_may_sep"]; rest = p.n - a.loc[k, "n"].sum()
-        crps = [a.loc[k[0], "crps"], a.loc[k[1], "crps"], (p.crps * p.n - (a.loc[k, "crps"] * a.loc[k, "n"]).sum()) / rest, p.crps]
-        rmse = [a.loc[k[0], "rmse"], a.loc[k[1], "rmse"], np.sqrt((p.rmse ** 2 * p.n - (a.loc[k, "rmse"] ** 2 * a.loc[k, "n"]).sum()) / rest), p.rmse]
-        cov = [a.loc[k[0], "coverage_90"], a.loc[k[1], "coverage_90"], (p.coverage_90 * p.n - (a.loc[k, "coverage_90"] * a.loc[k, "n"]).sum()) / rest, p.coverage_90]
-        mae = [a.loc[k[0], "mae"], a.loc[k[1], "mae"], (p.mae * p.n - (a.loc[k, "mae"] * a.loc[k, "n"]).sum()) / rest, p.mae]
-        yr[m] = dict(crps=crps, rmse=rmse, cov=cov, mae=mae, n=[int(a.loc[k[0], "n"]), int(a.loc[k[1], "n"]), int(rest), int(p.n)])
-    numbers["fig04_by_year"] = {m: {k: [round(float(v), 3) for v in vals] for k, vals in d.items()} for m, d in yr.items()}
-    labs = ["2021", "2022", "2023–\n2024", "All"]
-    for j, (key, name) in enumerate([("crps", "Fair CRPS"), ("rmse", "RMSE")]):
-        ax = fig.add_subplot(gs[0, j + 1]); xx = np.arange(4)
-        ax.bar(xx - 0.19, yr["background"][key], 0.36, color=C["background"])
-        ax.bar(xx + 0.19, yr[A][key], 0.36, color=C["surma"])
-        for i in range(4):
-            red = 100 * (yr[A][key][i] / yr["background"][key][i] - 1)
-            ax.text(xx[i] + 0.19, yr[A][key][i] + (0.15 if key == "crps" else 0.35), f"−{abs(red):.0f}%", ha="center", fontsize=6.2, color=C["surma"], fontweight="bold")
-        ax.axvline(2.5, color=C["grid"], lw=0.8)
-        ax.set_xticks(xx); ax.set_xticklabels(labs, fontsize=7); ax.set_ylabel(f"Daily {name} (mm/day)")
-        ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True)
-        ttl(ax, "bc"[j], f"Daily {name.replace('Fair ', '')} by year"); ax.set_ylabel(f"{name} (mm/day)"); ax.set_ylim(0, max(yr["background"][key]) * 1.08)
+    # daily scores by year from the full-archive Bangladesh-only rerun
+    per = evd[evd.group == "period"]; pool = evd[evd.group == "pooled"]
+    labs = ["2021", "2022", "2023", "2024", "All"]; keys = ["2021_may_sep", "2022_may_sep", "2023_may_sep", "2024_may_jun"]
+    yr = {m: {c: [float(per[(per.label == k) & (per.method == m)][c].iloc[0]) for k in keys] + [float(pool[pool.method == m][c].iloc[0])]
+              for c in ["crps", "rmse", "mae", "coverage_90", "n"]} for m in ["background", A]}
+    numbers["fig04_by_year"] = {m: {k: [round(v, 3) for v in vals] for k, vals in d.items()} for m, d in yr.items()}
+    ax = fig.add_subplot(gs[0, 1]); xx = np.arange(5)
+    ax.bar(xx - 0.19, yr["background"]["crps"], 0.36, color=C["background"]); ax.bar(xx + 0.19, yr[A]["crps"], 0.36, color=C["surma"])
+    for i in range(5):
+        red = 100 * (1 - yr[A]["crps"][i] / yr["background"]["crps"][i])
+        ax.text(xx[i] + 0.19, yr[A]["crps"][i] + 0.15, f"−{red:.0f}%", ha="center", fontsize=5.8, color=C["surma"], fontweight="bold")
+    ax.axvline(3.5, color=C["grid"], lw=0.8); ax.set_xticks(xx); ax.set_xticklabels(labs, fontsize=6.6)
+    ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True); ax.set_ylabel("Fair CRPS (mm/day)"); ax.set_ylim(0, 10.3)
+    ttl(ax, "b", "Daily CRPS by year")
+    ax = fig.add_subplot(gs[0, 2]); yy = strata[strata.group == "year"]
+    numbers["fig04_rmse_by_year_products"] = {}
+    for m in ["background", "chirps", "cpc", "imerg", A]:
+        v = [float(yy[(yy.label.astype(str) == y) & (yy.source == m)].rmse_mm.iloc[0]) for y in labs[:4]]
+        ax.plot(range(4), v, "-o", color=C[KEY[m]], ms=3.2 if m == A else 2.6, lw=1.6 if m == A else 1.0, zorder=5 if m == A else 3)
+        ax.text(3.12, v[-1], {A: "SURMA-Flow", "imerg": "IMERG", "cpc": "CPC", "chirps": "CHIRPS", "background": "Prior"}[m], fontsize=5.8, color=C[KEY[m]], va="center",
+                fontweight="bold" if m == A else "normal")
+        numbers["fig04_rmse_by_year_products"][m] = [round(x, 3) for x in v]
+    ax.set_xticks(range(4)); ax.set_xticklabels(labs[:4], fontsize=6.6); ax.set_xlim(-0.25, 4.25); ax.set_ylim(14, 31)
+    ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True); ax.set_ylabel("RMSE (mm/day)")
+    ttl(ax, "c", "Daily RMSE, all estimates")
     save(fig, "fig04_full_period")
 
 
@@ -403,18 +406,22 @@ def fig05():
 # ================================================================ Figure 6
 def fig06():
     fig, axes = plt.subplots(1, 4, figsize=(7.2, 2.2), gridspec_kw={"wspace": 0.5, "left": 0.06, "right": 0.995, "top": 0.84, "bottom": 0.17})
-    # a: long-term station mean error by product
-    ax = axes[0]; vals = {}
+    # a: monthly and complete-season mean RMSE for every estimate (identical station-periods)
+    ax = axes[0]; tp = strata[strata.group == "temporal"]; vals = {}
+    y = np.arange(5)[::-1]
+    for off, sc, alpha in [(0.19, "monthly", 1.0), (-0.19, "may_sep", 0.5)]:
+        v = [float(tp[(tp.label == sc) & (tp.source == m)].rmse_mm.iloc[0]) for m in ORDER]; vals[sc] = dict(zip(ORDER, [round(x, 3) for x in v]))
+        ax.barh(y + off, v, color=[C[KEY[m]] for m in ORDER], height=0.36, alpha=alpha)
+        for yi, x in zip(y, v):
+            ax.text(x + 0.15, yi + off, f"{x:.1f}", va="center", fontsize=5.8)
+    ax.set_yticks(y); ax.set_yticklabels(["SURMA-Flow", "IMERG", "CPC", "CHIRPS", "Prior"], fontsize=6.8); ax.tick_params(axis="y", length=0)
+    ax.set_xlim(0, 11.5); ax.set_xlabel("RMSE (mm/day)"); ax.spines["left"].set_visible(False)
+    ttl(ax, "a", "Mean rainfall error"); ax.set_box_aspect(1)
+    numbers["fig06_product_temporal_rmse"] = vals
+    vals = {}
     for m in ORDER:
         g = stn[stn.source == m]; e = g.long_term_predicted_mm - g.long_term_observed_mm
         vals[m] = (float(np.sqrt((e ** 2).mean())), float(e.mean()), float(np.corrcoef(g.long_term_predicted_mm, g.long_term_observed_mm)[0, 1]))
-    y = np.arange(5)[::-1]
-    ax.barh(y, [vals[m][0] for m in ORDER], color=[C[KEY[m]] for m in ORDER], height=0.62)
-    for yi, m in zip(y, ORDER):
-        ax.text(vals[m][0] + 0.15, yi, f"{vals[m][0]:.1f}", va="center", fontsize=6.8)
-    ax.set_yticks(y); ax.set_yticklabels(["SURMA-Flow", "IMERG", "CPC", "CHIRPS", "Background"], fontsize=6.8); ax.tick_params(axis="y", length=0)
-    ax.set_xlim(0, 10); ax.set_xlabel("RMSE (mm/day)"); ax.spines["left"].set_visible(False)
-    ttl(ax, "a", "Multi-year mean"); ax.set_box_aspect(1)
     numbers["fig06_long_term_station_mean"] = {m: {"rmse": round(v[0], 3), "bias": round(v[1], 3), "r": round(v[2], 3)} for m, v in vals.items()}
     out = {}
     for ax, sc, lim, name, let in [(axes[1], "monthly", 65, "Monthly means", "b"), (axes[2], "may_sep", 38, "Seasonal means", "c")]:
@@ -457,8 +464,8 @@ def fig07():
         ax.set_xticks(x); ax.set_xticklabels([g[2] for g in grp]); ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True)
         ttl(ax, let, name)
     axes[0].legend(frameon=False, fontsize=6.4, loc="upper left", bbox_to_anchor=(-0.02, 1.02), handlelength=1.0, ncol=1); axes[0].set_ylim(0, 12.2)
-    # d: intensity dependence (archive-domain export, 133 sites)
-    ax = axes[3]; it = wide[wide.group == "intensity"]
+    # d: intensity dependence, Bangladesh-only rerun
+    ax = axes[3]; it = evd[evd.group == "intensity"]
     bins = ["[0,1)", "[1,10)", "[10,25)", "[25,50)", "[50,100)", "[100,inf)"]; xl = ["<1", "1–10", "10–25", "25–50", "50–100", "≥100"]
     for m, k in [("background", "background"), (A, "surma")]:
         v = [float(it[(it.label == b) & (it.method == m)].bias.iloc[0]) for b in bins]
@@ -466,7 +473,7 @@ def fig07():
     ax.axhline(0, color=C["ink"], lw=0.6); ax.set_xticks(range(6)); ax.set_xticklabels(xl, fontsize=6, rotation=35, ha="right", rotation_mode="anchor")
     ax.set_xlabel("Observed rain (mm/day)", labelpad=1); ax.yaxis.grid(True, color=C["grid"], lw=0.5)
     ttl(ax, "d", "Bias (mm/day)")
-    numbers["fig07_intensity_archive_domain"] = {b: {m: {c: round(float(it[(it.label == b) & (it.method == m)][c].iloc[0]), 3) for c in ["n", "crps", "mae", "bias", "rmse", "coverage_90"]}
+    numbers["fig07_intensity_bangladesh"] = {b: {m: {c: round(float(it[(it.label == b) & (it.method == m)][c].iloc[0]), 3) for c in ["n", "crps", "mae", "bias", "rmse", "coverage_90"]}
                                                     for m in ["background", A]} for b in bins}
     save(fig, "fig07_calibration_intensity")
 
@@ -488,8 +495,143 @@ def fig08():
     save(fig, "fig08_case")
 
 
+# ================================================================ Product errors by intensity (WG1)
+BINS = ["[0,1)", "[1,10)", "[10,25)", "[25,50)", "[50,100)", "[100,inf)"]
+BINL = ["<1", "1–10", "10–25", "25–50", "50–100", "≥100"]
+
+
+def fig_product_intensity():
+    it = strata[strata.group == "intensity"]
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.35), gridspec_kw={"wspace": 0.36, "left": 0.065, "right": 0.995, "top": 0.86, "bottom": 0.2})
+    out = {}
+    for ax, col, name, let in [(axes[0], "rmse_mm", "RMSE (mm/day)", "a"), (axes[1], "mae_mm", "MAE (mm/day)", "b"), (axes[2], "bias_mm", "Bias (mm/day)", "c")]:
+        for m in ["background", "chirps", "cpc", "imerg", A]:
+            v = [float(it[(it.label == b) & (it.source == m)][col].iloc[0]) for b in BINS]
+            ax.plot(range(6), v, "-o", color=C[KEY[m]], ms=3.2 if m == A else 2.4, lw=1.7 if m == A else 1.0, zorder=5 if m == A else 3,
+                    label={A: "SURMA-Flow", "imerg": "IMERG (0.4°)", "cpc": "CPC", "chirps": "CHIRPS", "background": "Prior"}[m])
+            out.setdefault(col, {})[m] = [round(x, 2) for x in v]
+        if col == "bias_mm":
+            ax.axhline(0, color=C["ink"], lw=0.6)
+        else:
+            ax.set_yscale("log"); ax.set_yticks([5, 10, 20, 50, 100]); ax.set_yticklabels(["5", "10", "20", "50", "100"]); ax.minorticks_off()
+        ax.set_xticks(range(6)); ax.set_xticklabels(BINL, fontsize=6.4); ax.set_xlabel("Observed rain (mm/day)", labelpad=2)
+        ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True); ttl(ax, let, name)
+    h, l = axes[0].get_legend_handles_labels(); order = [4, 3, 2, 1, 0]
+    axes[0].legend([h[k] for k in order], [l[k] for k in order], frameon=False, fontsize=5.8, loc="upper left", handlelength=1.6, borderaxespad=0.1, labelspacing=0.25)
+    out["n"] = [int(it[(it.label == b) & (it.source == A)].n.iloc[0]) for b in BINS]
+    numbers["product_intensity"] = out
+    save(fig, "fig08_product_intensity")
+
+
+# ================================================================ Detailed calibration (P2)
+def fig_calibration_detail():
+    rk = pd.read_csv(EV / "additional/rank_histogram.csv"); cv = pd.read_csv(EV / "additional/coverage_curve.csv"); rl = pd.read_csv(EV / "additional/reliability.csv")
+    fig, axes = plt.subplots(1, 4, figsize=(7.2, 2.2), gridspec_kw={"wspace": 0.42, "left": 0.06, "right": 0.995, "top": 0.84, "bottom": 0.2})
+    ax = axes[0]
+    for m, k in [("background", "background"), (A, "surma")]:
+        g = rk[rk.method == m]; ax.plot(g["rank"], g.fraction, color=C[k], lw=1.4, label="SURMA-Flow" if m == A else "Prior")
+    ax.axhline(1 / 31, color=C["ink"], lw=0.6, ls="--"); ax.set_xlabel("Rank of observation"); ax.set_ylabel("Fraction"); ax.set_ylim(0, 0.17)
+    ax.legend(frameon=False, fontsize=6.4, loc="upper center", handlelength=1.2); ttl(ax, "a", "Rank histogram")
+    ax = axes[1]
+    for m, k in [("background", "background"), (A, "surma")]:
+        g = cv[cv.method == m]; ax.plot(g.nominal, g.empirical, "-o", color=C[k], ms=3, lw=1.4)
+    ax.plot([0.4, 1], [0.4, 1], color=C["ink"], lw=0.6, ls="--"); ax.set_xlim(0.4, 1); ax.set_ylim(0.3, 1); ax.set_xlabel("Nominal coverage"); ax.set_ylabel("Observed coverage")
+    ttl(ax, "b", "Central intervals")
+    for ax, q, let in [(axes[2], 25, "c"), (axes[3], 50, "d")]:
+        for m, k in [("background", "background"), (A, "surma")]:
+            g = rl[(rl.method == m) & (rl.threshold_mm_day == q) & (rl.n >= 20)]; ax.plot(g.mean_probability, g.event_frequency, "-o", color=C[k], ms=2.6, lw=1.3)
+        ax.plot([0, 1], [0, 1], color=C["ink"], lw=0.6, ls="--"); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_xlabel("Forecast probability"); ax.set_ylabel("Observed frequency", labelpad=1)
+        ttl(ax, let, f"Reliability, ≥{q} mm/day")
+    for ax in axes:
+        ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True)
+    g = rk[rk.method == A]; b = rk[rk.method == "background"]
+    numbers["rank_histogram_ends"] = {"analysis": [round(float(g.fraction.iloc[0]), 3), round(float(g.fraction.iloc[-1]), 3)], "background": [round(float(b.fraction.iloc[0]), 3), round(float(b.fraction.iloc[-1]), 3)]}
+    numbers["coverage_curve"] = {m: dict(zip(cv[cv.method == m].nominal.round(2).astype(str), cv[cv.method == m].empirical.round(3))) for m in ["background", A]}
+    save(fig, "fig09_calibration_detail")
+
+
+# ================================================================ Network geometry (P1) and training history (P6)
+def fig_network():
+    fig = plt.figure(figsize=(7.2, 2.5)); gs = fig.add_gridspec(1, 4, wspace=0.03, left=0.005, right=0.995, top=0.88, bottom=0.1)
+    out = {}
+    for i, (k, yr) in enumerate([("2021_may_sep", "May–Sep 2021"), ("2022_may_sep", "May–Sep 2022"), ("2023_may_sep", "May–Sep 2023"), ("2024_may_jun", "May–Jun 2024")]):
+        ax = fig.add_subplot(gs[0, i]); bd_map(ax); g = net[net.period == k]; r = g[g.role == "retained"]; w = g[g.role == "withheld"]
+        ax.scatter(r.lon, r.lat, s=3, c=C["muted"], lw=0, zorder=6, label="retained (assimilated)"); ax.scatter(w.lon, w.lat, s=9, c=C["surma"], ec="white", lw=0.3, zorder=7, label="withheld (verification)")
+        ttl(ax, "abcd"[i], yr)
+        ax.text(0.5, -0.02, f"{len(r)} retained · {len(w)} withheld", transform=ax.transAxes, ha="center", va="top", fontsize=7)
+        out[k] = {"retained": int(len(r)), "withheld": int(len(w)), "median_km": round(float(w.nearest_retained_km.median()), 1), "max_km": round(float(w.nearest_retained_km.max()), 1)}
+        if i == 0:
+            ax.legend(frameon=False, fontsize=6, loc="lower left", bbox_to_anchor=(-0.02, -0.02), handletextpad=0.1, markerscale=1.4)
+    numbers["network"] = out
+    save(fig, "fig10_network")
+
+
+def fig_training():
+    t = pd.read_csv(EV / "additional/training_curve.csv")
+    fig, ax = plt.subplots(figsize=(3.3, 1.9)); fig.subplots_adjust(left=0.15, right=0.98, top=0.86, bottom=0.22)
+    ax.plot(t.epoch, t.validation_crps_mm, "-o", color=C["navy"] if "navy" in C else C["cpc"], ms=2.6, lw=1.2)
+    k = int(t.index[t.epoch == 95][0])
+    ax.scatter([t.epoch[k]], [t.validation_crps_mm[k]], s=28, fc="none", ec=C["accent"], lw=1.0, zorder=5)
+    ax.set_xlabel("Epoch"); ax.set_ylabel("Validation fair CRPS (mm/day)"); ax.yaxis.grid(True, color=C["grid"], lw=0.5)
+    numbers["training_curve"] = {"selected_epoch": int(t.epoch[k]), "selected_crps": round(float(t.validation_crps_mm[k]), 3), "last_epoch": int(t.epoch.iloc[-1]),
+                                 "range_after_25": [round(float(t[t.epoch >= 25].validation_crps_mm.min()), 2), round(float(t[t.epoch >= 25].validation_crps_mm.max()), 2)]}
+    save(fig, "fig11_training")
+
+
+# ================================================================ SURMA-Flow ensemble vs gauge interpolation
+def fig_idw():
+    """Probabilistic comparison with inverse-distance interpolation of the retained gauges.
+
+    IDW is single-valued, so its CRPS equals its MAE and its exceedance probability is 0 or 1.
+    """
+    d = pd.read_csv(EV / "additional/interpolation_station_days.csv")
+    y = d.truth_mm.values; idw = d.idw_mm.values
+    it = evd[(evd.group == "intensity") & (evd.method == A)].set_index("label")
+    iw = pd.read_csv(EV / "additional/idw_intensity_scores.csv"); iw = iw[iw.method != A].set_index("intensity")
+    th = pd.read_csv(EV / "additional/threshold_scores.csv"); th = th[th.method == A].set_index("threshold_mm_day")
+    pooled_crps = float(evd[(evd.group == "pooled") & (evd.method == A)].crps.iloc[0]); idw_mae = float(np.abs(idw - y).mean())
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.35), gridspec_kw={"wspace": 0.38, "left": 0.065, "right": 0.995, "top": 0.86, "bottom": 0.2})
+    x = np.arange(7); wd = 0.38
+    a = [pooled_crps] + [float(it.loc[b, "crps"]) for b in BINS]; b_ = [idw_mae] + [float(iw.loc[b, "mae"]) for b in BINS]
+    ax = axes[0]; ax.bar(x - wd / 2, b_, wd, color="#C9CED6", label="Gauge interpolation"); ax.bar(x + wd / 2, a, wd, color=C["surma"], label="SURMA-Flow")
+    for i in range(7):
+        ax.text(x[i] + wd / 2, a[i] * 1.12, f"−{100 * (1 - a[i] / b_[i]):.0f}%", ha="center", fontsize=5.6, color=C["surma"], fontweight="bold")
+    ax.set_yscale("log"); ax.set_yticks([2, 5, 10, 20, 50]); ax.set_yticklabels(["2", "5", "10", "20", "50"]); ax.minorticks_off(); ax.set_ylim(1.3, 140)
+    ax.axvline(0.5, color=C["grid"], lw=0.8); ax.set_xticks(x); ax.set_xticklabels(["All"] + BINL, fontsize=5.3); ax.set_xlabel("Observed rain (mm/day)", labelpad=2)
+    ax.legend(frameon=False, fontsize=6.2, loc="upper left", handlelength=1.0, borderaxespad=0.1); ttl(ax, "a", "CRPS (mm/day)")
+    ax = axes[1]; qs = [1, 10, 25, 50, 100]
+    bi = [float(np.mean(((idw >= q).astype(float) - (y >= q)) ** 2)) for q in qs]; bs = [float(th.loc[q, "brier"]) for q in qs]
+    xx = np.arange(5); ax.bar(xx - wd / 2, bi, wd, color="#C9CED6"); ax.bar(xx + wd / 2, bs, wd, color=C["surma"])
+    for i in range(5):
+        ax.text(xx[i] + wd / 2, bs[i] * 1.12, f"−{100 * (1 - bs[i] / bi[i]):.0f}%", ha="center", fontsize=5.6, color=C["surma"], fontweight="bold")
+    ax.set_yscale("log"); ax.set_yticks([0.01, 0.03, 0.1, 0.3]); ax.set_yticklabels(["0.01", "0.03", "0.1", "0.3"]); ax.minorticks_off(); ax.set_ylim(0.007, 0.8)
+    ax.set_xticks(xx); ax.set_xticklabels([f"≥{q}" for q in qs], fontsize=6.4); ax.set_xlabel("Rain event (mm/day)", labelpad=2); ttl(ax, "b", "Brier score")
+    d["month"] = d.date.str[:7]
+    m = d.groupby(["station_id", "month"]).agg(t=("truth_mm", "mean"), i=("idw_mm", "mean"), a=("analysis_mean_mm", "mean"), n=("truth_mm", "size")).reset_index()
+    cal = pd.to_datetime(m.month + "-01").dt.days_in_month; m = m[m.n >= 0.8 * cal]
+    ax = axes[2]; lim = 65
+    ax.scatter(m.t, m.i, s=4, color="#9AA3B2", alpha=0.6, lw=0, rasterized=True); ax.scatter(m.t, m.a, s=4, color=C["surma"], alpha=0.6, lw=0, rasterized=True)
+    ax.plot([0, lim], [0, lim], color=C["ink"], lw=0.6, ls="--"); ax.set_xlim(0, lim); ax.set_ylim(0, lim); ax.set_aspect("equal")
+    ri = float(np.sqrt(((m.i - m.t) ** 2).mean())); ra = float(np.sqrt(((m.a - m.t) ** 2).mean()))
+    ax.text(0.04, 0.95, f"RMSE {ri:.2f}", transform=ax.transAxes, fontsize=6.4, color="#6B7785", va="top")
+    ax.text(0.04, 0.86, f"RMSE {ra:.2f}", transform=ax.transAxes, fontsize=6.4, color=C["surma"], va="top", fontweight="bold")
+    ax.set_xlabel("Gauge monthly mean (mm/day)", labelpad=2); ax.set_ylabel("Estimate (mm/day)", labelpad=1); ttl(ax, "c", "Monthly means")
+    for ax in axes[:2]:
+        ax.yaxis.grid(True, color=C["grid"], lw=0.5); ax.set_axisbelow(True)
+    g = net[net.role == "withheld"][["period", "station_id", "nearest_retained_km"]]; dd = d.merge(g, on=["period", "station_id"])
+    dist = {}
+    for lab, lo, hi in [("<6", 0, 6), ("6-9", 6, 9), ("9-12", 9, 12), ("12-14", 12, 14), (">14", 14, 99)]:
+        q = dd[(dd.nearest_retained_km > lo if lo else dd.nearest_retained_km >= 0) & (dd.nearest_retained_km <= hi)]
+        dist[lab] = {"gauges": int(q.station_id.nunique()), "n": int(len(q)), "rmse_idw": round(float(np.sqrt(((q.idw_mm - q.truth_mm) ** 2).mean())), 2),
+                     "rmse_surma": round(float(np.sqrt(((q.analysis_mean_mm - q.truth_mm) ** 2).mean())), 2)}
+    numbers["idw_comparison"] = {"crps_surma": [round(v, 3) for v in a], "crps_idw": [round(v, 3) for v in b_], "brier_surma": [round(v, 4) for v in bs], "brier_idw": [round(v, 4) for v in bi],
+                                 "monthly_n": int(len(m)), "monthly_rmse_idw": round(ri, 3), "monthly_rmse_surma": round(ra, 3),
+                                 "monthly_bias_idw": round(float((m.i - m.t).mean()), 3), "rmse_by_distance_km": dist}
+    save(fig, "fig12_idw_probabilistic")
+
+
 if __name__ == "__main__":
-    for f in (fig01, fig02, fig03, fig04, fig05, fig06, fig07, fig08):
+    for f in (fig01, fig02, fig03, fig04, fig05, fig06, fig07, fig08, fig_product_intensity, fig_calibration_detail, fig_network, fig_training, fig_idw):
         f()
     # headline numbers used in the text
     p = prod; s = p.loc[A]
@@ -499,7 +641,7 @@ if __name__ == "__main__":
                          "bias": round(float(p.loc[k, "pooled_daily_bias_mm"]), 3),
                          "rmse_reduction_pct": round(100 * (1 - float(s.pooled_daily_rmse_mm) / float(p.loc[k, "pooled_daily_rmse_mm"])), 1),
                          "mae_reduction_pct": round(100 * (1 - float(s.pooled_daily_mae_mm) / float(p.loc[k, "pooled_daily_mae_mm"])), 1)} for k in p.index},
-        "archive_domain_pooled_r": {k: round(float(wprod.loc[k, "pooled_daily_correlation"]), 3) for k in wprod.index},
+        "pooled_r": {r.source: round(float(r.correlation), 3) for r in strata[strata.group == "pooled"].itertuples()},
         "median_station_r": {k: round(float(v), 3) for k, v in stn.pivot(index="station_id", columns="source", values="correlation").median().items()},
     }
     (OUT / "restructured_numbers.json").write_text(json.dumps(numbers, indent=1, default=str))
