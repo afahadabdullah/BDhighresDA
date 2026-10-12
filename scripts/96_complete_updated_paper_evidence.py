@@ -262,12 +262,36 @@ def collect_predictions(data, scopes, root, periods, profile, country, cpc_overr
             with xr.open_dataset(path) as dataset:
                 validate_native_metadata(dataset.attrs)
         native = module(81).load_native_imerg(native_paths,archive["time"])
+        native["time"] = archive["time"].copy()
         predictions["imerg_native"] = np.full(len(data["truth"]),np.nan)
         for i,day in enumerate(archive["time"]):
             choose = data["date"] == day
             predictions["imerg_native"][choose] = sample_field(native["values"][i],native["lat"],native["lon"],
                                                               data["station_lat"][choose],data["station_lon"][choose])
     return predictions, same_day[1], native
+
+
+def export_native_grids(out, native, case_date):
+    """Compact native-cell maps; complete, non-selection May--September years only."""
+    times = np.asarray(native["time"]).astype("datetime64[D]")
+    years = []
+    for year in np.unique(times.astype("datetime64[Y]").astype(str)):
+        calendar = np.arange(f"{year}-05-01", f"{year}-10-01", dtype="datetime64[D]")
+        if year != "2022" and np.all(np.isin(calendar, times)):
+            years.append(int(year))
+    arrays = {"lat": native["lat"], "lon": native["lon"],
+              "seasonal_year": np.asarray(years, int)}
+    if years:
+        means = [np.nanmean(native["values"][np.isin(times, np.arange(
+            f"{year}-05-01", f"{year}-10-01", dtype="datetime64[D]"))], axis=0)
+                 for year in years]
+        arrays["seasonal_mean"] = np.nanmean(means, axis=0)
+    wanted = np.datetime64(case_date, "D")
+    positions = np.flatnonzero(times == wanted)
+    if len(positions):
+        arrays["case_date"] = np.asarray(str(wanted))
+        arrays["case_mm"] = native["values"][positions[0]]
+    np.savez_compressed(out / "native_imerg_grids.npz", **arrays)
 
 
 def overlap_audit(stations, config_path):
@@ -445,6 +469,7 @@ def parse_args(argv=None):
     p.add_argument("--out-dir",type=Path,default=ROOT/"output/paper1_updated_evidence")
     p.add_argument("--cpc-source-zarr",type=Path)
     p.add_argument("--native-imerg",type=Path,nargs="+",help="prepared 0.1-deg BMD 03 UTC window NetCDFs covering all archive days")
+    p.add_argument("--native-case-date", default="2024-05-29", help="native map date matching the existing paper case")
     p.add_argument("--upstream-inventories",type=Path,help="dated provider-station CSV inventory JSON; see documentation")
     p.add_argument("--history",type=Path,default=ROOT/"runs/prior_h100_cpc_v2/validation/history.jsonl")
     p.add_argument("--selection",type=Path)
@@ -566,10 +591,17 @@ def main(argv=None):
             manifest["same_day_cpc_source"] = str(cpc_path)
             if native is not None:
                 native_data,native_values,native_counts = matched_samples(data,predictions,profile)
-                native_rows,_,_ = product_rows(native_data,native_values,profile,native_counts,dates)
-                native_rows = [r for r in native_rows if r["group"] in ("pooled","network","year")]
+                native_rows,native_stations,native_temporal = product_rows(native_data,native_values,profile,native_counts,dates)
                 write_csv(stage/"native_imerg_comparison.csv",native_rows)
-                native_paired = paired_intervals(native_data,{s:native_values[s] for s in (FINAL,"imerg","imerg_native")},args.block_days,args.bootstrap,args.seed)
+                for row in native_stations:
+                    pos = np.flatnonzero(native_data["station"] == row["station_id"])[0]
+                    row.update(lat=float(native_data["station_lat"][pos]),
+                               lon=float(native_data["station_lon"][pos]))
+                write_csv(stage/"native_imerg_station_scores.csv",native_stations)
+                if native_temporal:
+                    write_csv(stage/"native_imerg_temporal_samples.csv",native_temporal)
+                export_native_grids(stage,native,args.native_case_date)
+                native_paired = paired_intervals(native_data,native_values,args.block_days,args.bootstrap,args.seed)
                 write_csv(stage/"native_imerg_paired.csv",native_paired)
                 module(92).table(stage/"tab_native_imerg.tex",["Estimate","n","RMSE","MAE","Bias","r"],
                                  [[LABELS[r["source"]],r["n"],*["unavailable" if r[k] is None else f'{r[k]:.3f}' for k in ("rmse_mm","mae_mm","bias_mm","correlation")]] for r in native_rows if r["group"]=="pooled"],
