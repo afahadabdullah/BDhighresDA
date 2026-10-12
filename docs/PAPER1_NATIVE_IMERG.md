@@ -75,6 +75,7 @@ srun --partition=grace-cpuonly \
   scripts/110_build_native_imerg_paper_figures.py \
   --evidence output/paper1_native_imerg \
   --gridded output/paper1_native_imerg/evaluation/superob-final/gridded \
+  --native-imerg-list output/native_imerg_files.txt \
   --out-dir manuscript/figures_native_imerg
 ```
 
@@ -108,8 +109,14 @@ checks current-run output hashes, native grid spacing, boundary identity,
 seasonal years and case date. It draws IMERG on its own 0.1-degree grid;
 it does not interpolate the 0.4-degree field to make a native-looking map.
 Seasonal maps use complete non-selection May–September seasons (2021 and
-2023). The case defaults to 29 May 2024; `--native-case-date` in script 96
-must match the existing case CSV if that selection changes.
+2023). The actual date in the existing case CSV is authoritative. If it
+differs from script 96's cached case (default 29 May 2024), script 110 reloads
+only that day's field from the original native IMERG files and verifies its
+source hash, timing metadata and grid. This does not rescore gauges or rerun
+bootstrap calculations. Use `--native-imerg-list output/native_imerg_files.txt`
+to remap source paths when needed; file contents must match the scored input
+hashes. The copied case CSV is dated 1 July 2021, despite script 95's old
+hardcoded 29 May 2024 caption. New case titles and provenance use the CSV date.
 
 `native_comparison_numbers.json` and `native_figure_manifest.json` record
 new scores, counts, map means, hashes and the distinction between comparison

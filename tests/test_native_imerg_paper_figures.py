@@ -22,6 +22,51 @@ renderer = load_script("native_renderer", "110_*.py")
 
 
 class NativePaperTests(unittest.TestCase):
+    def native_case_fixture(self, folder):
+        import xarray as xr
+        path = Path(folder) / "imerg_july.nc"
+        lat, lon = np.array([23., 23.1]), np.array([90., 90.1])
+        fields = np.array([[[1., 2.], [3., 4.]], [[11., 12.], [13., 14.]]])
+        dataset = xr.Dataset({"precipitation": (("time", "lat", "lon"), fields)},
+                             coords={"time": np.array(["2021-07-01", "2021-07-02"], dtype="datetime64[ns]"),
+                                     "lat": lat, "lon": lon},
+                             attrs={"version": "V07B", "source_frequency": "half-hourly",
+                                    "bmd_accumulation_end_hour_utc": 3, "window_duration_hours": 24})
+        dataset.precipitation.attrs["units"] = "mm/day"
+        dataset.to_netcdf(path, engine="scipy")
+        native = {"lat": lat, "lon": lon, "case_date": np.asarray("2024-05-29"),
+                  "case_mm": np.full((2, 2), 999.), "seasonal_mean": np.full((2, 2), 15.)}
+        manifest = {"native_imerg_sources": [{"path": str(path), "sha256": renderer.digest(path)}]}
+        return path, native, manifest, fields
+
+    def test_actual_csv_date_loads_verified_native_field_without_rescoring(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, native, manifest, fields = self.native_case_fixture(folder)
+            manifest["native_imerg_sources"][0]["path"] = "/unavailable/original/path.nc"
+            actual, provenance = renderer.match_native_case(native, ["2021-07-02"], manifest, [path])
+            self.assertEqual(str(actual["case_date"]), "2021-07-02")
+            np.testing.assert_array_equal(actual["case_mm"], fields[1])
+            np.testing.assert_array_equal(actual["seasonal_mean"], native["seasonal_mean"])
+            np.testing.assert_array_equal(native["case_mm"], np.full((2, 2), 999.))
+            self.assertEqual(provenance["sha256"], renderer.digest(path))
+
+    def test_case_reload_rejects_unverified_source_or_unavailable_date(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, native, manifest, _ = self.native_case_fixture(folder)
+            manifest["native_imerg_sources"][0]["sha256"] = "wrong hash"
+            with self.assertRaisesRegex(ValueError, "source hashes"):
+                renderer.match_native_case(native, ["2021-07-01"], manifest, [path])
+            with self.assertRaisesRegex(ValueError, "found 0"):
+                renderer.match_native_case(native, ["2021-07-03"], manifest, [path])
+            with self.assertRaisesRegex(ValueError, "exactly one date"):
+                renderer.match_native_case(native, ["2021-07-01", "2021-07-02"], manifest, [path])
+
+    def test_matching_cached_case_does_not_need_original_sources(self):
+        native = {"case_date": np.asarray("2021-07-01"), "case_mm": np.ones((2, 2))}
+        actual, provenance = renderer.match_native_case(native, ["2021-07-01"], {})
+        self.assertIs(actual, native)
+        self.assertEqual(provenance["source"], "native_imerg_grids.npz")
+
     def test_seasonal_export_excludes_selection_and_incomplete_years(self):
         dates = np.concatenate([np.arange(f"{year}-05-01", f"{year}-10-01", dtype="datetime64[D]")
                                 for year in (2021, 2022, 2023)] +

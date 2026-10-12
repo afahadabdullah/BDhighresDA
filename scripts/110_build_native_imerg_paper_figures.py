@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -69,6 +70,49 @@ def country_path(boundary):
     return MPath(np.asarray(verts), codes)
 
 
+def match_native_case(native, case_days, manifest, native_paths=None):
+    """Use the CSV's actual day; reload only that field from a verified scored source."""
+    if len(case_days) != 1:
+        raise ValueError("existing case CSV must contain exactly one date")
+    day = np.datetime64(str(case_days[0])[:10], "D")
+    if str(native.get("case_date", "")) == str(day) and "case_mm" in native:
+        return native, {"date": str(day), "source": "native_imerg_grids.npz"}
+
+    import xarray as xr
+
+    sources = manifest["native_imerg_sources"]
+    paths = native_paths if native_paths is not None else [Path(r["path"]) for r in sources]
+    trusted_hashes = {r["sha256"] for r in sources}
+    matches = []
+    for path in dict.fromkeys(paths):
+        if not path.is_file():
+            continue
+        with xr.open_dataset(path) as dataset:
+            times = np.asarray(dataset.time.values).astype("datetime64[D]")
+            if np.any(times == day):
+                matches.append(path)
+    if len(matches) != 1:
+        raise ValueError(f"case {day} needs exactly one original native IMERG file; found {len(matches)}. "
+                         "Use --native-imerg-list to remap the files used by script 96.")
+    path = matches[0]
+    identity = digest(path)
+    if identity not in trusted_hashes:
+        raise ValueError(f"{path}: native case source differs from the scored IMERG source hashes")
+    spec = importlib.util.spec_from_file_location("_native_case_evidence", ROOT / "scripts/96_complete_updated_paper_evidence.py")
+    evidence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evidence)
+    with xr.open_dataset(path) as dataset:
+        evidence.validate_native_metadata(dataset.attrs)
+    loaded = evidence.module(81).load_native_imerg([path], np.asarray([day]))
+    for coord in ("lat", "lon"):
+        if (np.shape(loaded[coord]) != np.shape(native[coord]) or
+                not np.allclose(loaded[coord], native[coord], rtol=0, atol=1e-5)):
+            raise ValueError("native case grid differs from the scored native grid")
+    result = {**native, "case_date": np.asarray(str(day)), "case_mm": loaded["values"][0]}
+    print(f"[native-paper] loaded actual case {day} from verified native source {path}")
+    return result, {"date": str(day), "source": str(path), "sha256": identity}
+
+
 def map_field(ax, border, field=None, lat=None, lon=None, vmax=30):
     mesh = None
     if field is not None:
@@ -101,8 +145,10 @@ def build(args):
     case_path = args.gridded / "data/fig05_subgrid_case_fields.csv"
     case = pd.read_csv(case_path)
     case_days = case.date.unique()
-    if len(case_days) != 1 or str(native.get("case_date", "")) != str(case_days[0])[:10]:
-        raise ValueError("native case date differs from the existing map; rerun script 96 with --native-case-date")
+    native_paths = None
+    if args.native_imerg_list:
+        native_paths = [Path(line.strip()) for line in args.native_imerg_list.read_text().splitlines() if line.strip()]
+    native, case_provenance = match_native_case(native, case_days, evidence_manifest, native_paths)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.family": "sans-serif", "font.size": 8,
                          "axes.titlesize": 8, "axes.labelsize": 8, "xtick.labelsize": 7,
@@ -217,11 +263,15 @@ def build(args):
     numbers["comparison_counts"] = evidence_manifest["native_comparison_counts"]
     numbers["imerg_comparison_degrees"] = .1
     numbers["imerg_assimilation_degrees"] = .4
+    numbers["case_date"] = case_provenance["date"]
     (args.out_dir / "native_comparison_numbers.json").write_text(json.dumps(numbers, indent=2, allow_nan=False))
     inputs = [args.evidence / "evidence_manifest.json", args.evidence / "native_imerg_comparison.csv",
               args.evidence / "native_imerg_station_scores.csv", args.evidence / "native_imerg_grids.npz",
               grid_path, case_path, args.boundary]
+    if "sha256" in case_provenance:
+        inputs.append(Path(case_provenance["source"]))
     manifest = {"inputs": [{"path": str(p), "sha256": digest(p)} for p in inputs], "outputs": generated,
+                "case": case_provenance,
                 "comparison_counts": numbers["comparison_counts"],
                 "note": "0.1-degree IMERG product comparisons; assimilation remains 0.4 degrees. Update manuscript claims using the new scores. Yearly and temporal figures are separate replacements for the corresponding product panels."}
     (args.out_dir / "native_figure_manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -231,12 +281,13 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--evidence", type=Path, required=True, help="script-96 output containing current native exports")
     p.add_argument("--gridded", type=Path, required=True, help="existing Bangladesh paper gridded exports")
+    p.add_argument("--native-imerg-list", type=Path, help="optional source-path remapping for the actual case date; contents must match scored source hashes")
     p.add_argument("--boundary", type=Path, default=ROOT / "configs/geography/geoBoundaries-BGD-ADM0.geojson")
     p.add_argument("--out-dir", type=Path, default=ROOT / "manuscript/figures_native_imerg")
     args = p.parse_args(argv)
     try:
         build(args)
-    except (ValueError, KeyError, FileNotFoundError) as error:
+    except (ValueError, KeyError, OSError) as error:
         print(f"[native-paper] {error}", file=sys.stderr)
         return 1
     return 0
